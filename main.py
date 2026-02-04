@@ -44,6 +44,9 @@ _zospy_lock = asyncio.Lock()
 # API key for authentication (optional but recommended)
 ZEMAX_API_KEY = os.getenv("ZEMAX_API_KEY", None)
 
+# Error message constant
+NOT_CONNECTED_ERROR = "OpticStudio not connected"
+
 
 def _init_zospy() -> Optional[ZosPyHandler]:
     """Initialize ZosPy connection with error handling."""
@@ -72,6 +75,35 @@ def _reconnect_zospy() -> Optional[ZosPyHandler]:
     return zospy_handler
 
 
+def _ensure_connected() -> Optional[ZosPyHandler]:
+    """
+    Ensure ZosPy is connected, attempting reconnection if needed.
+
+    Returns:
+        ZosPyHandler if connected, None if connection failed.
+    """
+    global zospy_handler
+    if zospy_handler is None:
+        zospy_handler = _reconnect_zospy()
+    return zospy_handler
+
+
+def _handle_zospy_error(operation_name: str, error: Exception) -> None:
+    """
+    Handle ZosPy errors by logging and attempting reconnection.
+
+    Args:
+        operation_name: Name of the operation that failed (for logging)
+        error: The exception that was raised
+    """
+    global zospy_handler
+    if isinstance(error, ZosPyError):
+        logger.error(f"{operation_name} failed: {error}")
+        zospy_handler = _reconnect_zospy()
+    else:
+        logger.error(f"{operation_name} unexpected error: {error}")
+
+
 async def verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
     """Verify API key if configured."""
     if ZEMAX_API_KEY is not None:
@@ -85,11 +117,10 @@ async def lifespan(app: FastAPI):
     global zospy_handler
 
     # Startup: Initialize ZosPy connection
-    print("Starting Zemax Worker - Connecting to OpticStudio...")
+    logger.info("Starting Zemax Worker - Connecting to OpticStudio...")
     zospy_handler = _init_zospy()
     if zospy_handler is None:
-        print("Warning: OpticStudio not available at startup.")
-        print("Will attempt to connect on first request.")
+        logger.warning("OpticStudio not available at startup. Will attempt to connect on first request.")
 
     yield
 
@@ -99,7 +130,7 @@ async def lifespan(app: FastAPI):
             zospy_handler.close()
         except Exception as e:
             logger.warning(f"Error closing ZosPy connection: {e}")
-    print("Zemax Worker stopped.")
+    logger.info("Zemax Worker stopped.")
 
 
 app = FastAPI(
@@ -243,20 +274,10 @@ async def health_check() -> HealthResponse:
 
 @app.post("/load-system", response_model=LoadSystemResponse)
 async def load_system(request: SystemRequest, _: None = Depends(verify_api_key)) -> LoadSystemResponse:
-    """
-    Load an optical system into OpticStudio.
-    """
-    global zospy_handler
-
+    """Load an optical system into OpticStudio."""
     async with _zospy_lock:
-        # Try to connect if not connected
-        if zospy_handler is None:
-            zospy_handler = _reconnect_zospy()
-            if zospy_handler is None:
-                return LoadSystemResponse(
-                    success=False,
-                    error="OpticStudio not connected",
-                )
+        if _ensure_connected() is None:
+            return LoadSystemResponse(success=False, error=NOT_CONNECTED_ERROR)
 
         try:
             result = zospy_handler.load_system(request.system)
@@ -265,32 +286,17 @@ async def load_system(request: SystemRequest, _: None = Depends(verify_api_key))
                 num_surfaces=result.get("num_surfaces"),
                 efl=result.get("efl"),
             )
-        except ZosPyError as e:
-            logger.error(f"Load system failed: {e}")
-            # Attempt reconnect on failure
-            zospy_handler = _reconnect_zospy()
-            return LoadSystemResponse(success=False, error=str(e))
         except Exception as e:
-            logger.error(f"Load system unexpected error: {e}")
+            _handle_zospy_error("Load system", e)
             return LoadSystemResponse(success=False, error=str(e))
 
 
 @app.post("/cross-section", response_model=CrossSectionResponse)
 async def get_cross_section(request: SystemRequest, _: None = Depends(verify_api_key)) -> CrossSectionResponse:
-    """
-    Generate cross-section diagram using ZosPy's CrossSection analysis.
-    """
-    global zospy_handler
-
+    """Generate cross-section diagram using ZosPy's CrossSection analysis."""
     async with _zospy_lock:
-        # Try to connect if not connected
-        if zospy_handler is None:
-            zospy_handler = _reconnect_zospy()
-            if zospy_handler is None:
-                return CrossSectionResponse(
-                    success=False,
-                    error="OpticStudio not connected",
-                )
+        if _ensure_connected() is None:
+            return CrossSectionResponse(success=False, error=NOT_CONNECTED_ERROR)
 
         try:
             result = zospy_handler.get_cross_section(request.system)
@@ -303,32 +309,17 @@ async def get_cross_section(request: SystemRequest, _: None = Depends(verify_api
                 rays_total=result.get("rays_total"),
                 rays_through=result.get("rays_through"),
             )
-        except ZosPyError as e:
-            logger.error(f"Cross-section failed: {e}")
-            # Attempt reconnect on failure
-            zospy_handler = _reconnect_zospy()
-            return CrossSectionResponse(success=False, error=str(e))
         except Exception as e:
-            logger.error(f"Cross-section unexpected error: {e}")
+            _handle_zospy_error("Cross-section", e)
             return CrossSectionResponse(success=False, error=str(e))
 
 
 @app.post("/calc-semi-diameters", response_model=SemiDiametersResponse)
 async def calc_semi_diameters(request: SystemRequest, _: None = Depends(verify_api_key)) -> SemiDiametersResponse:
-    """
-    Calculate semi-diameters by tracing edge rays.
-    """
-    global zospy_handler
-
+    """Calculate semi-diameters by tracing edge rays."""
     async with _zospy_lock:
-        # Try to connect if not connected
-        if zospy_handler is None:
-            zospy_handler = _reconnect_zospy()
-            if zospy_handler is None:
-                return SemiDiametersResponse(
-                    success=False,
-                    error="OpticStudio not connected",
-                )
+        if _ensure_connected() is None:
+            return SemiDiametersResponse(success=False, error=NOT_CONNECTED_ERROR)
 
         try:
             result = zospy_handler.calc_semi_diameters(request.system)
@@ -336,12 +327,8 @@ async def calc_semi_diameters(request: SystemRequest, _: None = Depends(verify_a
                 success=True,
                 semi_diameters=result.get("semi_diameters", []),
             )
-        except ZosPyError as e:
-            logger.error(f"Calc semi-diameters failed: {e}")
-            zospy_handler = _reconnect_zospy()
-            return SemiDiametersResponse(success=False, error=str(e))
         except Exception as e:
-            logger.error(f"Calc semi-diameters unexpected error: {e}")
+            _handle_zospy_error("Calc semi-diameters", e)
             return SemiDiametersResponse(success=False, error=str(e))
 
 
@@ -350,20 +337,10 @@ async def ray_trace_diagnostic(
     request: RayTraceDiagnosticRequest,
     _: None = Depends(verify_api_key),
 ) -> RayTraceDiagnosticResponse:
-    """
-    Run ray trace diagnostic using ZosPy's SingleRayTrace analysis.
-    """
-    global zospy_handler
-
+    """Run ray trace diagnostic using ZosPy's SingleRayTrace analysis."""
     async with _zospy_lock:
-        # Try to connect if not connected
-        if zospy_handler is None:
-            zospy_handler = _reconnect_zospy()
-            if zospy_handler is None:
-                return RayTraceDiagnosticResponse(
-                    success=False,
-                    error="OpticStudio not connected",
-                )
+        if _ensure_connected() is None:
+            return RayTraceDiagnosticResponse(success=False, error=NOT_CONNECTED_ERROR)
 
         try:
             result = zospy_handler.ray_trace_diagnostic(
@@ -380,31 +357,17 @@ async def ray_trace_diagnostic(
                 aggregate_surface_failures=result.get("aggregate_surface_failures"),
                 hotspots=result.get("hotspots"),
             )
-        except ZosPyError as e:
-            logger.error(f"Ray trace diagnostic failed: {e}")
-            zospy_handler = _reconnect_zospy()
-            return RayTraceDiagnosticResponse(success=False, error=str(e))
         except Exception as e:
-            logger.error(f"Ray trace diagnostic unexpected error: {e}")
+            _handle_zospy_error("Ray trace diagnostic", e)
             return RayTraceDiagnosticResponse(success=False, error=str(e))
 
 
 @app.post("/seidel", response_model=SeidelResponse)
 async def get_seidel(request: SystemRequest, _: None = Depends(verify_api_key)) -> SeidelResponse:
-    """
-    Get Seidel aberrations via ZosPy's Zernike analysis with conversion.
-    """
-    global zospy_handler
-
+    """Get Seidel aberrations via ZosPy's Zernike analysis with conversion."""
     async with _zospy_lock:
-        # Try to connect if not connected
-        if zospy_handler is None:
-            zospy_handler = _reconnect_zospy()
-            if zospy_handler is None:
-                return SeidelResponse(
-                    success=False,
-                    error="OpticStudio not connected",
-                )
+        if _ensure_connected() is None:
+            return SeidelResponse(success=False, error=NOT_CONNECTED_ERROR)
 
         try:
             result = zospy_handler.get_seidel(request.system)
@@ -415,12 +378,8 @@ async def get_seidel(request: SystemRequest, _: None = Depends(verify_api_key)) 
                 chromatic=result.get("chromatic"),
                 num_surfaces=result.get("num_surfaces", 0),
             )
-        except ZosPyError as e:
-            logger.error(f"Seidel failed: {e}")
-            zospy_handler = _reconnect_zospy()
-            return SeidelResponse(success=False, error=str(e))
         except Exception as e:
-            logger.error(f"Seidel unexpected error: {e}")
+            _handle_zospy_error("Seidel", e)
             return SeidelResponse(success=False, error=str(e))
 
 
@@ -430,20 +389,10 @@ async def trace_rays(
     num_rays: int = 7,
     _: None = Depends(verify_api_key),
 ) -> TraceRaysResponse:
-    """
-    Trace rays through the system and return positions at each surface.
-    """
-    global zospy_handler
-
+    """Trace rays through the system and return positions at each surface."""
     async with _zospy_lock:
-        # Try to connect if not connected
-        if zospy_handler is None:
-            zospy_handler = _reconnect_zospy()
-            if zospy_handler is None:
-                return TraceRaysResponse(
-                    success=False,
-                    error="OpticStudio not connected",
-                )
+        if _ensure_connected() is None:
+            return TraceRaysResponse(success=False, error=NOT_CONNECTED_ERROR)
 
         try:
             result = zospy_handler.trace_rays(request.system, num_rays=num_rays)
@@ -454,12 +403,8 @@ async def trace_rays(
                 num_wavelengths=result.get("num_wavelengths"),
                 data=result.get("data"),
             )
-        except ZosPyError as e:
-            logger.error(f"Trace rays failed: {e}")
-            zospy_handler = _reconnect_zospy()
-            return TraceRaysResponse(success=False, error=str(e))
         except Exception as e:
-            logger.error(f"Trace rays unexpected error: {e}")
+            _handle_zospy_error("Trace rays", e)
             return TraceRaysResponse(success=False, error=str(e))
 
 

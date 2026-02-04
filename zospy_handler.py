@@ -12,7 +12,11 @@ because ZosPy/COM requires single-threaded apartment (STA) semantics.
 
 import base64
 import io
+import logging
 from typing import Any, Optional
+
+# Configure module logger
+logger = logging.getLogger(__name__)
 
 # ZosPy imports - these will fail on non-Windows or without OpticStudio
 try:
@@ -36,7 +40,23 @@ class ZosPyHandler:
     """
 
     def _to_float(self, value: Any, default: float, name: str) -> float:
-        """Convert a value to float with error handling."""
+        """
+        Convert a value to float with error handling.
+
+        All numeric values passed to ZosPy/OpticStudio MUST be explicitly
+        converted to Python float() to avoid COM type conversion issues.
+
+        Args:
+            value: The value to convert (may be string, int, float, or None)
+            default: Default value if input is None
+            name: Parameter name for error messages
+
+        Returns:
+            The value as a Python float
+
+        Raises:
+            ZosPyError: If the value cannot be converted to float
+        """
         if value is None:
             return default
         try:
@@ -46,10 +66,19 @@ class ZosPyHandler:
 
     def _extract_value(self, spec: Any, default: Any = None) -> Any:
         """
-        Extract value from a spec that may be:
-        - None -> returns default
-        - A dict with 'value' key -> returns dict['value'] or default
-        - A direct value -> returns the value
+        Extract a value from an LLM JSON spec that may have solve information.
+
+        LLM JSON format allows surface properties to be either direct values
+        or objects with 'value' and optional 'solve' keys:
+            - Direct: {"radius": 100.0}
+            - With solve: {"radius": {"value": 100.0, "solve": "variable"}}
+
+        Args:
+            spec: The specification (None, direct value, or dict with 'value' key)
+            default: Default value if spec is None or missing 'value'
+
+        Returns:
+            The extracted value
         """
         if spec is None:
             return default
@@ -72,7 +101,7 @@ class ZosPyHandler:
             if self.oss is None:
                 raise ZosPyError("Failed to connect to OpticStudio")
 
-            print(f"Connected to OpticStudio: {self.get_version()}")
+            logger.info(f"Connected to OpticStudio: {self.get_version()}")
 
         except Exception as e:
             raise ZosPyError(f"Failed to initialize ZosPy: {e}")
@@ -83,7 +112,7 @@ class ZosPyHandler:
             if hasattr(self, 'zos') and self.zos:
                 self.zos.disconnect()
         except Exception as e:
-            print(f"Warning: Error closing ZosPy connection: {e}")
+            logger.warning(f"Error closing ZosPy connection: {e}")
 
     def get_version(self) -> str:
         """Get OpticStudio version string."""
@@ -332,7 +361,7 @@ class ZosPyHandler:
                             )
                         except Exception as e:
                             # Fallback: just set a placeholder name
-                            print(f"Warning: Could not set model glass solver: {e}")
+                            logger.warning(f"Could not set model glass solver: {e}")
                             surface.Material = f"MODEL_{nd:.4f}_{vd:.1f}"
 
             # Handle conic - may be direct value or object with 'value' key
@@ -406,11 +435,11 @@ class ZosPyHandler:
                 if aperture_type_name in fno_types:
                     paraxial["fno"] = aperture_val
             except Exception as e:
-                print(f"Warning: Could not calculate first-order data: {e}")
+                logger.warning(f"Could not calculate first-order data: {e}")
 
             return paraxial
         except Exception as e:
-            print(f"Warning: Could not get paraxial data: {e}")
+            logger.warning(f"Could not get paraxial data: {e}")
             return {}
 
     def get_cross_section(self, llm_json: dict[str, Any]) -> dict[str, Any]:
@@ -429,86 +458,68 @@ class ZosPyHandler:
         # Check OpticStudio version - image export requires >= 24.1.0
         try:
             zos_version = self.zos.version if hasattr(self.zos, 'version') else None
-            print(f"DEBUG: ZosPy zos.version = {zos_version}")
-            print(f"DEBUG: ZosPy version = {zp.__version__ if hasattr(zp, '__version__') else 'unknown'}")
+            logger.debug(f"ZosPy zos.version = {zos_version}")
+            logger.debug(f"ZosPy version = {zp.__version__ if hasattr(zp, '__version__') else 'unknown'}")
 
             if zos_version and zos_version < (24, 1, 0):
-                print(f"Warning: OpticStudio {zos_version} < 24.1.0 - image export not supported, using fallback")
+                logger.warning(f"OpticStudio {zos_version} < 24.1.0 - image export not supported, using fallback")
             else:
-                # Try raw ZOSAPI layout export with proper configuration
-                # ZosPy's wrapper has issues with file paths on Windows
-                print("DEBUG: Trying raw ZOSAPI CrossSection export")
+                # Use ZosPy's CrossSection wrapper with image_output_file parameter
+                # Per ZosPy docs: export to file, then read it back
+                import tempfile
+                import os
 
-                # Get the tools interface
-                tools = self.oss._OpenSystem.Tools if hasattr(self.oss, '_OpenSystem') else None
-                if tools is None and hasattr(self.oss, 'Tools'):
-                    tools = self.oss.Tools
+                temp_path = os.path.join(tempfile.gettempdir(), "zemax_cross_section.png")
+                logger.debug(f"Trying ZosPy CrossSection with image_output_file={temp_path}")
 
-                print(f"DEBUG: Tools = {tools}, type = {type(tools) if tools else 'None'}")
+                try:
+                    from zospy.analyses.systemviewers.cross_section import CrossSection
 
-                if tools and hasattr(tools, 'Layouts'):
-                    layouts = tools.Layouts
-                    print(f"DEBUG: Layouts = {layouts}")
+                    cross_section = CrossSection(
+                        number_of_rays=11,
+                        field="All",
+                        wavelength="All",
+                        color_rays_by="Fields",
+                        delete_vignetted=True,
+                        image_size=(1200, 800),
+                    )
 
-                    if hasattr(layouts, 'OpenCrossSectionExport'):
-                        layout_tool = layouts.OpenCrossSectionExport()
-                        print(f"DEBUG: layout_tool = {layout_tool}")
+                    # Run with image_output_file to save to disk
+                    result = cross_section.run(self.oss, image_output_file=temp_path)
+                    logger.debug(f"CrossSection.run completed, result.data type = {type(result.data) if hasattr(result, 'data') else 'N/A'}")
 
-                        if layout_tool is not None:
-                            # Configure for in-memory export (no file save)
-                            layout_tool.SaveImageAsFile = False
-                            layout_tool.NumberOfRays = 11
-
-                            # Run and wait
-                            layout_tool.RunAndWaitForCompletion()
-                            print(f"DEBUG: layout_tool.Succeeded = {layout_tool.Succeeded}")
-
-                            if layout_tool.Succeeded:
-                                # Get image data
-                                export_data = layout_tool.ImageExportData
-                                if export_data is not None:
-                                    # Get bitmap buffer
-                                    width = export_data.Width
-                                    height = export_data.Height
-                                    print(f"DEBUG: Image size = {width}x{height}")
-
-                                    # Export to a temp file with simple filename
-                                    import tempfile
-                                    import os
-                                    temp_filename = "zemax_export.bmp"
-                                    temp_path = os.path.join(tempfile.gettempdir(), temp_filename)
-
-                                    layout_tool.SaveImageAsFile = True
-                                    layout_tool.OutputFileName = temp_filename  # Just filename, not full path
-                                    layout_tool.OutputPath = tempfile.gettempdir()
-                                    layout_tool.RunAndWaitForCompletion()
-
-                                    if os.path.exists(temp_path):
-                                        from PIL import Image
-                                        img = Image.open(temp_path)
-                                        buffer = io.BytesIO()
-                                        img.save(buffer, format='PNG')
-                                        buffer.seek(0)
-                                        image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-                                        image_format = "png"
-                                        os.remove(temp_path)
-                                        print(f"DEBUG: Successfully exported via raw API, size = {len(image_b64)}")
-                            else:
-                                print(f"DEBUG: layout_tool.Succeeded = False")
-
-                            layout_tool.Close()
-                        else:
-                            print("DEBUG: OpenCrossSectionExport returned None")
+                    # Check if file was created
+                    if os.path.exists(temp_path):
+                        with open(temp_path, 'rb') as f:
+                            image_b64 = base64.b64encode(f.read()).decode('utf-8')
+                        image_format = "png"
+                        os.remove(temp_path)
+                        logger.info(f"Successfully exported CrossSection image, size = {len(image_b64)}")
+                    elif result.data is not None:
+                        # Fallback: use the numpy array if file wasn't created
+                        import matplotlib.pyplot as plt
+                        fig, ax = plt.subplots(figsize=(12, 8))
+                        ax.imshow(result.data)
+                        ax.axis('off')
+                        buffer = io.BytesIO()
+                        fig.savefig(buffer, format='PNG', dpi=150, bbox_inches='tight', pad_inches=0)
+                        plt.close(fig)
+                        buffer.seek(0)
+                        image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                        image_format = "png"
+                        logger.info(f"Used numpy array fallback for CrossSection, size = {len(image_b64)}")
                     else:
-                        print("DEBUG: Layouts has no OpenCrossSectionExport")
-                else:
-                    print("DEBUG: Tools or Layouts not available")
+                        logger.warning("CrossSection: no file created and result.data is None")
+
+                except ImportError as e:
+                    logger.warning(f"CrossSection import failed: {e}")
+                except Exception as e:
+                    logger.warning(f"CrossSection export failed: {e}")
 
         except Exception as e:
             # Log but don't fail - we'll return surface geometry as fallback
-            import traceback
-            print(f"Warning: CrossSection image export failed: {e}")
-            print(f"DEBUG: Full traceback:\n{traceback.format_exc()}")
+            logger.warning(f"CrossSection image export failed: {e}")
+            logger.debug(f"Full traceback:", exc_info=True)
 
         # Get paraxial data using direct LDE access (more reliable)
         paraxial = self._get_paraxial_from_lde()
@@ -560,7 +571,7 @@ class ZosPyHandler:
 
             return paraxial
         except Exception as e:
-            print(f"Warning: Could not get paraxial data from LDE: {e}")
+            logger.warning(f"Could not get paraxial data from LDE: {e}")
             return {}
 
     def _get_surface_geometry(self) -> list[dict[str, Any]]:
@@ -729,7 +740,7 @@ class ZosPyHandler:
         hotspots = []
         if total_failures > 0:
             for sf in aggregate_surface_failures:
-                if sf["failure_count"] / total_failures > 0.1:
+                if sf["total_failures"] / total_failures > 0.1:
                     hotspots.append(sf["surface_index"])
 
         return {
@@ -760,7 +771,7 @@ class ZosPyHandler:
 
         # First, try the ZosPy wrapper - it has better result parsing when it works
         try:
-            print("DEBUG Seidel: Trying ZosPy wrapper ZernikeStandardCoefficients")
+            logger.debug("Seidel: Trying ZosPy wrapper ZernikeStandardCoefficients")
             zernike_analysis = zp.analyses.wavefront.ZernikeStandardCoefficients(
                 sampling='64x64',
                 maximum_term=37,
@@ -769,72 +780,126 @@ class ZosPyHandler:
                 surface="Image",
             )
             result = zernike_analysis.run(self.oss)
-            print(f"DEBUG Seidel: ZosPy wrapper succeeded, result type = {type(result)}")
+            logger.debug(f"Seidel: ZosPy wrapper succeeded, result type = {type(result)}")
 
             # Extract coefficients from ZosPy result
             if hasattr(result, 'data') and result.data is not None:
                 coeff_data = result.data
-                print(f"DEBUG Seidel: result.data type = {type(coeff_data)}")
-                print(f"DEBUG Seidel: result.data attrs = {[a for a in dir(coeff_data) if not a.startswith('_')][:20]}")
+                logger.debug(f"Seidel: result.data type = {type(coeff_data)}")
+                data_attrs = [a for a in dir(coeff_data) if not a.startswith('_')]
+                logger.debug(f"Seidel: result.data attrs = {data_attrs[:20]}")
 
                 if hasattr(coeff_data, 'coefficients'):
                     raw_coeffs = coeff_data.coefficients
-                    print(f"DEBUG Seidel: coefficients type = {type(raw_coeffs)}")
+                    logger.debug(f"Seidel: coefficients type = {type(raw_coeffs)}")
 
                     if isinstance(raw_coeffs, dict):
-                        # Dict keyed by term number
-                        max_term = max(raw_coeffs.keys()) if raw_coeffs else 0
-                        for i in range(1, max_term + 1):
-                            coeff = raw_coeffs.get(i)
-                            if coeff is not None and hasattr(coeff, 'value'):
-                                coefficients.append(float(coeff.value))
-                            elif coeff is not None:
-                                coefficients.append(float(coeff))
-                            else:
-                                coefficients.append(0.0)
+                        # Dict keyed by term number (could be int or str)
+                        # Per ZosPy docs: result.data.coefficients is dict with term num keys
+                        # and coefficient objects with .value attribute
+                        if raw_coeffs:
+                            # Get the keys and convert to int for sorting
+                            int_keys = [int(k) for k in raw_coeffs.keys()]
+                            max_term = max(int_keys) if int_keys else 0
+                            logger.debug(f"Seidel: Dict has {len(raw_coeffs)} keys, max_term={max_term}")
+
+                            for i in range(1, min(max_term + 1, 38)):  # Limit to 37 terms
+                                # Try both int and str keys
+                                coeff = raw_coeffs.get(i) or raw_coeffs.get(str(i))
+                                if coeff is not None:
+                                    if hasattr(coeff, 'value'):
+                                        coefficients.append(float(coeff.value))
+                                    else:
+                                        coefficients.append(float(coeff))
+                                else:
+                                    coefficients.append(0.0)
                     elif hasattr(raw_coeffs, '__iter__'):
+                        # Iterable (list-like)
                         for coeff in raw_coeffs:
                             if hasattr(coeff, 'value'):
                                 coefficients.append(float(coeff.value))
                             else:
                                 coefficients.append(float(coeff) if coeff is not None else 0.0)
 
-            print(f"DEBUG Seidel: Extracted {len(coefficients)} coefficients from ZosPy wrapper")
+            logger.debug(f"Seidel: Extracted {len(coefficients)} coefficients from ZosPy wrapper")
 
         except Exception as e:
-            print(f"DEBUG Seidel: ZosPy wrapper failed: {e}")
+            logger.debug(f"Seidel: ZosPy wrapper failed: {e}")
 
-            # Fallback: try raw ZOSAPI with text output
+            # Fallback: try raw ZOSAPI with detailed exploration
             try:
-                print("DEBUG Seidel: Trying raw ZOSAPI fallback")
+                logger.debug("Seidel: Trying raw ZOSAPI fallback")
                 analysis = zp.analyses.new_analysis(
                     self.oss,
                     zp.constants.Analysis.AnalysisIDM.ZernikeStandardCoefficients,
                     settings_first=False  # Run immediately with defaults
                 )
 
-                # Try to get results
+                # Explore the analysis object
                 results = analysis.Results if hasattr(analysis, 'Results') else None
-                print(f"DEBUG Seidel: Raw API results = {results}")
-                print(f"DEBUG Seidel: Raw API results type = {type(results) if results else 'None'}")
+                logger.debug(f"Seidel: Raw API results = {results}")
+                logger.debug(f"Seidel: Raw API results type = {type(results) if results else 'None'}")
 
-                # Try to get text output
-                if hasattr(analysis, 'GetTextFile'):
-                    text = analysis.GetTextFile()
-                    print(f"DEBUG Seidel: Text output length = {len(text) if text else 0}")
-                    # Could parse text here if needed
+                if results is not None:
+                    # Explore available attributes/methods on the results object
+                    result_attrs = [a for a in dir(results) if not a.startswith('_')]
+                    logger.debug(f"Seidel: Results attributes = {result_attrs[:30]}")
+
+                    # Try GetDataGrid - Zernike results often have a data grid
+                    if hasattr(results, 'GetDataGrid'):
+                        try:
+                            grid = results.GetDataGrid(0)
+                            if grid is not None:
+                                rows = grid.Rows if hasattr(grid, 'Rows') else 0
+                                cols = grid.Cols if hasattr(grid, 'Cols') else 0
+                                logger.debug(f"Seidel: DataGrid size = {rows}x{cols}")
+                                for r in range(min(rows, 40)):  # First 40 rows
+                                    for c in range(cols):
+                                        val = grid.GetValueAt(r, c)
+                                        if val is not None and isinstance(val, (int, float)):
+                                            coefficients.append(float(val))
+                        except Exception as ge:
+                            logger.debug(f"Seidel: GetDataGrid failed: {ge}")
+
+                    # Try GetDataSeries
+                    if not coefficients and hasattr(results, 'GetDataSeries'):
+                        try:
+                            num_series = results.NumberOfDataSeries if hasattr(results, 'NumberOfDataSeries') else 0
+                            logger.debug(f"Seidel: NumberOfDataSeries = {num_series}")
+                            for i in range(num_series):
+                                series = results.GetDataSeries(i)
+                                if series:
+                                    num_pts = series.NumData if hasattr(series, 'NumData') else 0
+                                    for j in range(num_pts):
+                                        val = series.GetDataValue(j)
+                                        if val is not None:
+                                            coefficients.append(float(val))
+                        except Exception as se:
+                            logger.debug(f"Seidel: GetDataSeries failed: {se}")
+
+                    # Try GetTextFile for text-based extraction
+                    if not coefficients and hasattr(results, 'GetTextFile'):
+                        try:
+                            text = results.GetTextFile()
+                            logger.debug(f"Seidel: Text output length = {len(text) if text else 0}")
+                            if text:
+                                logger.debug(f"Seidel: Text preview = {text[:500] if len(text) > 500 else text}")
+                                # Parse text to extract coefficients
+                                coefficients = self._parse_zernike_text(text)
+                        except Exception as te:
+                            logger.debug(f"Seidel: GetTextFile failed: {te}")
 
                 analysis.Close()
 
             except Exception as e2:
-                print(f"DEBUG Seidel: Raw ZOSAPI also failed: {e2}")
+                logger.debug(f"Seidel: Raw ZOSAPI also failed: {e2}")
 
         # If we still don't have coefficients, use placeholders
         if not coefficients:
-            print("Warning: Could not extract Zernike coefficients, using placeholder values")
+            logger.warning("Could not extract Zernike coefficients, using placeholder values")
             coefficients = [0.0] * 37
 
-        print(f"DEBUG Seidel: Final coefficient count = {len(coefficients)}")
+        logger.debug(f"Seidel: Final coefficient count = {len(coefficients)}")
 
         try:
             # Convert Zernike to Seidel
@@ -953,6 +1018,72 @@ class ZosPyHandler:
             "num_wavelengths": num_wavelengths,
             "data": data,
         }
+
+
+    def _parse_zernike_text(self, text: str) -> list[float]:
+        """
+        Parse Zernike coefficients from OpticStudio text output.
+
+        The text output from ZernikeStandardCoefficients analysis looks like:
+            Term    Value
+            Z1      0.00000000
+            Z2      0.00001234
+            ...
+
+        Args:
+            text: Raw text output from GetTextFile()
+
+        Returns:
+            List of Zernike coefficient values (Z1, Z2, ..., Z37)
+        """
+        coefficients = []
+
+        if not text:
+            return coefficients
+
+        lines = text.split('\n')
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Look for lines starting with "Z" followed by a number
+            # Format: "Z1      0.00000000" or "Z 1      0.00000000"
+            # Also handle: "  1      0.00000000" (just index and value)
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    # Try to parse the first part as term identifier
+                    term_str = parts[0]
+                    value_str = parts[-1]  # Value is usually the last column
+
+                    # Check if this looks like a Zernike term line
+                    if term_str.upper().startswith('Z'):
+                        # Extract term number from "Z1", "Z 1", "Z01", etc.
+                        term_num_str = term_str[1:].strip()
+                        if term_num_str.isdigit():
+                            value = float(value_str)
+                            term_num = int(term_num_str)
+                            # Extend list if needed
+                            while len(coefficients) < term_num:
+                                coefficients.append(0.0)
+                            if term_num <= 37:
+                                coefficients[term_num - 1] = value
+                    elif term_str.isdigit():
+                        # Line starts with just the term number
+                        term_num = int(term_str)
+                        value = float(value_str)
+                        while len(coefficients) < term_num:
+                            coefficients.append(0.0)
+                        if term_num <= 37:
+                            coefficients[term_num - 1] = value
+                except (ValueError, IndexError):
+                    # Skip lines that don't parse correctly
+                    continue
+
+        logger.debug(f"Parsed {len(coefficients)} Zernike coefficients from text")
+        return coefficients
 
 
 class ZosPyError(Exception):

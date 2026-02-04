@@ -37,13 +37,24 @@ This applies to: radius, thickness, semi_diameter, conic, wavelength (um), weigh
 
 #### CrossSection / System Viewer Analysis
 - **REQUIRES OpticStudio >= 24.1.0** for image export (check `zos.version`)
-- **USE `Viewer3D` instead of `CrossSection`** - CrossSection has export tool issues
-- `CrossSection` may fail with "system viewer export tool failed to run" even on v25.2
-- `Viewer3D` works reliably for image export per ZosPy examples
-- `result.data` is a **numpy array**, NOT a PIL Image
-- Use `plt.imshow(result.data)` then save the figure to PNG
-- Always provide surface geometry as fallback for client-side rendering
-- Use `oncomplete=OnComplete.Release` to clean up analysis window
+- **USE `image_output_file` parameter** - This is the reliable way to export images:
+```python
+from zospy.analyses.systemviewers.cross_section import CrossSection
+
+cross_section = CrossSection(
+    number_of_rays=11,
+    field="All",
+    wavelength="All",
+    color_rays_by="Fields",
+    delete_vignetted=True,
+    image_size=(1200, 800),
+)
+result = cross_section.run(oss, image_output_file="/path/to/output.png")
+```
+- If `image_output_file` is provided, ZosPy saves directly to that path
+- `result.data` may also contain a numpy array as fallback
+- Always provide surface geometry as fallback for client-side SVG rendering
+- Raw ZOSAPI `Layouts.OpenCrossSectionExport()` often fails - prefer ZosPy wrapper
 
 #### Zernike/Seidel Analysis
 - ZosPy's `ZernikeStandardCoefficients().run()` has parsing bugs with OpticStudio v25.x
@@ -87,6 +98,56 @@ Known issues:
 - Implement `_reconnect_zospy()` fallback
 - Log warnings but don't fail on non-critical data (paraxial properties)
 
+### 5. Code Architecture Patterns
+
+#### Logging
+Use the Python `logging` module consistently throughout:
+```python
+import logging
+logger = logging.getLogger(__name__)
+
+# Use appropriate log levels:
+logger.debug("Verbose debugging info")      # Development only
+logger.info("Normal operational messages")  # Startup, connections
+logger.warning("Non-fatal issues")          # Fallbacks, missing optional data
+logger.error("Operation failures")          # Errors that affect results
+```
+
+**Never use `print()` statements** - they bypass log configuration and cannot be filtered.
+
+#### Connection Management
+Use helper functions to reduce boilerplate in endpoints:
+```python
+# In main.py
+def _ensure_connected() -> Optional[ZosPyHandler]:
+    """Ensure ZosPy is connected, attempting reconnection if needed."""
+    global zospy_handler
+    if zospy_handler is None:
+        zospy_handler = _reconnect_zospy()
+    return zospy_handler
+
+def _handle_zospy_error(operation_name: str, error: Exception) -> None:
+    """Handle ZosPy errors by logging and attempting reconnection."""
+    global zospy_handler
+    if isinstance(error, ZosPyError):
+        logger.error(f"{operation_name} failed: {error}")
+        zospy_handler = _reconnect_zospy()
+    else:
+        logger.error(f"{operation_name} unexpected error: {error}")
+```
+
+#### LLM JSON Value Extraction
+Surface properties in LLM JSON can be direct values or objects with solve info:
+```python
+def _extract_value(self, spec: Any, default: Any = None) -> Any:
+    """Extract value from spec that may be direct or {'value': ..., 'solve': ...}"""
+    if spec is None:
+        return default
+    if isinstance(spec, dict):
+        return spec.get("value", default)
+    return spec
+```
+
 ## Changelog
 
 ### 2026-02-04
@@ -115,6 +176,13 @@ Known issues:
 - Fixed Pydantic validation: `errors: list[dict[str, str]]` requires non-None strings - always use `str(error_msg)`
 - `ISystemData.FirstOrderData` doesn't exist - calculate from LDE directly
 
+### 2026-02-04 (Code Quality Review)
+- Fixed bug in `ray_trace_diagnostic`: accessing `sf["failure_count"]` instead of `sf["total_failures"]`
+- Converted all `print()` statements to proper `logging` calls
+- Added proper docstrings to helper methods `_to_float()` and `_extract_value()`
+- Refactored endpoint boilerplate into `_ensure_connected()` and `_handle_zospy_error()` helpers
+- Reduced code duplication across all 6 API endpoints
+
 ## Common AI Mistakes to Avoid
 
 1. **Don't assume ZOSAPI property names** - They vary between OpticStudio versions. Always use try/except.
@@ -132,9 +200,15 @@ Known issues:
 
 6. **Don't use magic numbers for infinity** - Zemax uses 0 for flat surfaces, check `radius != 0 and abs(radius) < 1e10`.
 
+### 2026-02-04 (Seidel Text Parsing)
+- Added `_parse_zernike_text()` helper method to parse Zernike coefficients from raw ZOSAPI text output
+- Improved dict key handling in Seidel - keys can be int or str depending on ZosPy version
+- Added limit of 37 terms to avoid processing unnecessary data
+
 ## TODO / Known Issues
 
 - [ ] CrossSection image export fails ("system viewer export tool failed") - using fallback surface geometry
 - [ ] Ray trace header mismatch warnings (cosmetic, doesn't affect functionality)
 - [ ] Consider caching loaded systems to avoid reloading on every request
 - [ ] Seidel S4 (Petzval) and S5 (Distortion) are approximations - cannot compute true values from Zernike
+- [ ] Test `_parse_zernike_text()` with actual OpticStudio text output format
