@@ -35,6 +35,28 @@ class ZosPyHandler:
     optical analysis operations.
     """
 
+    def _to_float(self, value: Any, default: float, name: str) -> float:
+        """Convert a value to float with error handling."""
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            raise ZosPyError(f"Invalid {name}: {value!r} (must be a number)")
+
+    def _extract_value(self, spec: Any, default: Any = None) -> Any:
+        """
+        Extract value from a spec that may be:
+        - None -> returns default
+        - A dict with 'value' key -> returns dict['value'] or default
+        - A direct value -> returns the value
+        """
+        if spec is None:
+            return default
+        if isinstance(spec, dict):
+            return spec.get("value", default)
+        return spec
+
     def __init__(self):
         """Initialize ZosPy and connect to OpticStudio."""
         if not ZOSPY_AVAILABLE:
@@ -45,7 +67,8 @@ class ZosPyHandler:
             self.zos = zp.ZOS()
 
             # Connect to OpticStudio (starts instance if needed)
-            self.oss: OpticStudioSystem = self.zos.connect(mode="standalone")
+            # Use 'extension' mode for programmatic control
+            self.oss: OpticStudioSystem = self.zos.connect(mode="extension")
 
             if self.oss is None:
                 raise ZosPyError("Failed to connect to OpticStudio")
@@ -125,17 +148,46 @@ class ZosPyHandler:
 
     def _setup_aperture(self, system: dict[str, Any]):
         """Configure system aperture using ZosPy API."""
-        pupil = system.get("pupil", {})
-        mode = pupil.get("mode", "epd")
-        value = pupil.get("value", 10.0)
+        pupil = system.get("pupil") or {}
+        mode = pupil.get("mode") or "epd"  # Handles None and empty string
+        value = self._to_float(pupil.get("value"), 10.0, "aperture value")
 
         # ZosPy uses zp.constants for aperture types
+        # Note: constant names may vary by ZosPy version
+        aperture_types = zp.constants.SystemData.ZemaxApertureType
+
         if mode == "epd":
-            self.oss.SystemData.Aperture.ApertureType = zp.constants.SystemData.ZemaxApertureType.EntrancePupilDiameter
+            if hasattr(aperture_types, "EntrancePupilDiameter"):
+                self.oss.SystemData.Aperture.ApertureType = aperture_types.EntrancePupilDiameter
+            else:
+                raise ZosPyError(f"Aperture mode '{mode}' not supported by this ZosPy version")
         elif mode in ("fno", "image_space_fnum"):
-            self.oss.SystemData.Aperture.ApertureType = zp.constants.SystemData.ZemaxApertureType.ImageSpaceFNumber
+            # Try ImageSpaceFNumber first, fall back to FloatByStopSize
+            if hasattr(aperture_types, "ImageSpaceFNumber"):
+                self.oss.SystemData.Aperture.ApertureType = aperture_types.ImageSpaceFNumber
+            elif hasattr(aperture_types, "FloatByStopSize"):
+                self.oss.SystemData.Aperture.ApertureType = aperture_types.FloatByStopSize
+            else:
+                raise ZosPyError(f"Aperture mode '{mode}' not supported by this ZosPy version")
         elif mode in ("na", "na_object"):
-            self.oss.SystemData.Aperture.ApertureType = zp.constants.SystemData.ZemaxApertureType.ObjectSpaceNA
+            if hasattr(aperture_types, "ObjectSpaceNA"):
+                self.oss.SystemData.Aperture.ApertureType = aperture_types.ObjectSpaceNA
+            else:
+                raise ZosPyError(f"Aperture mode '{mode}' not supported by this ZosPy version")
+        elif mode == "float_by_stop_size":
+            if hasattr(aperture_types, "FloatByStopSize"):
+                self.oss.SystemData.Aperture.ApertureType = aperture_types.FloatByStopSize
+            else:
+                raise ZosPyError(f"Aperture mode '{mode}' not supported by this ZosPy version")
+        elif mode == "image_space_paraxial_working_fnum":
+            if hasattr(aperture_types, "ParaxialWorkingFNumber"):
+                self.oss.SystemData.Aperture.ApertureType = aperture_types.ParaxialWorkingFNumber
+            else:
+                raise ZosPyError(f"Aperture mode '{mode}' not supported by this ZosPy version")
+        else:
+            valid_modes = ["epd", "fno", "image_space_fnum", "na", "na_object",
+                           "float_by_stop_size", "image_space_paraxial_working_fnum"]
+            raise ZosPyError(f"Unknown aperture mode: {mode!r}. Valid modes: {', '.join(valid_modes)}")
 
         self.oss.SystemData.Aperture.ApertureValue = value
 
@@ -169,20 +221,34 @@ class ZosPyHandler:
         if 1 <= primary_wavelength <= len(wavelengths):
             wl_data.SelectWavelength(primary_wavelength)
 
+    # Mapping from LLM JSON field types to ZosPy constant names
+    _FIELD_TYPE_MAP = {
+        "object_angle": "Angle",
+        "object_height": "ObjectHeight",
+        "image_height": "RealImageHeight",
+        "real_image_height": "RealImageHeight",
+        "paraxial_image_height": "ParaxialImageHeight",
+    }
+
     def _setup_fields(self, system: dict[str, Any]):
         """Configure system fields using ZosPy API."""
-        field_type = system.get("field_type", "object_angle")
-        fields = system.get("fields", [{"x": 0, "y": 0}])
+        field_type = system.get("field_type") or "object_angle"  # Handles None and empty string
+        fields = system.get("fields") or [{"x": 0, "y": 0}]  # Handles None and empty list
 
         field_data = self.oss.SystemData.Fields
 
         # Set field type using ZosPy constants
-        if field_type == "object_angle":
-            field_data.SetFieldType(zp.constants.SystemData.FieldType.Angle)
-        elif field_type == "object_height":
-            field_data.SetFieldType(zp.constants.SystemData.FieldType.ObjectHeight)
-        elif field_type in ("image_height", "real_image_height"):
-            field_data.SetFieldType(zp.constants.SystemData.FieldType.RealImageHeight)
+        field_types = zp.constants.SystemData.FieldType
+
+        if field_type not in self._FIELD_TYPE_MAP:
+            valid_types = list(self._FIELD_TYPE_MAP.keys())
+            raise ZosPyError(f"Unknown field type: {field_type!r}. Valid types: {', '.join(valid_types)}")
+
+        attr_name = self._FIELD_TYPE_MAP[field_type]
+        if hasattr(field_types, attr_name):
+            field_data.SetFieldType(getattr(field_types, attr_name))
+        else:
+            raise ZosPyError(f"Field type '{field_type}' not supported by this ZosPy version")
 
         # Remove all fields except the first (can't remove last field)
         while field_data.NumberOfFields > 1:
@@ -190,17 +256,19 @@ class ZosPyHandler:
 
         # Set the first field
         if fields:
-            first_field = fields[0]
+            first_field = fields[0] if isinstance(fields[0], dict) else {}
             f = field_data.GetField(1)
-            f.X = first_field.get("x", 0)
-            f.Y = first_field.get("y", 0)
-            f.Weight = first_field.get("weight", 1.0)
+            f.X = self._to_float(first_field.get("x"), 0, "field X")
+            f.Y = self._to_float(first_field.get("y"), 0, "field Y")
+            f.Weight = self._to_float(first_field.get("weight"), 1.0, "field weight")
 
         # Add remaining fields
         for field_spec in fields[1:]:
-            x = field_spec.get("x", 0)
-            y = field_spec.get("y", 0)
-            weight = field_spec.get("weight", 1.0)
+            if not isinstance(field_spec, dict):
+                continue
+            x = self._to_float(field_spec.get("x"), 0, "field X")
+            y = self._to_float(field_spec.get("y"), 0, "field Y")
+            weight = self._to_float(field_spec.get("weight"), 1.0, "field weight")
             field_data.AddField(x, y, weight)
 
     def _setup_surfaces(self, surfaces: list[dict[str, Any]]):
@@ -226,32 +294,17 @@ class ZosPyHandler:
             surface = lde.GetSurfaceAt(i + 1)
 
             # Handle radius - may be direct value or object with 'value' key
-            radius_spec = surf.get("radius")
-            if radius_spec is None:
-                radius = float('inf')  # Flat surface
-            elif isinstance(radius_spec, dict):
-                radius = radius_spec.get("value", float('inf'))
-            else:
-                radius = radius_spec
+            radius = self._extract_value(surf.get("radius"), float('inf'))
             surface.Radius = radius
 
             # Handle thickness - may be direct value or object with 'value' key
-            thickness_spec = surf.get("thickness", 0.0)
-            if isinstance(thickness_spec, dict):
-                thickness = thickness_spec.get("value", 0.0)
-            else:
-                thickness = thickness_spec
+            thickness = self._extract_value(surf.get("thickness"), 0.0)
             surface.Thickness = thickness
 
             # Semi-diameter
-            sd_spec = surf.get("semi_diameter")
-            if sd_spec is not None:
-                if isinstance(sd_spec, dict):
-                    sd_value = sd_spec.get("value")
-                else:
-                    sd_value = sd_spec
-                if sd_value is not None:
-                    surface.SemiDiameter = sd_value
+            sd_value = self._extract_value(surf.get("semi_diameter"))
+            if sd_value is not None:
+                surface.SemiDiameter = sd_value
 
             # Glass/material
             glass = surf.get("glass")
@@ -276,22 +329,22 @@ class ZosPyHandler:
                                 refractive_index=nd,
                                 abbe_number=vd
                             )
-                        except Exception:
+                        except Exception as e:
                             # Fallback: just set a placeholder name
+                            print(f"Warning: Could not set model glass solver: {e}")
                             surface.Material = f"MODEL_{nd:.4f}_{vd:.1f}"
 
             # Handle conic - may be direct value or object with 'value' key
-            conic_spec = surf.get("conic", 0.0)
-            if isinstance(conic_spec, dict):
-                conic = conic_spec.get("value", 0.0)
-            else:
-                conic = conic_spec
+            conic = self._extract_value(surf.get("conic"), 0.0)
             if conic != 0.0:
                 surface.Conic = conic
 
             # Set as stop surface
             if i == stop_index:
-                surface.MakeThisSurfaceTheStop()
+                try:
+                    surface.IsStop = True
+                except Exception as e:
+                    raise ZosPyError(f"Failed to set surface {i} as stop: {e}")
 
     def _get_efl(self) -> Optional[float]:
         """Get effective focal length using ZosPy's SystemData analysis."""
@@ -347,7 +400,6 @@ class ZosPyHandler:
             # Run CrossSection analysis - ZosPy pattern: ClassName(params).run(oss)
             cross_section = zp.analyses.systemviewers.CrossSection(
                 number_of_rays=11,
-                y_stretch=1.0,
                 delete_vignetted=True,
             )
             result = cross_section.run(self.oss)
@@ -456,10 +508,10 @@ class ZosPyHandler:
                     try:
                         # ZosPy single ray trace - pattern: ClassName(params).run(oss)
                         ray_trace = zp.analyses.raysandspots.SingleRayTrace(
-                            Hx=hx,
-                            Hy=hy,
-                            Px=0.0,
-                            Py=0.0,
+                            hx=hx,
+                            hy=hy,
+                            px=0.0,
+                            py=0.0,
                             wavelength=1,
                             field=fi,
                         )
@@ -654,10 +706,10 @@ class ZosPyHandler:
                     try:
                         # ZosPy single ray trace - pattern: ClassName(params).run(oss)
                         ray_trace = zp.analyses.raysandspots.SingleRayTrace(
-                            Hx=0.0,
-                            Hy=hy,
-                            Px=0.0,
-                            Py=0.0,
+                            hx=0.0,
+                            hy=hy,
+                            px=0.0,
+                            py=0.0,
                             wavelength=wi,
                             field=fi,
                         )
