@@ -24,10 +24,16 @@ def main():
     zos = zp.ZOS()
     oss = zos.connect(mode="standalone")
 
-    # Print version info (GPT's tweak - helps debug missing enum members)
+    # Print version info (helps debug missing enum members)
     print(f"\n[2] Version Info:")
     print(f"    ZOSPy version: {getattr(zp, '__version__', 'unknown')}")
-    print(f"    OpticStudio version: {oss.Application.ZemaxVersion}")
+
+    # Get OpticStudio version - use direct attribute access (correct ZOSPy API)
+    try:
+        version = str(oss.Application.ZemaxVersion)
+        print(f"    OpticStudio version: {version}")
+    except Exception as e:
+        print(f"    OpticStudio version: (error: {e})")
 
     # Force-load constants (they're dynamic)
     print("\n[3] Loading ZOSPy constants...")
@@ -64,40 +70,46 @@ def main():
                     settings_first=True
                 )
 
-                # Check available settings
-                settings = an.Settings
-                settings_attrs = [a for a in dir(settings) if not a.startswith("_")]
-                print(f"    Settings attributes: {settings_attrs[:15]}...")
+                # Check available settings using hasattr pattern
+                if hasattr(an, 'Settings'):
+                    settings = an.Settings
+                    settings_attrs = [a for a in dir(settings) if not a.startswith("_")]
+                    print(f"    Settings attributes: {settings_attrs[:15]}...")
 
                 # Run with defaults
                 an.ApplyAndWaitForCompletion()
-                res = an.Results
 
-                # Try to get text output (most reliable across versions)
-                try:
-                    txt = res.GetTextFile()
-                    print(f"    Text output (first 800 chars):")
-                    print("-" * 50)
-                    print(txt[:800] if txt else "    (empty)")
-                    print("-" * 50)
-                except Exception as e:
-                    print(f"    GetTextFile failed: {e}")
+                # Access results safely using hasattr
+                if hasattr(an, 'Results'):
+                    res = an.Results
 
-                # Try to get data grids
-                try:
-                    for i in range(3):  # Try first 3 grids
+                    # Try to get text output (most reliable across versions)
+                    if hasattr(res, 'GetTextFile'):
                         try:
-                            grid = res.GetDataGrid(i)
-                            if grid:
-                                print(f"    DataGrid[{i}]: {grid}")
-                        except:
-                            break
-                except Exception as e:
-                    print(f"    GetDataGrid failed: {e}")
+                            txt = res.GetTextFile()
+                            print(f"    Text output (first 800 chars):")
+                            print("-" * 50)
+                            print(txt[:800] if txt else "    (empty)")
+                            print("-" * 50)
+                        except Exception as e:
+                            print(f"    GetTextFile failed: {e}")
 
-                # Check results attributes
-                results_attrs = [a for a in dir(res) if not a.startswith("_")]
-                print(f"    Results attributes: {results_attrs[:15]}...")
+                    # Try to get data grids
+                    if hasattr(res, 'GetDataGrid'):
+                        try:
+                            for i in range(3):  # Try first 3 grids
+                                try:
+                                    grid = res.GetDataGrid(i)
+                                    if grid:
+                                        print(f"    DataGrid[{i}]: {grid}")
+                                except:
+                                    break
+                        except Exception as e:
+                            print(f"    GetDataGrid failed: {e}")
+
+                    # Check results attributes
+                    results_attrs = [a for a in dir(res) if not a.startswith("_")]
+                    print(f"    Results attributes: {results_attrs[:15]}...")
 
                 an.Close()
                 print(f"    SUCCESS: '{candidate}' analysis works!")
