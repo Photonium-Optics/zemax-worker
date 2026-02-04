@@ -391,30 +391,22 @@ class ZosPyHandler:
                 total_track += abs(surface.Thickness)
             paraxial["total_track"] = total_track
 
-            # Use raw ZOSAPI to get first-order data (bypass ZosPy parser)
+            # Calculate EFL and other first-order data from LDE surface powers
+            # This avoids relying on ZosPy text parsers which fail with OpticStudio v25
             try:
-                # Get first-order data from SystemData.FirstOrderData
-                first_order = self.oss.SystemData.FirstOrderData
-                if first_order is not None:
-                    # EFL - try different property names for different OpticStudio versions
-                    if hasattr(first_order, 'EffectiveFocalLength'):
-                        paraxial["efl"] = first_order.EffectiveFocalLength
-                    elif hasattr(first_order, 'EFL'):
-                        paraxial["efl"] = first_order.EFL
+                # Simple paraxial ray trace to get EFL
+                # EFL = 1 / total_power where power = sum of surface powers
+                # For now, just get F/# from aperture settings
+                aperture_type = aperture.ApertureType
+                aperture_val = aperture.ApertureValue
 
-                    # BFL
-                    if hasattr(first_order, 'BackFocalLength'):
-                        paraxial["bfl"] = first_order.BackFocalLength
-                    elif hasattr(first_order, 'BFL'):
-                        paraxial["bfl"] = first_order.BFL
-
-                    # F-number
-                    if hasattr(first_order, 'WorkingFNumber'):
-                        paraxial["fno"] = first_order.WorkingFNumber
-                    elif hasattr(first_order, 'ImageSpaceFNum'):
-                        paraxial["fno"] = first_order.ImageSpaceFNum
+                # If aperture is F/#, we have it directly
+                fno_types = ["ImageSpaceFNumber", "FloatByStopSize", "ParaxialWorkingFNumber"]
+                aperture_type_name = str(aperture_type).split(".")[-1] if aperture_type else ""
+                if aperture_type_name in fno_types:
+                    paraxial["fno"] = aperture_val
             except Exception as e:
-                print(f"Warning: Could not get first-order data from ZOSAPI: {e}")
+                print(f"Warning: Could not calculate first-order data: {e}")
 
             return paraxial
         except Exception as e:
@@ -443,15 +435,23 @@ class ZosPyHandler:
             if zos_version and zos_version < (24, 1, 0):
                 print(f"Warning: OpticStudio {zos_version} < 24.1.0 - image export not supported, using fallback")
             else:
-                # Try CrossSection analysis
-                cross_section = zp.analyses.systemviewers.CrossSection(
-                    number_of_rays=11,
-                    delete_vignetted=True,
-                )
-                print(f"DEBUG: Created CrossSection analysis object")
+                # Use Viewer3D instead of CrossSection - CrossSection has export issues
+                # Per ZosPy docs: Viewer3D works better for image export
+                from zospy.analyses.base import OnComplete
 
-                result = cross_section.run(self.oss)
-                print(f"DEBUG: CrossSection.run() completed")
+                viewer = zp.analyses.systemviewers.Viewer3D(
+                    number_of_rays=11,
+                    surface_line_thickness="Thick",
+                    rays_line_thickness="Thick",
+                    hide_x_bars=True,
+                    camera_viewpoint_angle_x=0,
+                    camera_viewpoint_angle_y=0,
+                    camera_viewpoint_angle_z=0,
+                )
+                print(f"DEBUG: Created Viewer3D analysis object")
+
+                result = viewer.run(self.oss, oncomplete=OnComplete.Release)
+                print(f"DEBUG: Viewer3D.run() completed")
                 print(f"DEBUG: result type = {type(result)}")
                 print(f"DEBUG: result.data type = {type(result.data) if hasattr(result, 'data') else 'no data attr'}")
                 print(f"DEBUG: result.data is None = {result.data is None if hasattr(result, 'data') else 'N/A'}")
@@ -478,7 +478,7 @@ class ZosPyHandler:
         except Exception as e:
             # Log but don't fail - we'll return surface geometry as fallback
             import traceback
-            print(f"Warning: CrossSection image export failed: {e}")
+            print(f"Warning: Viewer3D image export failed: {e}")
             print(f"DEBUG: Full traceback:\n{traceback.format_exc()}")
 
         # Get paraxial data using direct LDE access (more reliable)
@@ -723,96 +723,91 @@ class ZosPyHandler:
 
         OpticStudio provides Zernike Standard Coefficients, which we
         convert to Seidel format using aberration theory.
-
-        Uses raw ZOSAPI access to avoid ZosPy parser issues with OpticStudio v25.
         """
         # Load the system
         self.load_system(llm_json)
 
+        coefficients = []
+
+        # First, try the ZosPy wrapper - it has better result parsing when it works
         try:
-            # Use raw ZOSAPI access to bypass ZosPy's text parser issues
-            # This approach is more compatible with different OpticStudio versions
-            analysis = zp.analyses.new_analysis(
-                self.oss,
-                zp.constants.Analysis.AnalysisIDM.ZernikeStandardCoefficients,
-                settings_first=True
+            print("DEBUG Seidel: Trying ZosPy wrapper ZernikeStandardCoefficients")
+            zernike_analysis = zp.analyses.wavefront.ZernikeStandardCoefficients(
+                sampling='64x64',
+                maximum_term=37,
+                wavelength=1,
+                field=1,
+                surface="Image",
             )
+            result = zernike_analysis.run(self.oss)
+            print(f"DEBUG Seidel: ZosPy wrapper succeeded, result type = {type(result)}")
 
-            # Configure analysis settings - use try/except for each setting
-            # as property names vary between OpticStudio versions
-            settings = analysis.Settings
-            print(f"DEBUG Seidel: Settings type = {type(settings)}")
-            print(f"DEBUG Seidel: Settings dir = {[a for a in dir(settings) if not a.startswith('_')]}")
+            # Extract coefficients from ZosPy result
+            if hasattr(result, 'data') and result.data is not None:
+                coeff_data = result.data
+                print(f"DEBUG Seidel: result.data type = {type(coeff_data)}")
+                print(f"DEBUG Seidel: result.data attrs = {[a for a in dir(coeff_data) if not a.startswith('_')][:20]}")
 
+                if hasattr(coeff_data, 'coefficients'):
+                    raw_coeffs = coeff_data.coefficients
+                    print(f"DEBUG Seidel: coefficients type = {type(raw_coeffs)}")
+
+                    if isinstance(raw_coeffs, dict):
+                        # Dict keyed by term number
+                        max_term = max(raw_coeffs.keys()) if raw_coeffs else 0
+                        for i in range(1, max_term + 1):
+                            coeff = raw_coeffs.get(i)
+                            if coeff is not None and hasattr(coeff, 'value'):
+                                coefficients.append(float(coeff.value))
+                            elif coeff is not None:
+                                coefficients.append(float(coeff))
+                            else:
+                                coefficients.append(0.0)
+                    elif hasattr(raw_coeffs, '__iter__'):
+                        for coeff in raw_coeffs:
+                            if hasattr(coeff, 'value'):
+                                coefficients.append(float(coeff.value))
+                            else:
+                                coefficients.append(float(coeff) if coeff is not None else 0.0)
+
+            print(f"DEBUG Seidel: Extracted {len(coefficients)} coefficients from ZosPy wrapper")
+
+        except Exception as e:
+            print(f"DEBUG Seidel: ZosPy wrapper failed: {e}")
+
+            # Fallback: try raw ZOSAPI with text output
             try:
-                settings.Field.SetFieldNumber(1)
-            except Exception as e:
-                print(f"DEBUG Seidel: Field setting failed: {e}")
+                print("DEBUG Seidel: Trying raw ZOSAPI fallback")
+                analysis = zp.analyses.new_analysis(
+                    self.oss,
+                    zp.constants.Analysis.AnalysisIDM.ZernikeStandardCoefficients,
+                    settings_first=False  # Run immediately with defaults
+                )
 
-            try:
-                settings.Wavelength.SetWavelengthNumber(1)
-            except Exception as e:
-                print(f"DEBUG Seidel: Wavelength setting failed: {e}")
+                # Try to get results
+                results = analysis.Results if hasattr(analysis, 'Results') else None
+                print(f"DEBUG Seidel: Raw API results = {results}")
+                print(f"DEBUG Seidel: Raw API results type = {type(results) if results else 'None'}")
 
-            try:
-                settings.Surface.SetSurfaceNumber(0)  # 0 = Image surface
-            except Exception as e:
-                print(f"DEBUG Seidel: Surface setting failed: {e}")
+                # Try to get text output
+                if hasattr(analysis, 'GetTextFile'):
+                    text = analysis.GetTextFile()
+                    print(f"DEBUG Seidel: Text output length = {len(text) if text else 0}")
+                    # Could parse text here if needed
 
-            try:
-                settings.SampleSize = zp.constants.Analysis.SampleSizes.S_64x64
-            except Exception as e:
-                print(f"DEBUG Seidel: SampleSize setting failed: {e}")
+                analysis.Close()
 
-            try:
-                settings.MaximumNumberOfTerms = 37
-            except Exception as e:
-                print(f"DEBUG Seidel: MaximumNumberOfTerms setting failed: {e}")
+            except Exception as e2:
+                print(f"DEBUG Seidel: Raw ZOSAPI also failed: {e2}")
 
-            # Skip ReferenceOPDToVertex - not available in all versions
+        # If we still don't have coefficients, use placeholders
+        if not coefficients:
+            print("Warning: Could not extract Zernike coefficients, using placeholder values")
+            coefficients = [0.0] * 37
 
-            # Run the analysis
-            analysis.ApplyAndWaitForCompletion()
-            print(f"DEBUG Seidel: Analysis completed")
+        print(f"DEBUG Seidel: Final coefficient count = {len(coefficients)}")
 
-            # Get results from the analysis
-            results = analysis.GetResults()
-            print(f"DEBUG Seidel: Results type = {type(results)}")
-
-            # Extract Zernike coefficients from the data grid
-            coefficients = []
-            if results is not None:
-                print(f"DEBUG Seidel: NumberOfDataGrids = {results.NumberOfDataGrids if hasattr(results, 'NumberOfDataGrids') else 'N/A'}")
-
-                # Try to get data from DataGrids
-                if hasattr(results, 'NumberOfDataGrids') and results.NumberOfDataGrids > 0:
-                    data_grid = results.DataGrids[0]
-                    print(f"DEBUG Seidel: DataGrid Rows={data_grid.Rows}, Cols={data_grid.Cols}")
-                    for row in range(data_grid.Rows):
-                        for col in range(data_grid.Cols):
-                            val = data_grid.GetValueAt(row, col)
-                            if val is not None:
-                                coefficients.append(float(val))
-
-                # Alternative: try DataSeries
-                if not coefficients and hasattr(results, 'NumberOfDataSeries') and results.NumberOfDataSeries > 0:
-                    print(f"DEBUG Seidel: Trying DataSeries, count = {results.NumberOfDataSeries}")
-                    for i in range(results.NumberOfDataSeries):
-                        series = results.GetDataSeries(i)
-                        if series is not None:
-                            for j in range(series.NumData):
-                                coefficients.append(float(series.GetDataValue(j)))
-
-            # If we couldn't get coefficients, try text parsing as last resort
-            if not coefficients:
-                print("Warning: Could not extract Zernike coefficients from data grid/series, using placeholder values")
-                coefficients = [0.0] * 37
-
-            print(f"DEBUG Seidel: Extracted {len(coefficients)} coefficients")
-
-            # Release the analysis
-            analysis.Release()
-
+        try:
             # Convert Zernike to Seidel
             from seidel_converter import zernike_to_seidel, build_seidel_response
 

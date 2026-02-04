@@ -33,13 +33,15 @@ surface.Radius = float(radius)
 
 This applies to: radius, thickness, semi_diameter, conic, wavelength (um), weight, nd, vd, field x/y
 
-#### CrossSection Analysis
+#### CrossSection / System Viewer Analysis
 - **REQUIRES OpticStudio >= 24.1.0** for image export (check `zos.version`)
+- **USE `Viewer3D` instead of `CrossSection`** - CrossSection has export tool issues
+- `CrossSection` may fail with "system viewer export tool failed to run" even on v25.2
+- `Viewer3D` works reliably for image export per ZosPy examples
 - `result.data` is a **numpy array**, NOT a PIL Image
 - Use `plt.imshow(result.data)` then save the figure to PNG
-- Image export will fail with "system viewer export tool failed" on older versions
 - Always provide surface geometry as fallback for client-side rendering
-- Check version with: `if zos.version < (24, 1, 0): warn("...")`
+- Use `oncomplete=OnComplete.Release` to clean up analysis window
 
 #### Zernike/Seidel Analysis
 - ZosPy's `ZernikeStandardCoefficients().run()` has parsing bugs with OpticStudio v25.x
@@ -103,8 +105,34 @@ Known issues:
 - Wrapped each settings property in try/except for version compatibility
 - Added fallback to DataSeries if DataGrids is empty
 
+### 2026-02-04 (API consistency)
+- Standardized all response models to use `success` instead of mixed `ok`/`success`
+- Fixed field name mismatch in ray_trace_diagnostic: `failure_count` → `total_failures`, `failure_mode` → `dominant_mode`
+- Fixed SingleRayTrace parameter confusion: px/py are pupil coords, hx/hy are field coords
+- Fixed radius check: Zemax uses 0 for infinity, check `radius != 0 and abs(radius) < 1e10`
+- Fixed Pydantic validation: `errors: list[dict[str, str]]` requires non-None strings - always use `str(error_msg)`
+- `ISystemData.FirstOrderData` doesn't exist - calculate from LDE directly
+
+## Common AI Mistakes to Avoid
+
+1. **Don't assume ZOSAPI property names** - They vary between OpticStudio versions. Always use try/except.
+
+2. **Don't use ZosPy text parsers with OpticStudio v25** - They fail with "Unexpected end-of-input". Use raw ZOSAPI.
+
+3. **Don't confuse hx/hy with px/py** in SingleRayTrace:
+   - `hx, hy`: Normalized field coordinates
+   - `px, py`: Normalized pupil coordinates
+   - When iterating over pupil with `field=fi`, set hx=hy=0 and vary px/py
+
+4. **Don't return `None` in `dict[str, str]`** - Pydantic will fail. Always cast to `str()`.
+
+5. **Don't assume `result.get("error") or "fallback"` handles None** - Empty string `""` passes through. Check explicitly.
+
+6. **Don't use magic numbers for infinity** - Zemax uses 0 for flat surfaces, check `radius != 0 and abs(radius) < 1e10`.
+
 ## TODO / Known Issues
 
 - [ ] CrossSection image export fails ("system viewer export tool failed") - using fallback surface geometry
 - [ ] Ray trace header mismatch warnings (cosmetic, doesn't affect functionality)
 - [ ] Consider caching loaded systems to avoid reloading on every request
+- [ ] Seidel S4 (Petzval) and S5 (Distortion) are approximations - cannot compute true values from Zernike
