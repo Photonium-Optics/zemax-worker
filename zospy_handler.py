@@ -207,13 +207,13 @@ class ZosPyHandler:
         if wavelengths:
             first_wl = wavelengths[0]
             wl = wl_data.GetWavelength(1)
-            wl.Wavelength = first_wl.get("um", 0.5876)
-            wl.Weight = first_wl.get("weight", 1.0)
+            wl.Wavelength = float(first_wl.get("um", 0.5876))
+            wl.Weight = float(first_wl.get("weight", 1.0))
 
         # Add remaining wavelengths
         for i, wl_spec in enumerate(wavelengths[1:], start=2):
-            um = wl_spec.get("um", 0.5876)
-            weight = wl_spec.get("weight", 1.0)
+            um = float(wl_spec.get("um", 0.5876))
+            weight = float(wl_spec.get("weight", 1.0))
             wl_data.AddWavelength(um, weight)
 
         # Set primary wavelength
@@ -296,16 +296,16 @@ class ZosPyHandler:
 
             # Handle radius - may be direct value or object with 'value' key
             radius = self._extract_value(surf.get("radius"), float('inf'))
-            surface.Radius = radius
+            surface.Radius = float(radius) if radius != float('inf') else float('inf')
 
             # Handle thickness - may be direct value or object with 'value' key
             thickness = self._extract_value(surf.get("thickness"), 0.0)
-            surface.Thickness = thickness
+            surface.Thickness = float(thickness)
 
             # Semi-diameter
             sd_value = self._extract_value(surf.get("semi_diameter"))
             if sd_value is not None:
-                surface.SemiDiameter = sd_value
+                surface.SemiDiameter = float(sd_value)
 
             # Glass/material
             glass = surf.get("glass")
@@ -321,8 +321,8 @@ class ZosPyHandler:
                         surface.Material = glass_name
                     elif solve_type == "model" or (glass.get("nd") is not None and not glass_name):
                         # Model glass - use ZosPy's material model solver
-                        nd = glass.get("nd", 1.5)
-                        vd = glass.get("vd", 50.0)
+                        nd = float(glass.get("nd", 1.5))
+                        vd = float(glass.get("vd", 50.0))
                         try:
                             # ZosPy provides solvers for model glass
                             zp.solvers.material_model(
@@ -337,6 +337,7 @@ class ZosPyHandler:
 
             # Handle conic - may be direct value or object with 'value' key
             conic = self._extract_value(surf.get("conic"), 0.0)
+            conic = float(conic) if conic is not None else 0.0
             if conic != 0.0:
                 surface.Conic = conic
 
