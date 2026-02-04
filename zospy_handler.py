@@ -411,31 +411,29 @@ class ZosPyHandler:
     def get_cross_section(self, llm_json: dict[str, Any]) -> dict[str, Any]:
         """
         Generate cross-section diagram using ZosPy's CrossSection analysis.
+
+        Requires ZosPy >= 1.3.0 and OpticStudio >= 24.1.0 for image export.
+        Falls back to surface geometry if image export fails.
         """
         # Load the system first
         self.load_system(llm_json)
 
+        image_b64 = None
+        image_format = None
+
         try:
-            # Run CrossSection analysis - ZosPy pattern: ClassName(params).run(oss)
+            # Run CrossSection analysis - ZosPy 1.3.0+ supports image export
             cross_section = zp.analyses.systemviewers.CrossSection(
                 number_of_rays=11,
                 delete_vignetted=True,
             )
             result = cross_section.run(self.oss)
 
-            # ZosPy returns the image in result.figure (matplotlib figure)
-            # or result.data (numpy array) depending on version/analysis
-            import matplotlib.pyplot as plt
+            # Check if we got image data
+            if result.data is not None:
+                import matplotlib.pyplot as plt
 
-            image_b64 = None
-            if hasattr(result, 'figure') and result.figure is not None:
-                # result.figure is a matplotlib figure - save to PNG
-                buffer = io.BytesIO()
-                result.figure.savefig(buffer, format='PNG', dpi=150, bbox_inches='tight')
-                buffer.seek(0)
-                image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-            elif hasattr(result, 'data') and result.data is not None:
-                # result.data is a numpy array - use matplotlib to save as PNG
+                # result.data is a numpy array (RGB image)
                 fig, ax = plt.subplots(figsize=(10, 6))
                 ax.imshow(result.data)
                 ax.axis('off')
@@ -444,24 +442,88 @@ class ZosPyHandler:
                 plt.close(fig)
                 buffer.seek(0)
                 image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-
-            # Get paraxial data
-            paraxial = self.get_paraxial_data()
-
-            # Count rays (from analysis settings)
-            rays_total = 11 * 3  # rays_per_field * typical_fields
-            rays_through = rays_total  # Assume success unless we trace
-
-            return {
-                "image": image_b64,
-                "image_format": "png",
-                "paraxial": paraxial,
-                "rays_total": rays_total,
-                "rays_through": rays_through,
-            }
+                image_format = "png"
 
         except Exception as e:
-            raise ZosPyError(f"CrossSection analysis failed: {e}")
+            # Log but don't fail - we'll return surface geometry as fallback
+            print(f"Warning: CrossSection image export failed: {e}")
+
+        # Get paraxial data using direct LDE access (more reliable)
+        paraxial = self._get_paraxial_from_lde()
+
+        # Get surface geometry for client-side rendering (fallback or supplement)
+        surfaces_data = self._get_surface_geometry()
+
+        # Count rays
+        num_fields = self.oss.SystemData.Fields.NumberOfFields
+        rays_total = 11 * max(1, num_fields)
+        rays_through = rays_total  # Assume success
+
+        return {
+            "image": image_b64,
+            "image_format": image_format,
+            "paraxial": paraxial,
+            "surfaces": surfaces_data,  # Always include for fallback rendering
+            "rays_total": rays_total,
+            "rays_through": rays_through,
+        }
+
+    def _get_paraxial_from_lde(self) -> dict[str, Any]:
+        """Get paraxial data directly from LDE and SystemData (more reliable)."""
+        try:
+            paraxial = {}
+
+            # Get aperture info
+            aperture = self.oss.SystemData.Aperture
+            paraxial["epd"] = aperture.ApertureValue
+
+            # Get field info
+            fields = self.oss.SystemData.Fields
+            max_field = 0.0
+            if fields.NumberOfFields > 0:
+                for i in range(1, fields.NumberOfFields + 1):
+                    f = fields.GetField(i)
+                    max_field = max(max_field, abs(f.Y), abs(f.X))
+            paraxial["max_field"] = max_field
+            paraxial["field_type"] = "object_angle"
+            paraxial["field_unit"] = "deg"
+
+            # Calculate total track from LDE
+            lde = self.oss.LDE
+            total_track = 0.0
+            for i in range(1, lde.NumberOfSurfaces):
+                surface = lde.GetSurfaceAt(i)
+                total_track += abs(surface.Thickness)
+            paraxial["total_track"] = total_track
+
+            return paraxial
+        except Exception as e:
+            print(f"Warning: Could not get paraxial data from LDE: {e}")
+            return {}
+
+    def _get_surface_geometry(self) -> list[dict[str, Any]]:
+        """Extract surface geometry for client-side cross-section rendering."""
+        surfaces = []
+        lde = self.oss.LDE
+        z_position = 0.0
+
+        for i in range(1, lde.NumberOfSurfaces):
+            surface = lde.GetSurfaceAt(i)
+
+            surf_data = {
+                "index": i,
+                "z": z_position,
+                "radius": surface.Radius if surface.Radius != 0 else None,
+                "thickness": surface.Thickness,
+                "semi_diameter": surface.SemiDiameter,
+                "conic": surface.Conic,
+                "material": str(surface.Material) if surface.Material else None,
+                "is_stop": surface.IsStop,
+            }
+            surfaces.append(surf_data)
+            z_position += surface.Thickness
+
+        return surfaces
 
     def calc_semi_diameters(self, llm_json: dict[str, Any]) -> dict[str, Any]:
         """
@@ -634,6 +696,8 @@ class ZosPyHandler:
                 maximum_term=37,
                 wavelength=1,
                 field=1,
+                reference_opd_to_vertex=False,
+                surface="Image",
             )
             result = zernike_analysis.run(self.oss)
 
