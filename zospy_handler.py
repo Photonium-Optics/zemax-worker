@@ -390,57 +390,22 @@ class ZosPyHandler:
     def get_paraxial_data(self) -> dict[str, Any]:
         """Get first-order (paraxial) optical properties.
 
-        Uses direct ZOSAPI access to bypass ZosPy text parser issues with OpticStudio v25.
+        Delegates to _get_paraxial_from_lde() and adds F/# if available from aperture type.
         """
+        paraxial = self._get_paraxial_from_lde()
+
+        # Try to add F/# from aperture settings
         try:
-            # Get field info directly from SystemData
-            fields = self.oss.SystemData.Fields
-            field_type = "object_angle"  # Default
-            max_field = 0.0
-            if fields.NumberOfFields > 0:
-                for i in range(1, fields.NumberOfFields + 1):
-                    f = fields.GetField(i)
-                    max_field = max(max_field, abs(f.Y), abs(f.X))
-
-            paraxial = {
-                "field_type": field_type,
-                "max_field": max_field,
-                "field_unit": "deg" if field_type == "object_angle" else "mm",
-            }
-
-            # Get aperture info
             aperture = self.oss.SystemData.Aperture
-            paraxial["epd"] = aperture.ApertureValue
-
-            # Calculate total track from LDE
-            lde = self.oss.LDE
-            total_track = 0.0
-            for i in range(1, lde.NumberOfSurfaces):
-                surface = lde.GetSurfaceAt(i)
-                total_track += abs(surface.Thickness)
-            paraxial["total_track"] = total_track
-
-            # Calculate EFL and other first-order data from LDE surface powers
-            # This avoids relying on ZosPy text parsers which fail with OpticStudio v25
-            try:
-                # Simple paraxial ray trace to get EFL
-                # EFL = 1 / total_power where power = sum of surface powers
-                # For now, just get F/# from aperture settings
-                aperture_type = aperture.ApertureType
-                aperture_val = aperture.ApertureValue
-
-                # If aperture is F/#, we have it directly
-                fno_types = ["ImageSpaceFNumber", "FloatByStopSize", "ParaxialWorkingFNumber"]
-                aperture_type_name = str(aperture_type).split(".")[-1] if aperture_type else ""
-                if aperture_type_name in fno_types:
-                    paraxial["fno"] = aperture_val
-            except Exception as e:
-                logger.warning(f"Could not calculate first-order data: {e}")
-
-            return paraxial
+            aperture_type = aperture.ApertureType
+            fno_types = ["ImageSpaceFNumber", "FloatByStopSize", "ParaxialWorkingFNumber"]
+            aperture_type_name = str(aperture_type).split(".")[-1] if aperture_type else ""
+            if aperture_type_name in fno_types:
+                paraxial["fno"] = aperture.ApertureValue
         except Exception as e:
-            logger.warning(f"Could not get paraxial data: {e}")
-            return {}
+            logger.warning(f"Could not get F/# from aperture: {e}")
+
+        return paraxial
 
     def get_cross_section(self, llm_json: dict[str, Any]) -> dict[str, Any]:
         """
@@ -481,6 +446,8 @@ class ZosPyHandler:
                         wavelength="All",
                         color_rays_by="Fields",
                         delete_vignetted=True,
+                        surface_line_thickness="Thick",  # Required to show lens surfaces
+                        rays_line_thickness="Standard",
                         image_size=(1200, 800),
                     )
 
@@ -719,7 +686,8 @@ class ZosPyHandler:
                         else:
                             rays_failed += 1
 
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"Ray trace failed for field {fi}, pupil ({hx:.2f}, {hy:.2f}): {e}")
                         rays_failed += 1
 
             field_results.append({
@@ -985,8 +953,8 @@ class ZosPyHandler:
                                 surfaces_data[si]["y"].append(None)
                                 surfaces_data[si]["z"].append(None)
 
-                    except Exception:
-                        # Ray failed - add None values
+                    except Exception as e:
+                        logger.debug(f"Ray trace failed for field {fi}, wavelength {wi}, py={py:.2f}: {e}")
                         for si in range(num_surfaces):
                             surfaces_data[si]["y"].append(None)
                             surfaces_data[si]["z"].append(None)

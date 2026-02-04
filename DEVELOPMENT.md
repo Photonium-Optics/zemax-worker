@@ -53,10 +53,16 @@ analysis = zp.analyses.new_analysis(
 ```
 
 ### 5. CrossSection Image Export
-Use `image_output_file` parameter:
+Use `image_output_file` parameter AND `surface_line_thickness` to show lenses:
 ```python
-result = CrossSection(...).run(oss, image_output_file="/tmp/output.png")
+result = CrossSection(
+    number_of_rays=11,
+    surface_line_thickness="Thick",  # REQUIRED to show lens elements!
+    rays_line_thickness="Standard",
+    ...
+).run(oss, image_output_file="/tmp/output.png")
 ```
+Without `surface_line_thickness`, you only see rays - no lens elements.
 Always include surface geometry as fallback for client-side SVG rendering.
 
 ### 6. SingleRayTrace Parameters
@@ -75,6 +81,20 @@ if hasattr(data, 'front_focal_length'):
 - CrossSection export often fails - fallback to surface geometry works
 - Seidel S4/S5 from Zernike are approximations only
 - Ray trace header warnings are cosmetic
+- `distribution="hexapolar"` in ray_trace_diagnostic uses square grid (not actual hexapolar)
+
+## Code Review Notes (2026-02-04)
+
+**Addressed:**
+- Consolidated `get_paraxial_data` and `_get_paraxial_from_lde` - now delegates to single method
+- Added debug logging to silent ray trace exceptions (was `except Exception: pass`)
+
+**Technical Debt:**
+- `get_seidel()` is 150+ lines - could extract `_extract_zernike_from_zospy_wrapper()` and `_extract_zernike_from_raw_api()`
+- `ray_trace_diagnostic()` is 130+ lines - could extract `_trace_ray_grid()` and `_aggregate_surface_failures()`
+- Hotspot detection (>10% failures) could move to Mac side
+- `distribution` parameter accepted but not used (always uses square grid)
+- Surface index conventions inconsistent (some 0-indexed, some 1-indexed)
 
 ## Changelog
 
