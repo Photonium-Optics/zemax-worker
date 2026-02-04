@@ -2,6 +2,8 @@
 
 **IMPORTANT: Read this file before making changes to zemax-worker!**
 
+> **Cross-reference**: If editing the Mac-side proxy (`zemax-analysis-service/`), see `zemax-analysis-service/DEVELOPMENT.md` instead.
+
 ## ZosPy Documentation
 
 **Official ZosPy (Zemax API Python Wrapper) Resources:**

@@ -435,50 +435,79 @@ class ZosPyHandler:
             if zos_version and zos_version < (24, 1, 0):
                 print(f"Warning: OpticStudio {zos_version} < 24.1.0 - image export not supported, using fallback")
             else:
-                # Use Viewer3D instead of CrossSection - CrossSection has export issues
-                # Per ZosPy docs: Viewer3D works better for image export
-                from zospy.analyses.base import OnComplete
+                # Try raw ZOSAPI layout export with proper configuration
+                # ZosPy's wrapper has issues with file paths on Windows
+                print("DEBUG: Trying raw ZOSAPI CrossSection export")
 
-                viewer = zp.analyses.systemviewers.Viewer3D(
-                    number_of_rays=11,
-                    surface_line_thickness="Thick",
-                    rays_line_thickness="Thick",
-                    hide_x_bars=True,
-                    camera_viewpoint_angle_x=0,
-                    camera_viewpoint_angle_y=0,
-                    camera_viewpoint_angle_z=0,
-                )
-                print(f"DEBUG: Created Viewer3D analysis object")
+                # Get the tools interface
+                tools = self.oss._OpenSystem.Tools if hasattr(self.oss, '_OpenSystem') else None
+                if tools is None and hasattr(self.oss, 'Tools'):
+                    tools = self.oss.Tools
 
-                result = viewer.run(self.oss, oncomplete=OnComplete.Release)
-                print(f"DEBUG: Viewer3D.run() completed")
-                print(f"DEBUG: result type = {type(result)}")
-                print(f"DEBUG: result.data type = {type(result.data) if hasattr(result, 'data') else 'no data attr'}")
-                print(f"DEBUG: result.data is None = {result.data is None if hasattr(result, 'data') else 'N/A'}")
+                print(f"DEBUG: Tools = {tools}, type = {type(tools) if tools else 'None'}")
 
-                # Check if we got image data
-                if result.data is not None:
-                    import matplotlib.pyplot as plt
-                    print(f"DEBUG: result.data shape = {result.data.shape if hasattr(result.data, 'shape') else 'no shape'}")
+                if tools and hasattr(tools, 'Layouts'):
+                    layouts = tools.Layouts
+                    print(f"DEBUG: Layouts = {layouts}")
 
-                    # result.data is a numpy array (RGB image)
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    ax.imshow(result.data)
-                    ax.axis('off')
-                    buffer = io.BytesIO()
-                    fig.savefig(buffer, format='PNG', dpi=150, bbox_inches='tight', pad_inches=0)
-                    plt.close(fig)
-                    buffer.seek(0)
-                    image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-                    image_format = "png"
-                    print(f"DEBUG: Successfully encoded image, length = {len(image_b64)}")
+                    if hasattr(layouts, 'OpenCrossSectionExport'):
+                        layout_tool = layouts.OpenCrossSectionExport()
+                        print(f"DEBUG: layout_tool = {layout_tool}")
+
+                        if layout_tool is not None:
+                            # Configure for in-memory export (no file save)
+                            layout_tool.SaveImageAsFile = False
+                            layout_tool.NumberOfRays = 11
+
+                            # Run and wait
+                            layout_tool.RunAndWaitForCompletion()
+                            print(f"DEBUG: layout_tool.Succeeded = {layout_tool.Succeeded}")
+
+                            if layout_tool.Succeeded:
+                                # Get image data
+                                export_data = layout_tool.ImageExportData
+                                if export_data is not None:
+                                    # Get bitmap buffer
+                                    width = export_data.Width
+                                    height = export_data.Height
+                                    print(f"DEBUG: Image size = {width}x{height}")
+
+                                    # Export to a temp file with simple filename
+                                    import tempfile
+                                    import os
+                                    temp_filename = "zemax_export.bmp"
+                                    temp_path = os.path.join(tempfile.gettempdir(), temp_filename)
+
+                                    layout_tool.SaveImageAsFile = True
+                                    layout_tool.OutputFileName = temp_filename  # Just filename, not full path
+                                    layout_tool.OutputPath = tempfile.gettempdir()
+                                    layout_tool.RunAndWaitForCompletion()
+
+                                    if os.path.exists(temp_path):
+                                        from PIL import Image
+                                        img = Image.open(temp_path)
+                                        buffer = io.BytesIO()
+                                        img.save(buffer, format='PNG')
+                                        buffer.seek(0)
+                                        image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                                        image_format = "png"
+                                        os.remove(temp_path)
+                                        print(f"DEBUG: Successfully exported via raw API, size = {len(image_b64)}")
+                            else:
+                                print(f"DEBUG: layout_tool.Succeeded = False")
+
+                            layout_tool.Close()
+                        else:
+                            print("DEBUG: OpenCrossSectionExport returned None")
+                    else:
+                        print("DEBUG: Layouts has no OpenCrossSectionExport")
                 else:
-                    print(f"DEBUG: result.data is None - image export not available")
+                    print("DEBUG: Tools or Layouts not available")
 
         except Exception as e:
             # Log but don't fail - we'll return surface geometry as fallback
             import traceback
-            print(f"Warning: Viewer3D image export failed: {e}")
+            print(f"Warning: CrossSection image export failed: {e}")
             print(f"DEBUG: Full traceback:\n{traceback.format_exc()}")
 
         # Get paraxial data using direct LDE access (more reliable)
