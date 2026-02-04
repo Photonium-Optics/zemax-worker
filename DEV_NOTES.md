@@ -1,0 +1,81 @@
+# Zemax Worker Development Notes
+
+**IMPORTANT: Read this file before making changes to zemax-worker!**
+
+## Key Lessons Learned
+
+### 1. ZosPy API Quirks
+
+#### Wavelength Selection
+- **WRONG**: `wl_data.SelectWavelength(index)` - Does NOT exist on `IWavelengths`
+- **RIGHT**: `wl_data.GetWavelength(index).MakePrimary()` - Call on individual wavelength object
+
+#### Type Conversion for .NET/COM
+All numeric values passed to ZosPy/OpticStudio MUST be explicitly converted to Python `float()`:
+```python
+# WRONG - may pass strings from JSON
+surface.Radius = radius
+
+# RIGHT - explicit float conversion
+surface.Radius = float(radius)
+```
+
+This applies to: radius, thickness, semi_diameter, conic, wavelength (um), weight, nd, vd, field x/y
+
+#### CrossSection Analysis
+- `result.data` is a **numpy array**, NOT a PIL Image
+- Use `plt.imshow(result.data)` then save the figure to PNG
+- Image export may fail on some OpticStudio versions - always have fallback
+
+#### Zernike/Seidel Analysis
+- ZosPy's `ZernikeStandardCoefficients().run()` has parsing bugs with OpticStudio v25.x
+- Use raw ZOSAPI access via `zp.analyses.new_analysis()` to bypass parser:
+```python
+analysis = zp.analyses.new_analysis(
+    self.oss,
+    zp.constants.Analysis.AnalysisIDM.ZernikeStandardCoefficients,
+    settings_first=True
+)
+```
+
+#### GeneralLensData Attributes
+Not all attributes exist in all ZosPy versions. Use `hasattr()` checks:
+- `effective_focal_length_air` - Usually exists
+- `back_focal_length` - Usually exists
+- `front_focal_length` - **MAY NOT EXIST** in some versions
+- `total_track` - May not exist
+- `exit_pupil_diameter` - May not exist
+
+### 2. Threading Constraints
+
+**CRITICAL**: Must run with `workers=1` due to COM single-threaded apartment (STA) requirements.
+All ZosPy operations are serialized via `asyncio.Lock()`.
+
+### 3. OpticStudio Version Compatibility
+
+Current target: **OpticStudio v25.2** (Ansys 2025 R2)
+
+Known issues:
+- Text output parsing in ZosPy may fail - use raw API access
+- Some analysis result structures differ from older versions
+
+### 4. Error Handling
+
+- ZosPy errors often indicate reconnection needed
+- Implement `_reconnect_zospy()` fallback
+- Log warnings but don't fail on non-critical data (paraxial properties)
+
+## Changelog
+
+### 2026-02-04
+- Fixed `SelectWavelength` -> `MakePrimary()` for setting primary wavelength
+- Added explicit `float()` conversions for all numeric values passed to ZosPy
+- Fixed CrossSection to handle numpy array result instead of PIL Image
+- Made paraxial data extraction resilient with `hasattr()` checks
+- Switched Seidel analysis to raw ZOSAPI access to avoid parser bugs
+
+## TODO / Known Issues
+
+- [ ] CrossSection image export fails ("system viewer export tool failed") - using fallback surface geometry
+- [ ] Ray trace header mismatch warnings (cosmetic, doesn't affect functionality)
+- [ ] Consider caching loaded systems to avoid reloading on every request
