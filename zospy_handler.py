@@ -216,10 +216,11 @@ class ZosPyHandler:
             weight = float(wl_spec.get("weight", 1.0))
             wl_data.AddWavelength(um, weight)
 
-        # Set primary wavelength using SelectWavelength on the collection
-        # Documentation shows: wl_data.SelectWavelength(index)
+        # Set primary wavelength
+        # Use MakePrimary() on the individual wavelength object
         if 1 <= primary_wavelength <= len(wavelengths):
-            wl_data.SelectWavelength(primary_wavelength)
+            wl = wl_data.GetWavelength(primary_wavelength)
+            wl.MakePrimary()
 
     # Mapping from LLM JSON field types to ZosPy constant names
     _FIELD_TYPE_MAP = {
