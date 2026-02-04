@@ -341,11 +341,11 @@ class ZosPyHandler:
             if conic != 0.0:
                 surface.Conic = conic
 
-            # Set as stop surface using MakeThisSurfaceTheStop() method
-            # Note: IsStop is a read-only property, use the method instead
+            # Set as stop surface using IsStop property
+            # Per Zemax Community: oss.LDE.GetSurfaceAt(xx).IsStop = True
             if i == stop_index:
                 try:
-                    surface.MakeThisSurfaceTheStop()
+                    surface.IsStop = True
                 except Exception as e:
                     raise ZosPyError(f"Failed to set surface {i} as stop: {e}")
 
