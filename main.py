@@ -221,8 +221,10 @@ class HealthResponse(BaseModel):
 class CrossSectionResponse(BaseModel):
     """Cross-section diagram response."""
     success: bool = Field(description="Whether the operation succeeded")
-    image: Optional[str] = Field(default=None, description="Base64-encoded PNG image")
-    image_format: Optional[str] = Field(default=None, description="Image format (png, etc.)")
+    image: Optional[str] = Field(default=None, description="Base64-encoded PNG image or numpy array bytes")
+    image_format: Optional[str] = Field(default=None, description="Image format: 'png' or 'numpy_array'")
+    array_shape: Optional[list[int]] = Field(default=None, description="Shape for numpy_array reconstruction")
+    array_dtype: Optional[str] = Field(default=None, description="Dtype for numpy_array reconstruction")
     paraxial: Optional[dict[str, Any]] = Field(default=None, description="Paraxial properties")
     surfaces: Optional[list[dict[str, Any]]] = Field(default=None, description="Surface geometry for fallback rendering")
     rays_total: Optional[int] = Field(default=None, description="Total rays traced")
@@ -374,6 +376,8 @@ async def get_cross_section(request: SystemRequest, _: None = Depends(verify_api
                 success=True,
                 image=result.get("image"),
                 image_format=result.get("image_format"),
+                array_shape=result.get("array_shape"),
+                array_dtype=result.get("array_dtype"),
                 paraxial=result.get("paraxial"),
                 surfaces=result.get("surfaces"),
                 rays_total=result.get("rays_total"),

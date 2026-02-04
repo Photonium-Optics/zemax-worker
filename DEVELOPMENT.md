@@ -34,6 +34,7 @@ All endpoints require `zmx_content` (base64-encoded .zmx file) in the request bo
 - Response formatting and aggregation logic
 - Business logic (margin calculations, clamping, etc.)
 - Fallback strategies and retry logic for failed analysis calls
+- Matplotlib rendering (cross-section numpy array fallback)
 
 ## ZosPy Docs
 

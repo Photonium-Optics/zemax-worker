@@ -160,6 +160,9 @@ class ZosPyHandler:
 
         image_b64 = None
         image_format = None
+        # Metadata for numpy array reconstruction (only used when image_format="numpy_array")
+        array_shape = None
+        array_dtype = None
 
         # Check OpticStudio version - image export requires >= 24.1.0
         try:
@@ -204,18 +207,14 @@ class ZosPyHandler:
                         os.remove(temp_path)
                         logger.info(f"Successfully exported CrossSection image, size = {len(image_b64)}")
                     elif result.data is not None:
-                        # Fallback: use the numpy array if file wasn't created
-                        import matplotlib.pyplot as plt
-                        fig, ax = plt.subplots(figsize=(12, 8))
-                        ax.imshow(result.data)
-                        ax.axis('off')
-                        buffer = io.BytesIO()
-                        fig.savefig(buffer, format='PNG', dpi=150, bbox_inches='tight', pad_inches=0)
-                        plt.close(fig)
-                        buffer.seek(0)
-                        image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-                        image_format = "png"
-                        logger.info(f"Used numpy array fallback for CrossSection, size = {len(image_b64)}")
+                        # Fallback: return raw numpy array for Mac-side rendering
+                        # This keeps matplotlib dependency on Mac side only
+                        arr = np.array(result.data)
+                        image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                        image_format = "numpy_array"
+                        array_shape = list(arr.shape)
+                        array_dtype = str(arr.dtype)
+                        logger.info(f"Returning numpy array fallback for CrossSection, shape={arr.shape}, dtype={arr.dtype}")
                     else:
                         logger.warning("CrossSection: no file created and result.data is None")
 
@@ -243,6 +242,8 @@ class ZosPyHandler:
         return {
             "image": image_b64,
             "image_format": image_format,
+            "array_shape": array_shape,  # For numpy_array reconstruction
+            "array_dtype": array_dtype,  # For numpy_array reconstruction
             "paraxial": paraxial,
             "surfaces": surfaces_data,  # Always include for fallback rendering
             "rays_total": rays_total,
