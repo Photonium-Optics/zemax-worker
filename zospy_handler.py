@@ -217,8 +217,10 @@ class ZosPyHandler:
             wl_data.AddWavelength(um, weight)
 
         # Set primary wavelength
+        # Use MakePrimary() on the individual wavelength object, not SelectWavelength on collection
         if 1 <= primary_wavelength <= len(wavelengths):
-            wl_data.SelectWavelength(primary_wavelength)
+            wl = wl_data.GetWavelength(primary_wavelength)
+            wl.MakePrimary()
 
     # Mapping from LLM JSON field types to ZosPy constant names
     _FIELD_TYPE_MAP = {
