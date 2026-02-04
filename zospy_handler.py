@@ -37,54 +37,9 @@ class ZosPyHandler:
 
     Manages the connection lifecycle and provides methods for
     optical analysis operations.
+
+    Systems are loaded via load_zmx_file() only - no manual surface building.
     """
-
-    def _to_float(self, value: Any, default: float, name: str) -> float:
-        """
-        Convert a value to float with error handling.
-
-        All numeric values passed to ZosPy/OpticStudio MUST be explicitly
-        converted to Python float() to avoid COM type conversion issues.
-
-        Args:
-            value: The value to convert (may be string, int, float, or None)
-            default: Default value if input is None
-            name: Parameter name for error messages
-
-        Returns:
-            The value as a Python float
-
-        Raises:
-            ZosPyError: If the value cannot be converted to float
-        """
-        if value is None:
-            return default
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            raise ZosPyError(f"Invalid {name}: {value!r} (must be a number)")
-
-    def _extract_value(self, spec: Any, default: Any = None) -> Any:
-        """
-        Extract a value from an LLM JSON spec that may have solve information.
-
-        LLM JSON format allows surface properties to be either direct values
-        or objects with 'value' and optional 'solve' keys:
-            - Direct: {"radius": 100.0}
-            - With solve: {"radius": {"value": 100.0, "solve": "variable"}}
-
-        Args:
-            spec: The specification (None, direct value, or dict with 'value' key)
-            default: Default value if spec is None or missing 'value'
-
-        Returns:
-            The extracted value
-        """
-        if spec is None:
-            return default
-        if isinstance(spec, dict):
-            return spec.get("value", default)
-        return spec
 
     def __init__(self):
         """Initialize ZosPy and connect to OpticStudio."""
@@ -135,45 +90,6 @@ class ZosPyHandler:
             "zospy_version": zospy_version,
         }
 
-    def load_system(self, llm_json: dict[str, Any]) -> dict[str, Any]:
-        """
-        Load an optical system from LLM JSON format into OpticStudio.
-
-        Args:
-            llm_json: Full LLM JSON with system and surfaces
-
-        Returns:
-            Dict with load status and system info
-        """
-        # Create a new system
-        self.oss.new()
-
-        system = llm_json.get("system", {})
-        surfaces = llm_json.get("surfaces", [])
-
-        if not surfaces:
-            raise ZosPyError("Cannot create optical system with no surfaces")
-
-        # Set up aperture
-        self._setup_aperture(system)
-
-        # Set up wavelengths
-        self._setup_wavelengths(system)
-
-        # Set up fields
-        self._setup_fields(system)
-
-        # Set up surfaces
-        self._setup_surfaces(surfaces)
-
-        # Update the system to compute derived values
-        self.oss.make_sequential()
-
-        return {
-            "num_surfaces": len(surfaces),
-            "efl": self._get_efl(),
-        }
-
     def load_zmx_file(self, file_path: str) -> dict[str, Any]:
         """
         Load an optical system from a .zmx file directly into OpticStudio.
@@ -202,210 +118,6 @@ class ZosPyHandler:
             "num_surfaces": num_surfaces,
             "efl": self._get_efl(),
         }
-
-    def _setup_aperture(self, system: dict[str, Any]):
-        """Configure system aperture using ZosPy API."""
-        pupil = system.get("pupil") or {}
-        mode = pupil.get("mode") or "epd"  # Handles None and empty string
-        value = self._to_float(pupil.get("value"), 10.0, "aperture value")
-
-        # ZosPy uses zp.constants for aperture types
-        # Note: constant names may vary by ZosPy version
-        aperture_types = zp.constants.SystemData.ZemaxApertureType
-
-        if mode == "epd":
-            if hasattr(aperture_types, "EntrancePupilDiameter"):
-                self.oss.SystemData.Aperture.ApertureType = aperture_types.EntrancePupilDiameter
-            else:
-                raise ZosPyError(f"Aperture mode '{mode}' not supported by this ZosPy version")
-        elif mode in ("fno", "image_space_fnum"):
-            # Try ImageSpaceFNumber first, fall back to FloatByStopSize
-            if hasattr(aperture_types, "ImageSpaceFNumber"):
-                self.oss.SystemData.Aperture.ApertureType = aperture_types.ImageSpaceFNumber
-            elif hasattr(aperture_types, "FloatByStopSize"):
-                self.oss.SystemData.Aperture.ApertureType = aperture_types.FloatByStopSize
-            else:
-                raise ZosPyError(f"Aperture mode '{mode}' not supported by this ZosPy version")
-        elif mode in ("na", "na_object"):
-            if hasattr(aperture_types, "ObjectSpaceNA"):
-                self.oss.SystemData.Aperture.ApertureType = aperture_types.ObjectSpaceNA
-            else:
-                raise ZosPyError(f"Aperture mode '{mode}' not supported by this ZosPy version")
-        elif mode == "float_by_stop_size":
-            if hasattr(aperture_types, "FloatByStopSize"):
-                self.oss.SystemData.Aperture.ApertureType = aperture_types.FloatByStopSize
-            else:
-                raise ZosPyError(f"Aperture mode '{mode}' not supported by this ZosPy version")
-        elif mode == "image_space_paraxial_working_fnum":
-            if hasattr(aperture_types, "ParaxialWorkingFNumber"):
-                self.oss.SystemData.Aperture.ApertureType = aperture_types.ParaxialWorkingFNumber
-            else:
-                raise ZosPyError(f"Aperture mode '{mode}' not supported by this ZosPy version")
-        else:
-            valid_modes = ["epd", "fno", "image_space_fnum", "na", "na_object",
-                           "float_by_stop_size", "image_space_paraxial_working_fnum"]
-            raise ZosPyError(f"Unknown aperture mode: {mode!r}. Valid modes: {', '.join(valid_modes)}")
-
-        self.oss.SystemData.Aperture.ApertureValue = value
-
-    def _setup_wavelengths(self, system: dict[str, Any]):
-        """Configure system wavelengths using ZosPy API."""
-        wavelengths = system.get("wavelengths", [{"um": 0.5876}])
-        primary_wavelength = system.get("primary_wavelength", 1)  # 1-indexed
-
-        # Get wavelength data object
-        wl_data = self.oss.SystemData.Wavelengths
-
-        # Remove all existing wavelengths first
-        # ZosPy: use RemoveWavelength with 1-based index, remove from end to avoid index shift
-        while wl_data.NumberOfWavelengths > 1:
-            wl_data.RemoveWavelength(wl_data.NumberOfWavelengths)
-
-        # Set the first wavelength (can't remove the last one, so modify it)
-        if wavelengths:
-            first_wl = wavelengths[0]
-            wl = wl_data.GetWavelength(1)
-            wl.Wavelength = float(first_wl.get("um", 0.5876))
-            wl.Weight = float(first_wl.get("weight", 1.0))
-
-        # Add remaining wavelengths
-        for i, wl_spec in enumerate(wavelengths[1:], start=2):
-            um = float(wl_spec.get("um", 0.5876))
-            weight = float(wl_spec.get("weight", 1.0))
-            wl_data.AddWavelength(um, weight)
-
-        # Set primary wavelength
-        # Use MakePrimary() on the individual wavelength object
-        if 1 <= primary_wavelength <= len(wavelengths):
-            wl = wl_data.GetWavelength(primary_wavelength)
-            wl.MakePrimary()
-
-    # Mapping from LLM JSON field types to ZosPy constant names
-    _FIELD_TYPE_MAP = {
-        "object_angle": "Angle",
-        "object_height": "ObjectHeight",
-        "image_height": "RealImageHeight",
-        "real_image_height": "RealImageHeight",
-        "paraxial_image_height": "ParaxialImageHeight",
-    }
-
-    def _setup_fields(self, system: dict[str, Any]):
-        """Configure system fields using ZosPy API."""
-        field_type = system.get("field_type") or "object_angle"  # Handles None and empty string
-        fields = system.get("fields") or [{"x": 0, "y": 0}]  # Handles None and empty list
-
-        field_data = self.oss.SystemData.Fields
-
-        # Set field type using ZosPy constants
-        field_types = zp.constants.SystemData.FieldType
-
-        if field_type not in self._FIELD_TYPE_MAP:
-            valid_types = list(self._FIELD_TYPE_MAP.keys())
-            raise ZosPyError(f"Unknown field type: {field_type!r}. Valid types: {', '.join(valid_types)}")
-
-        attr_name = self._FIELD_TYPE_MAP[field_type]
-        if hasattr(field_types, attr_name):
-            field_data.SetFieldType(getattr(field_types, attr_name))
-        else:
-            raise ZosPyError(f"Field type '{field_type}' not supported by this ZosPy version")
-
-        # Remove all fields except the first (can't remove last field)
-        while field_data.NumberOfFields > 1:
-            field_data.RemoveField(field_data.NumberOfFields)
-
-        # Set the first field
-        if fields:
-            first_field = fields[0] if isinstance(fields[0], dict) else {}
-            f = field_data.GetField(1)
-            f.X = self._to_float(first_field.get("x"), 0, "field X")
-            f.Y = self._to_float(first_field.get("y"), 0, "field Y")
-            f.Weight = self._to_float(first_field.get("weight"), 1.0, "field weight")
-
-        # Add remaining fields
-        for field_spec in fields[1:]:
-            if not isinstance(field_spec, dict):
-                continue
-            x = self._to_float(field_spec.get("x"), 0, "field X")
-            y = self._to_float(field_spec.get("y"), 0, "field Y")
-            weight = self._to_float(field_spec.get("weight"), 1.0, "field weight")
-            field_data.AddField(x, y, weight)
-
-    def _setup_surfaces(self, surfaces: list[dict[str, Any]]):
-        """Configure system surfaces using ZosPy API."""
-        lde = self.oss.LDE  # Lens Data Editor
-
-        # Find stop surface index
-        stop_index = None
-        for i, surf in enumerate(surfaces):
-            if surf.get("stop", False):
-                stop_index = i
-                break
-
-        # Ensure we have enough surfaces (LDE starts with Object and Image surfaces)
-        # We need len(surfaces) surfaces between Object (0) and Image
-        while lde.NumberOfSurfaces < len(surfaces) + 1:  # +1 for image surface
-            # Insert before image surface
-            lde.InsertNewSurfaceAt(lde.NumberOfSurfaces)
-
-        # Configure each surface
-        for i, surf in enumerate(surfaces):
-            # Surface index is i+1 (0 is Object surface)
-            surface = lde.GetSurfaceAt(i + 1)
-
-            # Handle radius - may be direct value or object with 'value' key
-            radius = self._extract_value(surf.get("radius"), float('inf'))
-            surface.Radius = float(radius) if radius != float('inf') else float('inf')
-
-            # Handle thickness - may be direct value or object with 'value' key
-            thickness = self._extract_value(surf.get("thickness"), 0.0)
-            surface.Thickness = float(thickness)
-
-            # Semi-diameter
-            sd_value = self._extract_value(surf.get("semi_diameter"))
-            if sd_value is not None:
-                surface.SemiDiameter = float(sd_value)
-
-            # Glass/material
-            glass = surf.get("glass")
-            if glass:
-                if isinstance(glass, str):
-                    surface.Material = glass
-                elif isinstance(glass, dict):
-                    glass_name = glass.get("name")
-                    solve_type = glass.get("solve", "fixed")
-
-                    if glass_name and solve_type == "fixed":
-                        # Use catalog glass
-                        surface.Material = glass_name
-                    elif solve_type == "model" or (glass.get("nd") is not None and not glass_name):
-                        # Model glass - use ZosPy's material model solver
-                        nd = float(glass.get("nd", 1.5))
-                        vd = float(glass.get("vd", 50.0))
-                        try:
-                            # ZosPy provides solvers for model glass
-                            zp.solvers.material_model(
-                                surface.MaterialCell,
-                                refractive_index=nd,
-                                abbe_number=vd
-                            )
-                        except Exception as e:
-                            # Fallback: just set a placeholder name
-                            logger.warning(f"Could not set model glass solver: {e}")
-                            surface.Material = f"MODEL_{nd:.4f}_{vd:.1f}"
-
-            # Handle conic - may be direct value or object with 'value' key
-            conic = self._extract_value(surf.get("conic"), 0.0)
-            conic = float(conic) if conic is not None else 0.0
-            if conic != 0.0:
-                surface.Conic = conic
-
-            # Set as stop surface using IsStop property
-            # Per Zemax Community: oss.LDE.GetSurfaceAt(xx).IsStop = True
-            if i == stop_index:
-                try:
-                    surface.IsStop = True
-                except Exception as e:
-                    raise ZosPyError(f"Failed to set surface {i} as stop: {e}")
 
     def _get_efl(self) -> Optional[float]:
         """Get effective focal length using ZosPy's SystemData analysis."""
@@ -436,22 +148,15 @@ class ZosPyHandler:
 
         return paraxial
 
-    def get_cross_section(self, llm_json: dict[str, Any] = None, *, skip_load: bool = False) -> dict[str, Any]:
+    def get_cross_section(self) -> dict[str, Any]:
         """
         Generate cross-section diagram using ZosPy's CrossSection analysis.
 
         Requires ZosPy >= 1.3.0 and OpticStudio >= 24.1.0 for image export.
         Falls back to surface geometry if image export fails.
 
-        Args:
-            llm_json: LLM JSON optical system (required if skip_load=False)
-            skip_load: If True, assume system is already loaded in OpticStudio
+        Note: System must be pre-loaded via load_zmx_file().
         """
-        # Load the system first (unless already loaded)
-        if not skip_load:
-            if llm_json is None:
-                raise ZosPyError("llm_json required when skip_load=False")
-            self.load_system(llm_json)
 
         image_b64 = None
         image_format = None
@@ -604,20 +309,12 @@ class ZosPyHandler:
 
         return surfaces
 
-    def calc_semi_diameters(self, llm_json: dict[str, Any] = None, *, skip_load: bool = False) -> dict[str, Any]:
+    def calc_semi_diameters(self) -> dict[str, Any]:
         """
         Calculate semi-diameters by reading from surfaces after ray trace.
 
-        Args:
-            llm_json: LLM JSON optical system (required if skip_load=False)
-            skip_load: If True, assume system is already loaded in OpticStudio
+        Note: System must be pre-loaded via load_zmx_file().
         """
-        # Load the system (unless already loaded)
-        if not skip_load:
-            if llm_json is None:
-                raise ZosPyError("llm_json required when skip_load=False")
-            self.load_system(llm_json)
-
         semi_diameters = []
         lde = self.oss.LDE
 
@@ -635,29 +332,30 @@ class ZosPyHandler:
 
     def ray_trace_diagnostic(
         self,
-        llm_json: dict[str, Any] = None,
         num_rays: int = 50,
         distribution: str = "hexapolar",
-        *,
-        skip_load: bool = False,
     ) -> dict[str, Any]:
         """
-        Run ray trace diagnostic to identify ray failures.
+        Trace rays through the system and return raw per-ray results.
 
-        Uses ZosPy's ray tracing to trace rays and detect failures.
+        This is a "dumb executor" that returns raw data only - no aggregation,
+        no hotspot detection, no threshold calculations. All post-processing
+        happens on the Mac side (zemax-analysis-service).
+
+        Note: System must be pre-loaded via load_zmx_file().
 
         Args:
-            llm_json: LLM JSON optical system (required if skip_load=False)
-            num_rays: Number of rays per field
-            distribution: Ray distribution type
-            skip_load: If True, assume system is already loaded in OpticStudio
-        """
-        # Load the system (unless already loaded)
-        if not skip_load:
-            if llm_json is None:
-                raise ZosPyError("llm_json required when skip_load=False")
-            self.load_system(llm_json)
+            num_rays: Number of rays per field (determines grid density)
+            distribution: Ray distribution type (currently uses square grid)
 
+        Returns:
+            Dict with:
+                - paraxial: Basic paraxial data (efl, bfl, fno, total_track)
+                - num_surfaces: Number of surfaces in system
+                - num_fields: Number of fields
+                - raw_rays: List of per-ray results with field, pupil coords, success/failure info
+                - surface_semi_diameters: List of semi-diameters from LDE
+        """
         # Get paraxial data
         paraxial = self.get_paraxial_data()
 
@@ -667,38 +365,47 @@ class ZosPyHandler:
         fields = self.oss.SystemData.Fields
         num_fields = fields.NumberOfFields
 
-        # Trace rays for each field
-        field_results = []
-        all_surface_failures: dict[int, dict[str, Any]] = {}
+        # Extract surface semi-diameters from LDE
+        surface_semi_diameters = []
+        for i in range(1, lde.NumberOfSurfaces):
+            surface = lde.GetSurfaceAt(i)
+            surface_semi_diameters.append(surface.SemiDiameter)
 
-        # Calculate grid size
+        # Calculate grid size from num_rays
         grid_size = int(np.sqrt(num_rays))
+
+        # Collect raw ray results
+        raw_rays = []
 
         for fi in range(1, num_fields + 1):
             field = fields.GetField(fi)
             field_x, field_y = field.X, field.Y
 
-            rays_traced = 0
-            rays_reached = 0
-            rays_failed = 0
-
             # Trace a grid of rays using ZosPy's single ray trace
-            for hx in np.linspace(-1, 1, grid_size):
-                for hy in np.linspace(-1, 1, grid_size):
-                    if hx**2 + hy**2 > 1:
+            for px in np.linspace(-1, 1, grid_size):
+                for py in np.linspace(-1, 1, grid_size):
+                    if px**2 + py**2 > 1:
                         continue  # Skip rays outside pupil
 
-                    rays_traced += 1
+                    ray_result = {
+                        "field_index": fi - 1,  # 0-indexed
+                        "field_x": field_x,
+                        "field_y": field_y,
+                        "px": float(px),
+                        "py": float(py),
+                        "reached_image": False,
+                        "failed_surface": None,
+                        "failure_mode": None,
+                    }
 
                     try:
                         # ZosPy SingleRayTrace: px/py are normalized pupil coordinates (-1 to 1)
-                        # hx/hy are normalized field coordinates (-1 to 1)
-                        # When field index is specified, we iterate over pupil positions
+                        # hx/hy are normalized field coordinates (set to 0 when using field index)
                         ray_trace = zp.analyses.raysandspots.SingleRayTrace(
-                            hx=0.0,  # Use on-axis field direction
+                            hx=0.0,
                             hy=0.0,
-                            px=hx,   # Pupil X coordinate (iterating over pupil)
-                            py=hy,   # Pupil Y coordinate (iterating over pupil)
+                            px=px,
+                            py=py,
                             wavelength=1,
                             field=fi,
                         )
@@ -713,57 +420,34 @@ class ZosPyHandler:
                             else:
                                 df = ray_data  # Fallback for older versions
 
-                            # Check if ray reached image (last surface has valid data)
+                            # Check if ray reached image
                             if hasattr(df, '__len__') and len(df) > 0:
                                 # Check for error codes - vignetted rays have error_code != 0
                                 if hasattr(df, 'columns') and 'error_code' in df.columns:
                                     # Find first surface with error
                                     error_rows = df[df['error_code'] != 0]
                                     if len(error_rows) > 0:
-                                        rays_failed += 1
                                         first_error = error_rows.iloc[0]
-                                        surf_idx = int(first_error.get('surface', 0))
-                                        if surf_idx not in all_surface_failures:
-                                            all_surface_failures[surf_idx] = {
-                                                "surface_index": surf_idx,
-                                                "total_failures": 0,
-                                                "dominant_mode": "VIGNETTE",
-                                            }
-                                        all_surface_failures[surf_idx]["total_failures"] += 1
+                                        ray_result["reached_image"] = False
+                                        ray_result["failed_surface"] = int(first_error.get('surface', 0))
+                                        # Map error code to failure mode string
+                                        error_code = int(first_error.get('error_code', 0))
+                                        ray_result["failure_mode"] = self._error_code_to_mode(error_code)
                                     else:
-                                        rays_reached += 1
+                                        ray_result["reached_image"] = True
                                 else:
                                     # No error column - assume success
-                                    rays_reached += 1
+                                    ray_result["reached_image"] = True
                             else:
-                                rays_failed += 1
+                                ray_result["failure_mode"] = "NO_DATA"
                         else:
-                            rays_failed += 1
+                            ray_result["failure_mode"] = "NO_RESULT"
 
                     except Exception as e:
-                        logger.debug(f"Ray trace failed for field {fi}, pupil ({hx:.2f}, {hy:.2f}): {e}")
-                        rays_failed += 1
+                        logger.debug(f"Ray trace failed for field {fi}, pupil ({px:.2f}, {py:.2f}): {e}")
+                        ray_result["failure_mode"] = "EXCEPTION"
 
-            field_results.append({
-                "field_index": fi - 1,
-                "field_x": field_x,
-                "field_y": field_y,
-                "rays_traced": rays_traced,
-                "rays_reached_image": rays_reached,
-                "rays_failed": rays_failed,
-                "surface_failures": [],
-            })
-
-        # Build aggregate surface failures
-        aggregate_surface_failures = list(all_surface_failures.values())
-
-        # Find hotspots (surfaces causing >10% of failures)
-        total_failures = sum(f["total_failures"] for f in aggregate_surface_failures)
-        hotspots = []
-        if total_failures > 0:
-            for sf in aggregate_surface_failures:
-                if sf["total_failures"] / total_failures > 0.1:
-                    hotspots.append(sf["surface_index"])
+                    raw_rays.append(ray_result)
 
         return {
             "paraxial": {
@@ -774,33 +458,53 @@ class ZosPyHandler:
             },
             "num_surfaces": num_surfaces,
             "num_fields": num_fields,
-            "field_results": field_results,
-            "aggregate_surface_failures": aggregate_surface_failures,
-            "hotspots": hotspots,
+            "raw_rays": raw_rays,
+            "surface_semi_diameters": surface_semi_diameters,
         }
 
-    def get_seidel(self, llm_json: dict[str, Any] = None, *, skip_load: bool = False) -> dict[str, Any]:
+    def _error_code_to_mode(self, error_code: int) -> str:
         """
-        Get Seidel aberrations via Zernike coefficients.
+        Map ZosPy/OpticStudio error codes to human-readable failure modes.
 
-        OpticStudio provides Zernike Standard Coefficients, which we
-        convert to Seidel format using aberration theory.
+        Common error codes (may vary by OpticStudio version):
+            0 = No error (ray traced successfully)
+            1 = Ray missed surface
+            2 = TIR (Total Internal Reflection)
+            3 = Ray reversed
+            4 = Ray vignetted
+            5+ = Other errors
 
         Args:
-            llm_json: LLM JSON optical system (required if skip_load=False)
-            skip_load: If True, assume system is already loaded in OpticStudio
+            error_code: Numeric error code from ray trace
+
+        Returns:
+            String describing the failure mode
         """
-        # Load the system (unless already loaded)
-        if not skip_load:
-            if llm_json is None:
-                raise ZosPyError("llm_json required when skip_load=False")
-            self.load_system(llm_json)
+        error_map = {
+            0: "OK",
+            1: "MISS",
+            2: "TIR",
+            3: "REVERSED",
+            4: "VIGNETTE",
+        }
+        return error_map.get(error_code, f"ERROR_{error_code}")
 
-        coefficients = []
+    def get_seidel(self) -> dict[str, Any]:
+        """
+        Get raw Zernike coefficients from OpticStudio.
 
-        # First, try the ZosPy wrapper - it has better result parsing when it works
+        This is a "dumb executor" - it tries the ZosPy method once and returns
+        the result or an error. No fallback strategies. The Mac side handles
+        retries and Zernike-to-Seidel conversion.
+
+        Note: System must be pre-loaded via load_zmx_file().
+
+        Returns:
+            On success: {"success": True, "zernike_coefficients": [...], "wavelength_um": float, "num_surfaces": int}
+            On error: {"success": False, "error": "..."}
+        """
+        # Try ZosPy Zernike analysis
         try:
-            logger.debug("Seidel: Trying ZosPy wrapper ZernikeStandardCoefficients")
             zernike_analysis = zp.analyses.wavefront.ZernikeStandardCoefficients(
                 sampling='64x64',
                 maximum_term=37,
@@ -809,159 +513,74 @@ class ZosPyHandler:
                 surface="Image",
             )
             result = zernike_analysis.run(self.oss)
-            logger.debug(f"Seidel: ZosPy wrapper succeeded, result type = {type(result)}")
 
-            # Extract coefficients from ZosPy result
-            if hasattr(result, 'data') and result.data is not None:
-                coeff_data = result.data
-                logger.debug(f"Seidel: result.data type = {type(coeff_data)}")
-                data_attrs = [a for a in dir(coeff_data) if not a.startswith('_')]
-                logger.debug(f"Seidel: result.data attrs = {data_attrs[:20]}")
+            # Extract coefficients from result
+            if not hasattr(result, 'data') or result.data is None:
+                return {"success": False, "error": "ZosPy analysis returned no data"}
 
-                if hasattr(coeff_data, 'coefficients'):
-                    raw_coeffs = coeff_data.coefficients
-                    logger.debug(f"Seidel: coefficients type = {type(raw_coeffs)}")
+            coeff_data = result.data
+            if not hasattr(coeff_data, 'coefficients'):
+                return {"success": False, "error": "ZosPy result has no coefficients attribute"}
 
-                    if isinstance(raw_coeffs, dict):
-                        # Dict keyed by term number (could be int or str)
-                        # Per ZosPy docs: result.data.coefficients is dict with term num keys
-                        # and coefficient objects with .value attribute
-                        if raw_coeffs:
-                            # Get the keys and convert to int for sorting
-                            int_keys = [int(k) for k in raw_coeffs.keys()]
-                            max_term = max(int_keys) if int_keys else 0
-                            logger.debug(f"Seidel: Dict has {len(raw_coeffs)} keys, max_term={max_term}")
+            raw_coeffs = coeff_data.coefficients
+            coefficients = []
 
-                            for i in range(1, min(max_term + 1, 38)):  # Limit to 37 terms
-                                # Try both int and str keys
-                                coeff = raw_coeffs.get(i) or raw_coeffs.get(str(i))
-                                if coeff is not None:
-                                    if hasattr(coeff, 'value'):
-                                        coefficients.append(float(coeff.value))
-                                    else:
-                                        coefficients.append(float(coeff))
-                                else:
-                                    coefficients.append(0.0)
-                    elif hasattr(raw_coeffs, '__iter__'):
-                        # Iterable (list-like)
-                        for coeff in raw_coeffs:
-                            if hasattr(coeff, 'value'):
-                                coefficients.append(float(coeff.value))
-                            else:
-                                coefficients.append(float(coeff) if coeff is not None else 0.0)
+            if isinstance(raw_coeffs, dict):
+                # Dict keyed by term number
+                if not raw_coeffs:
+                    return {"success": False, "error": "ZosPy returned empty coefficients dict"}
 
-            logger.debug(f"Seidel: Extracted {len(coefficients)} coefficients from ZosPy wrapper")
+                int_keys = [int(k) for k in raw_coeffs.keys()]
+                max_term = max(int_keys) if int_keys else 0
+
+                for i in range(1, min(max_term + 1, 38)):
+                    coeff = raw_coeffs.get(i) or raw_coeffs.get(str(i))
+                    if coeff is not None:
+                        if hasattr(coeff, 'value'):
+                            coefficients.append(float(coeff.value))
+                        else:
+                            coefficients.append(float(coeff))
+                    else:
+                        coefficients.append(0.0)
+            elif hasattr(raw_coeffs, '__iter__'):
+                # Iterable (list-like)
+                for coeff in raw_coeffs:
+                    if hasattr(coeff, 'value'):
+                        coefficients.append(float(coeff.value))
+                    else:
+                        coefficients.append(float(coeff) if coeff is not None else 0.0)
+            else:
+                return {"success": False, "error": f"Unknown coefficients type: {type(raw_coeffs)}"}
+
+            if not coefficients:
+                return {"success": False, "error": "No coefficients extracted from ZosPy result"}
+
+            # Get system info
+            wl_um = self.oss.SystemData.Wavelengths.GetWavelength(1).Wavelength
+            num_surfaces = self.oss.LDE.NumberOfSurfaces - 1
+
+            return {
+                "success": True,
+                "zernike_coefficients": coefficients,
+                "wavelength_um": wl_um,
+                "num_surfaces": num_surfaces,
+            }
 
         except Exception as e:
-            logger.debug(f"Seidel: ZosPy wrapper failed: {e}")
-
-            # Fallback: try raw ZOSAPI with detailed exploration
-            try:
-                logger.debug("Seidel: Trying raw ZOSAPI fallback")
-                analysis = zp.analyses.new_analysis(
-                    self.oss,
-                    zp.constants.Analysis.AnalysisIDM.ZernikeStandardCoefficients,
-                    settings_first=False  # Run immediately with defaults
-                )
-
-                # Explore the analysis object
-                results = analysis.Results if hasattr(analysis, 'Results') else None
-                logger.debug(f"Seidel: Raw API results = {results}")
-                logger.debug(f"Seidel: Raw API results type = {type(results) if results else 'None'}")
-
-                if results is not None:
-                    # Explore available attributes/methods on the results object
-                    result_attrs = [a for a in dir(results) if not a.startswith('_')]
-                    logger.debug(f"Seidel: Results attributes = {result_attrs[:30]}")
-
-                    # Try GetDataGrid - Zernike results often have a data grid
-                    if hasattr(results, 'GetDataGrid'):
-                        try:
-                            grid = results.GetDataGrid(0)
-                            if grid is not None:
-                                rows = grid.Rows if hasattr(grid, 'Rows') else 0
-                                cols = grid.Cols if hasattr(grid, 'Cols') else 0
-                                logger.debug(f"Seidel: DataGrid size = {rows}x{cols}")
-                                for r in range(min(rows, 40)):  # First 40 rows
-                                    for c in range(cols):
-                                        val = grid.GetValueAt(r, c)
-                                        if val is not None and isinstance(val, (int, float)):
-                                            coefficients.append(float(val))
-                        except Exception as ge:
-                            logger.debug(f"Seidel: GetDataGrid failed: {ge}")
-
-                    # Try GetDataSeries
-                    if not coefficients and hasattr(results, 'GetDataSeries'):
-                        try:
-                            num_series = results.NumberOfDataSeries if hasattr(results, 'NumberOfDataSeries') else 0
-                            logger.debug(f"Seidel: NumberOfDataSeries = {num_series}")
-                            for i in range(num_series):
-                                series = results.GetDataSeries(i)
-                                if series:
-                                    num_pts = series.NumData if hasattr(series, 'NumData') else 0
-                                    for j in range(num_pts):
-                                        val = series.GetDataValue(j)
-                                        if val is not None:
-                                            coefficients.append(float(val))
-                        except Exception as se:
-                            logger.debug(f"Seidel: GetDataSeries failed: {se}")
-
-                    # Try GetTextFile for text-based extraction
-                    if not coefficients and hasattr(results, 'GetTextFile'):
-                        try:
-                            text = results.GetTextFile()
-                            logger.debug(f"Seidel: Text output length = {len(text) if text else 0}")
-                            if text:
-                                logger.debug(f"Seidel: Text preview = {text[:500] if len(text) > 500 else text}")
-                                # Parse text to extract coefficients
-                                coefficients = self._parse_zernike_text(text)
-                        except Exception as te:
-                            logger.debug(f"Seidel: GetTextFile failed: {te}")
-
-                analysis.Close()
-
-            except Exception as e2:
-                logger.debug(f"Seidel: Raw ZOSAPI also failed: {e2}")
-
-        # If we still don't have coefficients, use placeholders
-        if not coefficients:
-            logger.warning("Could not extract Zernike coefficients, using placeholder values")
-            coefficients = [0.0] * 37
-
-        logger.debug(f"Zernike: Final coefficient count = {len(coefficients)}")
-
-        # Return raw Zernike coefficients - conversion to Seidel happens on Mac side
-        wl_um = self.oss.SystemData.Wavelengths.GetWavelength(1).Wavelength
-        num_surfaces = self.oss.LDE.NumberOfSurfaces - 1
-
-        return {
-            "success": True,
-            "zernike_coefficients": coefficients,
-            "wavelength_um": wl_um,
-            "num_surfaces": num_surfaces,
-        }
+            return {"success": False, "error": f"ZosPy analysis failed: {e}"}
 
     def trace_rays(
         self,
-        llm_json: dict[str, Any] = None,
         num_rays: int = 7,
-        *,
-        skip_load: bool = False,
     ) -> dict[str, Any]:
         """
         Trace rays through the system and return positions at each surface.
 
-        Args:
-            llm_json: LLM JSON optical system (required if skip_load=False)
-            num_rays: Number of rays to trace
-            skip_load: If True, assume system is already loaded in OpticStudio
-        """
-        # Load the system (unless already loaded)
-        if not skip_load:
-            if llm_json is None:
-                raise ZosPyError("llm_json required when skip_load=False")
-            self.load_system(llm_json)
+        Note: System must be pre-loaded via load_zmx_file().
 
+        Args:
+            num_rays: Number of rays to trace
+        """
         # Get system info
         num_surfaces = self.oss.LDE.NumberOfSurfaces
         num_fields = self.oss.SystemData.Fields.NumberOfFields
@@ -1042,72 +661,6 @@ class ZosPyHandler:
             "num_wavelengths": num_wavelengths,
             "data": data,
         }
-
-
-    def _parse_zernike_text(self, text: str) -> list[float]:
-        """
-        Parse Zernike coefficients from OpticStudio text output.
-
-        The text output from ZernikeStandardCoefficients analysis looks like:
-            Term    Value
-            Z1      0.00000000
-            Z2      0.00001234
-            ...
-
-        Args:
-            text: Raw text output from GetTextFile()
-
-        Returns:
-            List of Zernike coefficient values (Z1, Z2, ..., Z37)
-        """
-        coefficients = []
-
-        if not text:
-            return coefficients
-
-        lines = text.split('\n')
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            # Look for lines starting with "Z" followed by a number
-            # Format: "Z1      0.00000000" or "Z 1      0.00000000"
-            # Also handle: "  1      0.00000000" (just index and value)
-            parts = line.split()
-            if len(parts) >= 2:
-                try:
-                    # Try to parse the first part as term identifier
-                    term_str = parts[0]
-                    value_str = parts[-1]  # Value is usually the last column
-
-                    # Check if this looks like a Zernike term line
-                    if term_str.upper().startswith('Z'):
-                        # Extract term number from "Z1", "Z 1", "Z01", etc.
-                        term_num_str = term_str[1:].strip()
-                        if term_num_str.isdigit():
-                            value = float(value_str)
-                            term_num = int(term_num_str)
-                            # Extend list if needed
-                            while len(coefficients) < term_num:
-                                coefficients.append(0.0)
-                            if term_num <= 37:
-                                coefficients[term_num - 1] = value
-                    elif term_str.isdigit():
-                        # Line starts with just the term number
-                        term_num = int(term_str)
-                        value = float(value_str)
-                        while len(coefficients) < term_num:
-                            coefficients.append(0.0)
-                        if term_num <= 37:
-                            coefficients[term_num - 1] = value
-                except (ValueError, IndexError):
-                    # Skip lines that don't parse correctly
-                    continue
-
-        logger.debug(f"Parsed {len(coefficients)} Zernike coefficients from text")
-        return coefficients
 
 
 class ZosPyError(Exception):

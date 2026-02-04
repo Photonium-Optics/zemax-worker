@@ -6,39 +6,34 @@
 
 Only OpticStudio/ZosPy operations belong here. All other logic lives in `zemax-analysis-service/` (Mac side).
 
-## Architecture: ZMX-Based Loading (Preferred)
+## Architecture: ZMX-Based Loading
 
-As of 2026-02-04, the worker supports two system loading methods:
+All system loading uses .zmx files only:
 
 ```
-PREFERRED (new):
-  LLM JSON → Node.js /convert-to-zmx → .zmx content → Worker → oss.load(file)
-
-LEGACY (still supported):
-  LLM JSON → Worker → Manual surface building (_setup_* methods)
+LLM JSON → Node.js /convert-to-zmx → .zmx content (base64) → Worker → oss.load(file)
 ```
 
-The preferred method uses the existing `zemax-converter` (TypeScript) to produce .zmx files,
-which are then loaded natively by OpticStudio. This is:
-- More reliable (uses native file format)
+The worker uses the existing `zemax-converter` (TypeScript) to produce .zmx files,
+which are then loaded natively by OpticStudio. This approach:
+- Uses native file format (more reliable)
 - Single source of truth for conversion (zemax-converter)
-- Less code to maintain in the worker
+- Minimal code in the worker
 
-All endpoints accept `zmx_content` (base64) OR `system` (LLM JSON) in request body.
+All endpoints require `zmx_content` (base64-encoded .zmx file) in the request body.
 
 **What stays on Windows:**
 - System loading from .zmx files (`load_zmx_file`)
-- Legacy LLM JSON loading (`load_system`, `_setup_*` methods) - kept for backward compatibility
 - Ray tracing (`ray_trace_diagnostic`, `trace_rays`)
 - Analysis execution (`get_cross_section`, `get_seidel`, `calc_semi_diameters`)
 - Raw data extraction from LDE/SystemData
-- `_parse_zernike_text()` - Parses OpticStudio text output to extract raw coefficients
 
 **What lives on Mac:**
 - LLM JSON → ZMX conversion (via Node.js backend `/convert-to-zmx`)
 - `seidel_converter.py` - Zernike→Seidel conversion (pure math)
 - Response formatting and aggregation logic
 - Business logic (margin calculations, clamping, etc.)
+- Fallback strategies and retry logic for failed analysis calls
 
 ## ZosPy Docs
 
@@ -64,15 +59,12 @@ Run with `workers=1` - COM requires single-threaded apartment.
 wl_data.GetWavelength(index).MakePrimary()
 ```
 
-### 4. OpticStudio v25 Text Parser Bug
-ZosPy text parsers fail. Use raw ZOSAPI:
-```python
-analysis = zp.analyses.new_analysis(
-    self.oss,
-    zp.constants.Analysis.AnalysisIDM.ZernikeStandardCoefficients,
-    settings_first=True
-)
-```
+### 4. Dumb Executor Pattern
+Analysis methods (`get_seidel`, `ray_trace_diagnostic`) follow the "dumb executor" pattern:
+- Try the primary ZosPy method once
+- Return raw results on success, error on failure
+- NO fallback strategies - Mac side handles retries
+- NO aggregation or post-processing - Mac side handles that
 
 ### 5. CrossSection Image Export
 Use `image_output_file` parameter AND `surface_line_thickness` to show lenses:
@@ -112,26 +104,66 @@ if hasattr(data, 'front_focal_length'):
 - Added debug logging to silent ray trace exceptions (was `except Exception: pass`)
 
 **Technical Debt:**
-- `get_seidel()` is 150+ lines - could extract `_extract_zernike_from_zospy_wrapper()` and `_extract_zernike_from_raw_api()`
-- `ray_trace_diagnostic()` is 130+ lines - could extract `_trace_ray_grid()` and `_aggregate_surface_failures()`
-- Hotspot detection (>10% failures) could move to Mac side
+- ~~`get_seidel()` is 150+ lines~~ - FIXED: simplified to ~80 lines, no fallbacks
+- ~~`ray_trace_diagnostic()` is 130+ lines~~ - FIXED: now simplified to raw data return
+- ~~Hotspot detection (>10% failures) could move to Mac side~~ - FIXED: moved to zemax-analysis-service
 - `distribution` parameter accepted but not used (always uses square grid)
 - Surface index conventions inconsistent (some 0-indexed, some 1-indexed)
 
 ## Changelog
 
+**2026-02-04 (Part 4) - Dumb Executor Refactor for get_seidel**
+- Simplified `get_seidel()` from ~160 lines to ~80 lines
+- **REMOVED** from worker:
+  - Raw ZOSAPI fallback (GetDataGrid, GetDataSeries, GetTextFile exploration)
+  - `_parse_zernike_text()` helper method
+  - Placeholder coefficient generation on failure
+  - Complex debug logging for fallback strategies
+- **NEW** behavior:
+  - Tries ZosPy `ZernikeStandardCoefficients` once
+  - On success: returns `{"success": True, "zernike_coefficients": [...], "wavelength_um": float, "num_surfaces": int}`
+  - On failure: returns `{"success": False, "error": "ZosPy analysis failed: <message>"}`
+  - Mac side handles fallbacks and retries
+
+**2026-02-04 (Part 3) - Dumb Executor Refactor for ray_trace_diagnostic**
+- Refactored `ray_trace_diagnostic()` to be a "dumb executor"
+- **REMOVED** from worker:
+  - Field-level aggregation (rays_traced, rays_reached, rays_failed)
+  - `aggregate_surface_failures` dictionary building
+  - Hotspot detection (>10% threshold calculation)
+  - `field_results` nested structure
+- **NEW** raw response format:
+  ```python
+  {
+      "paraxial": {"efl": ..., "bfl": ..., "fno": ..., "total_track": ...},
+      "num_surfaces": int,
+      "num_fields": int,
+      "raw_rays": [
+          {"field_index": 0, "field_x": 0, "field_y": 0, "px": 0.5, "py": 0.5,
+           "reached_image": True, "failed_surface": None, "failure_mode": None},
+          ...
+      ],
+      "surface_semi_diameters": [sd1, sd2, ...]
+  }
+  ```
+- Added `_error_code_to_mode()` helper for mapping OpticStudio error codes to strings
+- Added `RawRay` Pydantic model for type safety
+- All aggregation logic now belongs in zemax-analysis-service (Mac side)
+
+**2026-02-04 (Part 5) - Remove Legacy LLM JSON Loading**
+- **REMOVED** `load_system()` method and all `_setup_*` methods
+- **REMOVED** `_extract_value()` and `_to_float()` helper methods
+- **REMOVED** `skip_load` parameter from all analysis methods
+- All endpoints now require `zmx_content` (no `system` field)
+- Simplified request models: `SystemRequest(zmx_content: str)`, `RayTraceDiagnosticRequest(zmx_content: str, ...)`
+
 **2026-02-04 (Part 2) - ZMX-Based Loading**
 - Added `load_zmx_file()` method for native .zmx file loading
-- All endpoints now support `zmx_content` (preferred) or `system` (legacy)
-- zemax-analysis-service now uses Node.js `/convert-to-zmx` for conversion
-- Added `skip_load` parameter to analysis methods for pre-loaded systems
-- Unified request model: `SystemRequest(zmx_content=..., system=...)`
+- zemax-analysis-service uses Node.js `/convert-to-zmx` for conversion
 
 **2026-02-04 (Part 1)**
 - Fixed `SelectWavelength` → `MakePrimary()`
 - Added `float()` conversions for COM interop
-- Raw ZOSAPI fallback for Zernike analysis
-- Added `_parse_zernike_text()` for text-based coefficient extraction
 - Standardized response field names (`success`, `total_failures`, `dominant_mode`)
 - **ARCHITECTURE**: Moved Seidel conversion to Mac side
   - `/seidel` endpoint now returns raw Zernike coefficients

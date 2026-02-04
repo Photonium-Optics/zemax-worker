@@ -115,18 +115,14 @@ def _load_system_from_request(request) -> dict[str, Any]:
     """
     Load optical system from request into OpticStudio.
 
-    Handles both input modes:
-    - zmx_content (preferred): Load .zmx file directly
-    - system (legacy): Manually build from LLM JSON
-
     Args:
-        request: Request with either zmx_content or system fields
+        request: Request with zmx_content field (base64-encoded .zmx file)
 
     Returns:
         Dict with load result (num_surfaces, efl)
 
     Raises:
-        ValueError: If neither input mode is provided
+        ValueError: If zmx_content is missing or invalid
         ZosPyError: If loading fails
     """
     import base64
@@ -135,43 +131,30 @@ def _load_system_from_request(request) -> dict[str, Any]:
 
     from zospy_handler import ZosPyError
 
-    # Get fields from request (works with SystemRequest or RayTraceDiagnosticRequest)
     zmx_content = getattr(request, 'zmx_content', None)
-    system = getattr(request, 'system', None)
 
-    if zmx_content:
-        # Preferred: Load from .zmx file
-        logger.info("Loading system from ZMX content (preferred method)")
-        try:
-            zmx_bytes = base64.b64decode(zmx_content)
-        except Exception as e:
-            raise ValueError(f"Invalid base64 zmx_content: {e}")
+    if not zmx_content:
+        raise ValueError("Request must include 'zmx_content'")
 
-        with tempfile.NamedTemporaryFile(mode='wb', suffix='.zmx', delete=False) as f:
-            f.write(zmx_bytes)
-            temp_file = f.name
+    logger.info("Loading system from ZMX content")
+    try:
+        zmx_bytes = base64.b64decode(zmx_content)
+    except Exception as e:
+        raise ValueError(f"Invalid base64 zmx_content: {e}")
 
-        try:
-            result = zospy_handler.load_zmx_file(temp_file)
-            if result.get("num_surfaces", 0) == 0:
-                raise ZosPyError("System loaded but has no surfaces")
-            logger.info(f"Loaded system: {result.get('num_surfaces')} surfaces, EFL={result.get('efl')}")
-            return result
-        finally:
-            if os.path.exists(temp_file):
-                os.unlink(temp_file)
+    with tempfile.NamedTemporaryFile(mode='wb', suffix='.zmx', delete=False) as f:
+        f.write(zmx_bytes)
+        temp_file = f.name
 
-    elif system:
-        # Legacy: Build from LLM JSON
-        logger.info("Loading system from LLM JSON (legacy method)")
-        result = zospy_handler.load_system(system)
+    try:
+        result = zospy_handler.load_zmx_file(temp_file)
         if result.get("num_surfaces", 0) == 0:
             raise ZosPyError("System loaded but has no surfaces")
         logger.info(f"Loaded system: {result.get('num_surfaces')} surfaces, EFL={result.get('efl')}")
         return result
-
-    else:
-        raise ValueError("Request must include either 'zmx_content' or 'system'")
+    finally:
+        if os.path.exists(temp_file):
+            os.unlink(temp_file)
 
 
 @asynccontextmanager
@@ -222,14 +205,9 @@ class SystemRequest(BaseModel):
     """
     Request containing an optical system.
 
-    Supports two input modes:
-    - zmx_content (preferred): Base64-encoded .zmx file from zemax-converter
-    - system (legacy): LLM JSON that will be manually converted
-
-    If both are provided, zmx_content takes precedence.
+    Requires zmx_content: Base64-encoded .zmx file from zemax-converter.
     """
-    zmx_content: Optional[str] = Field(default=None, description="Base64-encoded .zmx file content (preferred)")
-    system: Optional[dict[str, Any]] = Field(default=None, description="LLM JSON optical system (legacy)")
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
 
 
 class HealthResponse(BaseModel):
@@ -254,22 +232,38 @@ class CrossSectionResponse(BaseModel):
 
 class RayTraceDiagnosticRequest(BaseModel):
     """Ray trace diagnostic request."""
-    zmx_content: Optional[str] = Field(default=None, description="Base64-encoded .zmx file content (preferred)")
-    system: Optional[dict[str, Any]] = Field(default=None, description="LLM JSON optical system (legacy)")
-    num_rays: int = Field(default=50, description="Number of rays per field")
-    distribution: str = Field(default="hexapolar", description="Ray distribution")
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    num_rays: int = Field(default=50, description="Number of rays per field (determines grid density)")
+    distribution: str = Field(default="hexapolar", description="Ray distribution (currently uses square grid)")
+
+
+class RawRay(BaseModel):
+    """Raw ray trace result for a single ray."""
+    field_index: int = Field(description="0-indexed field number")
+    field_x: float = Field(description="Field X coordinate")
+    field_y: float = Field(description="Field Y coordinate")
+    px: float = Field(description="Normalized pupil X coordinate (-1 to 1)")
+    py: float = Field(description="Normalized pupil Y coordinate (-1 to 1)")
+    reached_image: bool = Field(description="Whether the ray reached the image surface")
+    failed_surface: Optional[int] = Field(default=None, description="Surface index where ray failed (if applicable)")
+    failure_mode: Optional[str] = Field(default=None, description="Failure mode: MISS, TIR, VIGNETTE, etc.")
 
 
 class RayTraceDiagnosticResponse(BaseModel):
-    """Ray trace diagnostic response."""
+    """
+    Raw ray trace diagnostic response.
+
+    This is a "dumb executor" response - returns raw per-ray data only.
+    All aggregation, hotspot detection, and threshold calculations
+    happen on the Mac side (zemax-analysis-service).
+    """
     success: bool = Field(description="Whether the operation succeeded")
-    paraxial: Optional[dict[str, Any]] = Field(default=None)
-    num_surfaces: Optional[int] = Field(default=None)
-    num_fields: Optional[int] = Field(default=None)
-    field_results: Optional[list[dict[str, Any]]] = Field(default=None)
-    aggregate_surface_failures: Optional[list[dict[str, Any]]] = Field(default=None)
-    hotspots: Optional[list[int]] = Field(default=None)
-    error: Optional[str] = Field(default=None)
+    paraxial: Optional[dict[str, Any]] = Field(default=None, description="Basic paraxial data (efl, bfl, fno, total_track)")
+    num_surfaces: Optional[int] = Field(default=None, description="Number of surfaces in system")
+    num_fields: Optional[int] = Field(default=None, description="Number of fields")
+    raw_rays: Optional[list[RawRay]] = Field(default=None, description="Per-ray trace results")
+    surface_semi_diameters: Optional[list[float]] = Field(default=None, description="Semi-diameters from LDE")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 
 class ZernikeResponse(BaseModel):
@@ -346,7 +340,7 @@ async def health_check() -> HealthResponse:
 
 @app.post("/load-system", response_model=LoadSystemResponse)
 async def load_system(request: SystemRequest, _: None = Depends(verify_api_key)) -> LoadSystemResponse:
-    """Load an optical system into OpticStudio (supports both zmx_content and LLM JSON)."""
+    """Load an optical system into OpticStudio from zmx_content."""
     async with _zospy_lock:
         if _ensure_connected() is None:
             return LoadSystemResponse(success=False, error=NOT_CONNECTED_ERROR)
@@ -371,11 +365,11 @@ async def get_cross_section(request: SystemRequest, _: None = Depends(verify_api
             return CrossSectionResponse(success=False, error=NOT_CONNECTED_ERROR)
 
         try:
-            # Load system from request (supports both zmx_content and LLM JSON)
+            # Load system from request
             _load_system_from_request(request)
 
             # Generate cross-section (system already loaded)
-            result = zospy_handler.get_cross_section(skip_load=True)
+            result = zospy_handler.get_cross_section()
             return CrossSectionResponse(
                 success=True,
                 image=result.get("image"),
@@ -398,11 +392,11 @@ async def calc_semi_diameters(request: SystemRequest, _: None = Depends(verify_a
             return SemiDiametersResponse(success=False, error=NOT_CONNECTED_ERROR)
 
         try:
-            # Load system from request (supports both zmx_content and LLM JSON)
+            # Load system from request
             _load_system_from_request(request)
 
             # Calculate semi-diameters (system already loaded)
-            result = zospy_handler.calc_semi_diameters(skip_load=True)
+            result = zospy_handler.calc_semi_diameters()
             return SemiDiametersResponse(
                 success=True,
                 semi_diameters=result.get("semi_diameters", []),
@@ -417,30 +411,33 @@ async def ray_trace_diagnostic(
     request: RayTraceDiagnosticRequest,
     _: None = Depends(verify_api_key),
 ) -> RayTraceDiagnosticResponse:
-    """Run ray trace diagnostic using ZosPy's SingleRayTrace analysis."""
+    """
+    Trace rays through the system and return raw per-ray results.
+
+    This is a "dumb executor" endpoint - returns raw data only.
+    All aggregation, hotspot detection, and threshold calculations
+    happen on the Mac side (zemax-analysis-service).
+    """
     async with _zospy_lock:
         if _ensure_connected() is None:
             return RayTraceDiagnosticResponse(success=False, error=NOT_CONNECTED_ERROR)
 
         try:
-            # Load system from request (supports both zmx_content and LLM JSON)
-            # RayTraceDiagnosticRequest has the same zmx_content/system fields
+            # Load system from request
             _load_system_from_request(request)
 
-            # Run diagnostic (system already loaded)
+            # Run ray trace (system already loaded)
             result = zospy_handler.ray_trace_diagnostic(
                 num_rays=request.num_rays,
                 distribution=request.distribution,
-                skip_load=True,
             )
             return RayTraceDiagnosticResponse(
                 success=True,
                 paraxial=result.get("paraxial"),
                 num_surfaces=result.get("num_surfaces"),
                 num_fields=result.get("num_fields"),
-                field_results=result.get("field_results"),
-                aggregate_surface_failures=result.get("aggregate_surface_failures"),
-                hotspots=result.get("hotspots"),
+                raw_rays=result.get("raw_rays"),
+                surface_semi_diameters=result.get("surface_semi_diameters"),
             )
         except Exception as e:
             _handle_zospy_error("Ray trace diagnostic", e)
@@ -455,11 +452,11 @@ async def get_zernike(request: SystemRequest, _: None = Depends(verify_api_key))
             return ZernikeResponse(success=False, error=NOT_CONNECTED_ERROR)
 
         try:
-            # Load system from request (supports both zmx_content and LLM JSON)
+            # Load system from request
             _load_system_from_request(request)
 
             # Get Zernike coefficients (system already loaded)
-            result = zospy_handler.get_seidel(skip_load=True)
+            result = zospy_handler.get_seidel()
             return ZernikeResponse(
                 success=True,
                 zernike_coefficients=result.get("zernike_coefficients"),
@@ -483,11 +480,11 @@ async def trace_rays(
             return TraceRaysResponse(success=False, error=NOT_CONNECTED_ERROR)
 
         try:
-            # Load system from request (supports both zmx_content and LLM JSON)
+            # Load system from request
             _load_system_from_request(request)
 
             # Trace rays (system already loaded)
-            result = zospy_handler.trace_rays(num_rays=num_rays, skip_load=True)
+            result = zospy_handler.trace_rays(num_rays=num_rays)
             return TraceRaysResponse(
                 success=True,
                 num_surfaces=result.get("num_surfaces"),
