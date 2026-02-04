@@ -61,8 +61,13 @@ class ZosPyHandler:
         except Exception as e:
             raise ZosPyError(f"Failed to initialize ZosPy: {e}")
 
-    def close(self):
-        """Close the connection to OpticStudio."""
+    def close(self) -> None:
+        """
+        Close the connection to OpticStudio.
+
+        This should be called during application shutdown to cleanly
+        disconnect from the OpticStudio COM server.
+        """
         try:
             if hasattr(self, 'zos') and self.zos:
                 self.zos.disconnect()
@@ -70,7 +75,12 @@ class ZosPyHandler:
             logger.warning(f"Error closing ZosPy connection: {e}")
 
     def get_version(self) -> str:
-        """Get OpticStudio version string."""
+        """
+        Get OpticStudio version string.
+
+        Returns:
+            Version string (e.g., "25.1.0") or "Unknown" if unavailable.
+        """
         try:
             # ZosPy exposes version through the application object
             return str(self.oss.Application.ZemaxVersion) if self.oss else "Unknown"
@@ -78,7 +88,15 @@ class ZosPyHandler:
             return "Unknown"
 
     def get_status(self) -> dict[str, Any]:
-        """Get current connection status."""
+        """
+        Get current connection status.
+
+        Returns:
+            Dict with keys:
+                - connected: bool - Whether OpticStudio is connected
+                - opticstudio_version: str - OpticStudio version
+                - zospy_version: str - ZosPy library version
+        """
         try:
             zospy_version = zp.__version__
         except Exception:
@@ -120,7 +138,12 @@ class ZosPyHandler:
         }
 
     def _get_efl(self) -> Optional[float]:
-        """Get effective focal length using ZosPy's SystemData analysis."""
+        """
+        Get effective focal length using ZosPy's SystemData analysis.
+
+        Returns:
+            Effective focal length in mm, or None if calculation fails.
+        """
         try:
             # Use the SystemData analysis to get first-order properties
             result = zp.analyses.reports.SystemData().run(self.oss)
@@ -129,9 +152,14 @@ class ZosPyHandler:
             return None
 
     def get_paraxial_data(self) -> dict[str, Any]:
-        """Get first-order (paraxial) optical properties.
+        """
+        Get first-order (paraxial) optical properties.
 
-        Delegates to _get_paraxial_from_lde() and adds F/# if available from aperture type.
+        Delegates to _get_paraxial_from_lde() and adds F/# if available
+        from the system aperture type.
+
+        Returns:
+            Dict with paraxial properties (epd, max_field, total_track, fno, etc.)
         """
         paraxial = self._get_paraxial_from_lde()
 
@@ -314,7 +342,15 @@ class ZosPyHandler:
         }
 
     def _get_paraxial_from_lde(self) -> dict[str, Any]:
-        """Get paraxial data directly from LDE and SystemData (more reliable)."""
+        """
+        Get paraxial data directly from LDE and SystemData.
+
+        This method is more reliable than using analysis functions as it
+        reads directly from the system data structures.
+
+        Returns:
+            Dict with keys: epd, max_field, field_type, field_unit, total_track
+        """
         try:
             paraxial = {}
 
@@ -347,7 +383,16 @@ class ZosPyHandler:
             return {}
 
     def _get_surface_geometry(self) -> list[dict[str, Any]]:
-        """Extract surface geometry for client-side cross-section rendering."""
+        """
+        Extract surface geometry for client-side cross-section rendering.
+
+        This method reads the Lens Data Editor (LDE) to extract geometric
+        properties of each surface. Used as fallback data when image export fails.
+
+        Returns:
+            List of surface dicts with keys: index, z, radius, thickness,
+            semi_diameter, conic, material, is_stop
+        """
         surfaces = []
         lde = self.oss.LDE
         z_position = 0.0
@@ -377,7 +422,14 @@ class ZosPyHandler:
         """
         Calculate semi-diameters by reading from surfaces after ray trace.
 
+        Reads the SemiDiameter property from each surface in the LDE,
+        which OpticStudio computes based on ray extent during tracing.
+
         Note: System must be pre-loaded via load_zmx_file().
+
+        Returns:
+            Dict with "semi_diameters" key containing list of
+            {"index": int, "value": float} entries.
         """
         semi_diameters = []
         lde = self.oss.LDE
