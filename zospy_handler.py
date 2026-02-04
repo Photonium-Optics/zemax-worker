@@ -510,10 +510,13 @@ class ZosPyHandler:
         for i in range(1, lde.NumberOfSurfaces):
             surface = lde.GetSurfaceAt(i)
 
+            # Radius of 0 in Zemax means infinity (flat surface)
+            # We convert to None for client-side rendering
+            radius = surface.Radius
             surf_data = {
                 "index": i,
                 "z": z_position,
-                "radius": surface.Radius if surface.Radius != 0 else None,
+                "radius": radius if radius != 0 and abs(radius) < 1e10 else None,
                 "thickness": surface.Thickness,
                 "semi_diameter": surface.SemiDiameter,
                 "conic": surface.Conic,
@@ -594,12 +597,14 @@ class ZosPyHandler:
                     rays_traced += 1
 
                     try:
-                        # ZosPy single ray trace - pattern: ClassName(params).run(oss)
+                        # ZosPy SingleRayTrace: px/py are normalized pupil coordinates (-1 to 1)
+                        # hx/hy are normalized field coordinates (-1 to 1)
+                        # When field index is specified, we iterate over pupil positions
                         ray_trace = zp.analyses.raysandspots.SingleRayTrace(
-                            hx=hx,
-                            hy=hy,
-                            px=0.0,
-                            py=0.0,
+                            hx=0.0,  # Use on-axis field direction
+                            hy=0.0,
+                            px=hx,   # Pupil X coordinate (iterating over pupil)
+                            py=hy,   # Pupil Y coordinate (iterating over pupil)
                             wavelength=1,
                             field=fi,
                         )
@@ -791,15 +796,16 @@ class ZosPyHandler:
                         "z": [],
                     })
 
-                # Trace fan of rays
-                for hy in np.linspace(-1, 1, num_rays):
+                # Trace fan of rays across pupil
+                for py in np.linspace(-1, 1, num_rays):
                     try:
-                        # ZosPy single ray trace - pattern: ClassName(params).run(oss)
+                        # ZosPy SingleRayTrace: px/py are normalized pupil coordinates (-1 to 1)
+                        # hx/hy are normalized field coordinates (not used when field index specified)
                         ray_trace = zp.analyses.raysandspots.SingleRayTrace(
                             hx=0.0,
-                            hy=hy,
-                            px=0.0,
-                            py=0.0,
+                            hy=0.0,
+                            px=0.0,  # Meridional fan (x=0)
+                            py=py,   # Iterate over pupil Y
                             wavelength=wi,
                             field=fi,
                         )

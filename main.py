@@ -131,7 +131,7 @@ class SystemRequest(BaseModel):
 
 class HealthResponse(BaseModel):
     """Health check response."""
-    ok: bool = Field(description="Whether the worker is healthy")
+    success: bool = Field(description="Whether the worker is healthy")
     opticstudio_connected: bool = Field(description="Whether OpticStudio is connected")
     version: Optional[str] = Field(default=None, description="OpticStudio version")
     zospy_version: Optional[str] = Field(default=None, description="ZosPy version")
@@ -158,7 +158,7 @@ class RayTraceDiagnosticRequest(BaseModel):
 
 class RayTraceDiagnosticResponse(BaseModel):
     """Ray trace diagnostic response."""
-    ok: bool = Field(description="Whether the operation succeeded")
+    success: bool = Field(description="Whether the operation succeeded")
     paraxial: Optional[dict[str, Any]] = Field(default=None)
     num_surfaces: Optional[int] = Field(default=None)
     num_fields: Optional[int] = Field(default=None)
@@ -180,8 +180,26 @@ class SeidelResponse(BaseModel):
 
 class SemiDiametersResponse(BaseModel):
     """Semi-diameter calculation response."""
-    ok: bool = Field(description="Whether the operation succeeded")
+    success: bool = Field(description="Whether the operation succeeded")
     semi_diameters: Optional[list[dict[str, Any]]] = Field(default=None)
+    error: Optional[str] = Field(default=None)
+
+
+class LoadSystemResponse(BaseModel):
+    """Load system response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    num_surfaces: Optional[int] = Field(default=None, description="Number of surfaces loaded")
+    efl: Optional[float] = Field(default=None, description="Effective focal length")
+    error: Optional[str] = Field(default=None, description="Error message")
+
+
+class TraceRaysResponse(BaseModel):
+    """Trace rays response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    num_surfaces: Optional[int] = Field(default=None)
+    num_fields: Optional[int] = Field(default=None)
+    num_wavelengths: Optional[int] = Field(default=None)
+    data: Optional[list[dict[str, Any]]] = Field(default=None, description="Ray trace data")
     error: Optional[str] = Field(default=None)
 
 
@@ -199,7 +217,7 @@ async def health_check() -> HealthResponse:
     """
     if zospy_handler is None:
         return HealthResponse(
-            ok=True,  # Worker is running
+            success=True,  # Worker is running
             opticstudio_connected=False,
             version=None,
             zospy_version=None,
@@ -208,7 +226,7 @@ async def health_check() -> HealthResponse:
     try:
         status = zospy_handler.get_status()
         return HealthResponse(
-            ok=True,
+            success=True,
             opticstudio_connected=status.get("connected", False),
             version=status.get("opticstudio_version"),
             zospy_version=status.get("zospy_version"),
@@ -216,15 +234,15 @@ async def health_check() -> HealthResponse:
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         return HealthResponse(
-            ok=True,
+            success=True,
             opticstudio_connected=False,
             version=None,
             zospy_version=None,
         )
 
 
-@app.post("/load-system")
-async def load_system(request: SystemRequest, _: None = Depends(verify_api_key)) -> dict[str, Any]:
+@app.post("/load-system", response_model=LoadSystemResponse)
+async def load_system(request: SystemRequest, _: None = Depends(verify_api_key)) -> LoadSystemResponse:
     """
     Load an optical system into OpticStudio.
     """
@@ -235,19 +253,26 @@ async def load_system(request: SystemRequest, _: None = Depends(verify_api_key))
         if zospy_handler is None:
             zospy_handler = _reconnect_zospy()
             if zospy_handler is None:
-                raise HTTPException(status_code=503, detail="OpticStudio not connected")
+                return LoadSystemResponse(
+                    success=False,
+                    error="OpticStudio not connected",
+                )
 
         try:
             result = zospy_handler.load_system(request.system)
-            return {"ok": True, **result}
+            return LoadSystemResponse(
+                success=True,
+                num_surfaces=result.get("num_surfaces"),
+                efl=result.get("efl"),
+            )
         except ZosPyError as e:
             logger.error(f"Load system failed: {e}")
             # Attempt reconnect on failure
             zospy_handler = _reconnect_zospy()
-            return {"ok": False, "error": str(e)}
+            return LoadSystemResponse(success=False, error=str(e))
         except Exception as e:
             logger.error(f"Load system unexpected error: {e}")
-            return {"ok": False, "error": str(e)}
+            return LoadSystemResponse(success=False, error=str(e))
 
 
 @app.post("/cross-section", response_model=CrossSectionResponse)
@@ -301,23 +326,23 @@ async def calc_semi_diameters(request: SystemRequest, _: None = Depends(verify_a
             zospy_handler = _reconnect_zospy()
             if zospy_handler is None:
                 return SemiDiametersResponse(
-                    ok=False,
+                    success=False,
                     error="OpticStudio not connected",
                 )
 
         try:
             result = zospy_handler.calc_semi_diameters(request.system)
             return SemiDiametersResponse(
-                ok=True,
+                success=True,
                 semi_diameters=result.get("semi_diameters", []),
             )
         except ZosPyError as e:
             logger.error(f"Calc semi-diameters failed: {e}")
             zospy_handler = _reconnect_zospy()
-            return SemiDiametersResponse(ok=False, error=str(e))
+            return SemiDiametersResponse(success=False, error=str(e))
         except Exception as e:
             logger.error(f"Calc semi-diameters unexpected error: {e}")
-            return SemiDiametersResponse(ok=False, error=str(e))
+            return SemiDiametersResponse(success=False, error=str(e))
 
 
 @app.post("/ray-trace-diagnostic", response_model=RayTraceDiagnosticResponse)
@@ -336,7 +361,7 @@ async def ray_trace_diagnostic(
             zospy_handler = _reconnect_zospy()
             if zospy_handler is None:
                 return RayTraceDiagnosticResponse(
-                    ok=False,
+                    success=False,
                     error="OpticStudio not connected",
                 )
 
@@ -347,7 +372,7 @@ async def ray_trace_diagnostic(
                 distribution=request.distribution,
             )
             return RayTraceDiagnosticResponse(
-                ok=True,
+                success=True,
                 paraxial=result.get("paraxial"),
                 num_surfaces=result.get("num_surfaces"),
                 num_fields=result.get("num_fields"),
@@ -358,10 +383,10 @@ async def ray_trace_diagnostic(
         except ZosPyError as e:
             logger.error(f"Ray trace diagnostic failed: {e}")
             zospy_handler = _reconnect_zospy()
-            return RayTraceDiagnosticResponse(ok=False, error=str(e))
+            return RayTraceDiagnosticResponse(success=False, error=str(e))
         except Exception as e:
             logger.error(f"Ray trace diagnostic unexpected error: {e}")
-            return RayTraceDiagnosticResponse(ok=False, error=str(e))
+            return RayTraceDiagnosticResponse(success=False, error=str(e))
 
 
 @app.post("/seidel", response_model=SeidelResponse)
@@ -399,12 +424,12 @@ async def get_seidel(request: SystemRequest, _: None = Depends(verify_api_key)) 
             return SeidelResponse(success=False, error=str(e))
 
 
-@app.post("/trace-rays")
+@app.post("/trace-rays", response_model=TraceRaysResponse)
 async def trace_rays(
     request: SystemRequest,
     num_rays: int = 7,
     _: None = Depends(verify_api_key),
-) -> dict[str, Any]:
+) -> TraceRaysResponse:
     """
     Trace rays through the system and return positions at each surface.
     """
@@ -415,18 +440,27 @@ async def trace_rays(
         if zospy_handler is None:
             zospy_handler = _reconnect_zospy()
             if zospy_handler is None:
-                return {"ok": False, "error": "OpticStudio not connected"}
+                return TraceRaysResponse(
+                    success=False,
+                    error="OpticStudio not connected",
+                )
 
         try:
             result = zospy_handler.trace_rays(request.system, num_rays=num_rays)
-            return {"ok": True, "rays": result}
+            return TraceRaysResponse(
+                success=True,
+                num_surfaces=result.get("num_surfaces"),
+                num_fields=result.get("num_fields"),
+                num_wavelengths=result.get("num_wavelengths"),
+                data=result.get("data"),
+            )
         except ZosPyError as e:
             logger.error(f"Trace rays failed: {e}")
             zospy_handler = _reconnect_zospy()
-            return {"ok": False, "error": str(e)}
+            return TraceRaysResponse(success=False, error=str(e))
         except Exception as e:
             logger.error(f"Trace rays unexpected error: {e}")
-            return {"ok": False, "error": str(e)}
+            return TraceRaysResponse(success=False, error=str(e))
 
 
 if __name__ == "__main__":

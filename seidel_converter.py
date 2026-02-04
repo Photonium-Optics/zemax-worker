@@ -106,17 +106,23 @@ def zernike_to_seidel(
     s3 = math.sqrt(astig_45**2 + astig_0**2) * scale * math.sqrt(6)
 
     # S4: Field Curvature (Petzval)
-    # WARNING: True Petzval (S4) cannot be determined from Zernike defocus (Z4) alone.
-    # Z4 defocus includes contributions from both field curvature AND astigmatism.
-    # The Petzval sum requires knowledge of surface powers and refractive indices.
-    # This value should be treated as an approximation only.
+    # ⚠️ FUNDAMENTALLY LIMITED: True Petzval sum CANNOT be computed from Zernike defocus.
+    # Z4 (defocus) contains contributions from:
+    #   1. Field curvature (Petzval)
+    #   2. Astigmatism
+    #   3. Defocus error
+    # The true Petzval sum requires: Σ(φᵢ / nᵢ·nᵢ') across all surfaces
+    # This proxy value is for display purposes only - DO NOT use for optimization.
     s4 = _safe_get(z, 4) * scale * 2.0 * math.sqrt(3)
 
     # S5: Distortion
-    # WARNING: True distortion (S5) cannot be determined from Zernike tilt terms (Z2, Z3).
-    # Zernike tilt represents wavefront tilt, not image displacement (distortion).
-    # True distortion requires ray trace at multiple field heights and comparing
-    # actual vs ideal image positions. This value is a rough proxy only.
+    # ⚠️ FUNDAMENTALLY LIMITED: True distortion CANNOT be computed from Zernike tilt.
+    # Zernike Z2/Z3 (tilt) represents wavefront slope, NOT image displacement.
+    # True distortion (S5) requires:
+    #   - Ray tracing at multiple field heights
+    #   - Comparing actual vs. ideal (paraxial) image positions
+    #   - Computing: (y_actual - y_paraxial) / y_paraxial
+    # This proxy value is for display purposes only - DO NOT use for optimization.
     if field_angle_deg > 0:
         tilt_y = _safe_get(z, 3)
         tilt_x = _safe_get(z, 2)
