@@ -302,6 +302,73 @@ class TraceRaysResponse(BaseModel):
     error: Optional[str] = Field(default=None)
 
 
+class WavefrontRequest(BaseModel):
+    """Wavefront analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    field_index: int = Field(default=1, ge=1, description="Field index (1-indexed)")
+    wavelength_index: int = Field(default=1, ge=1, description="Wavelength index (1-indexed)")
+    sampling: str = Field(default="64x64", description="Pupil sampling grid (e.g., '32x32', '64x64', '128x128')")
+
+
+class WavefrontResponse(BaseModel):
+    """
+    Wavefront analysis response.
+
+    Returns raw wavefront data including:
+    - RMS and P-V wavefront error in waves
+    - Strehl ratio (if available)
+    - Wavefront map as numpy array (Mac side renders to PNG)
+    """
+    success: bool = Field(description="Whether the operation succeeded")
+    rms_waves: Optional[float] = Field(default=None, description="RMS wavefront error in waves")
+    pv_waves: Optional[float] = Field(default=None, description="Peak-to-valley wavefront error in waves")
+    strehl_ratio: Optional[float] = Field(default=None, description="Strehl ratio (0-1)")
+    wavelength_um: Optional[float] = Field(default=None, description="Wavelength in micrometers")
+    field_x: Optional[float] = Field(default=None, description="Field X coordinate")
+    field_y: Optional[float] = Field(default=None, description="Field Y coordinate")
+    image: Optional[str] = Field(default=None, description="Base64-encoded numpy array bytes")
+    image_format: Optional[str] = Field(default=None, description="Image format: 'numpy_array'")
+    array_shape: Optional[list[int]] = Field(default=None, description="Shape for numpy array reconstruction")
+    array_dtype: Optional[str] = Field(default=None, description="Dtype for numpy array reconstruction")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
+class SpotDiagramRequest(BaseModel):
+    """Spot diagram analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    ray_density: int = Field(default=5, ge=1, le=20, description="Rays per axis (grid density)")
+    reference: str = Field(default="chief_ray", description="Reference point: 'chief_ray' or 'centroid'")
+
+
+class SpotFieldData(BaseModel):
+    """Spot diagram data for a single field point."""
+    field_index: int = Field(description="0-indexed field number")
+    field_x: float = Field(description="Field X coordinate")
+    field_y: float = Field(description="Field Y coordinate")
+    rms_radius: Optional[float] = Field(default=None, description="RMS spot radius in lens units")
+    geo_radius: Optional[float] = Field(default=None, description="GEO (max) spot radius in lens units")
+    centroid_x: Optional[float] = Field(default=None, description="Centroid X coordinate on image plane")
+    centroid_y: Optional[float] = Field(default=None, description="Centroid Y coordinate on image plane")
+    num_rays: Optional[int] = Field(default=None, description="Number of rays traced for this field")
+
+
+class SpotDiagramResponse(BaseModel):
+    """
+    Spot diagram analysis response.
+
+    Returns spot diagram image and per-field spot data (RMS, GEO radius, centroid).
+    This is a "dumb executor" response - Mac side handles rendering if needed.
+    """
+    success: bool = Field(description="Whether the operation succeeded")
+    image: Optional[str] = Field(default=None, description="Base64-encoded PNG or numpy array bytes")
+    image_format: Optional[str] = Field(default=None, description="Image format: 'png' or 'numpy_array'")
+    array_shape: Optional[list[int]] = Field(default=None, description="Shape for numpy array reconstruction")
+    array_dtype: Optional[str] = Field(default=None, description="Dtype for numpy array reconstruction")
+    spot_data: Optional[list[SpotFieldData]] = Field(default=None, description="Per-field spot data")
+    airy_radius: Optional[float] = Field(default=None, description="Airy disk radius in lens units")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
 # =============================================================================
 # Endpoints
 # =============================================================================
@@ -499,6 +566,106 @@ async def trace_rays(
         except Exception as e:
             _handle_zospy_error("Trace rays", e)
             return TraceRaysResponse(success=False, error=str(e))
+
+
+@app.post("/wavefront", response_model=WavefrontResponse)
+async def get_wavefront(
+    request: WavefrontRequest,
+    _: None = Depends(verify_api_key),
+) -> WavefrontResponse:
+    """
+    Get wavefront error map and RMS wavefront error.
+
+    This is a "dumb executor" endpoint - returns raw data only.
+    Wavefront map image rendering happens on Mac side using matplotlib.
+    """
+    async with _zospy_lock:
+        if _ensure_connected() is None:
+            return WavefrontResponse(success=False, error=NOT_CONNECTED_ERROR)
+
+        try:
+            # Load system from request
+            _load_system_from_request(request)
+
+            # Get wavefront data (system already loaded)
+            result = zospy_handler.get_wavefront(
+                field_index=request.field_index,
+                wavelength_index=request.wavelength_index,
+                sampling=request.sampling,
+            )
+
+            if not result.get("success", False):
+                return WavefrontResponse(
+                    success=False,
+                    error=result.get("error", "Wavefront analysis failed"),
+                )
+
+            return WavefrontResponse(
+                success=True,
+                rms_waves=result.get("rms_waves"),
+                pv_waves=result.get("pv_waves"),
+                strehl_ratio=result.get("strehl_ratio"),
+                wavelength_um=result.get("wavelength_um"),
+                field_x=result.get("field_x"),
+                field_y=result.get("field_y"),
+                image=result.get("image"),
+                image_format=result.get("image_format"),
+                array_shape=result.get("array_shape"),
+                array_dtype=result.get("array_dtype"),
+            )
+        except Exception as e:
+            _handle_zospy_error("Wavefront", e)
+            return WavefrontResponse(success=False, error=str(e))
+
+
+@app.post("/spot-diagram", response_model=SpotDiagramResponse)
+async def get_spot_diagram(
+    request: SpotDiagramRequest,
+    _: None = Depends(verify_api_key),
+) -> SpotDiagramResponse:
+    """
+    Generate spot diagram using ZosPy's StandardSpot analysis.
+
+    This is a "dumb executor" endpoint - returns raw data only.
+    Spot diagram image rendering happens on Mac side if PNG export fails.
+    """
+    async with _zospy_lock:
+        if _ensure_connected() is None:
+            return SpotDiagramResponse(success=False, error=NOT_CONNECTED_ERROR)
+
+        try:
+            # Load system from request
+            _load_system_from_request(request)
+
+            # Get spot diagram data (system already loaded)
+            result = zospy_handler.get_spot_diagram(
+                ray_density=request.ray_density,
+                reference=request.reference,
+            )
+
+            if not result.get("success", False):
+                return SpotDiagramResponse(
+                    success=False,
+                    error=result.get("error", "Spot diagram analysis failed"),
+                )
+
+            # Convert spot_data dicts to SpotFieldData models
+            spot_data = None
+            if result.get("spot_data"):
+                spot_data = [SpotFieldData(**sd) for sd in result["spot_data"]]
+
+            return SpotDiagramResponse(
+                success=True,
+                image=result.get("image"),
+                image_format=result.get("image_format"),
+                array_shape=result.get("array_shape"),
+                array_dtype=result.get("array_dtype"),
+                spot_data=spot_data,
+                airy_radius=result.get("airy_radius"),
+            )
+        except Exception as e:
+            _handle_zospy_error("Spot diagram", e)
+            return SpotDiagramResponse(success=False, error=str(e))
 
 
 if __name__ == "__main__":

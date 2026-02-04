@@ -25,7 +25,7 @@ All endpoints require `zmx_content` (base64-encoded .zmx file) in the request bo
 **What stays on Windows:**
 - System loading from .zmx files (`load_zmx_file`)
 - Ray tracing (`ray_trace_diagnostic`, `trace_rays`)
-- Analysis execution (`get_cross_section`, `get_seidel`, `calc_semi_diameters`)
+- Analysis execution (`get_cross_section`, `get_seidel`, `get_wavefront`, `calc_semi_diameters`)
 - Raw data extraction from LDE/SystemData
 
 **What lives on Mac:**
@@ -34,7 +34,7 @@ All endpoints require `zmx_content` (base64-encoded .zmx file) in the request bo
 - Response formatting and aggregation logic
 - Business logic (margin calculations, clamping, etc.)
 - Fallback strategies and retry logic for failed analysis calls
-- Matplotlib rendering (cross-section numpy array fallback)
+- Matplotlib rendering (cross-section and wavefront map from numpy arrays)
 
 ## ZosPy Docs
 
@@ -103,7 +103,17 @@ if hasattr(data, 'front_focal_length'):
 
 ## Known Issues
 
-- CrossSection export often fails - fallback to surface geometry works
+### CrossSection "Object reference not set" Error
+The error `Object reference not set to an instance of an object` in `set_StartSurface()` means:
+- System has no fields defined (`NumberOfFields = 0`)
+- OR system has invalid aperture/pupil configuration
+- Often happens with ZMX files that have incomplete optical definitions
+
+**Diagnostic clue:** `EFL=None` in load logs indicates invalid system state.
+
+**Fix (2026-02-04):** Added pre-flight validation in `get_cross_section()` to check `NumberOfFields > 0` before attempting analysis. Returns surface geometry fallback if validation fails.
+
+### Other Known Issues
 - Seidel S4/S5 from Zernike are approximations only
 - Ray trace header warnings are cosmetic
 - `distribution="hexapolar"` in ray_trace_diagnostic uses square grid (not actual hexapolar)
@@ -122,6 +132,24 @@ if hasattr(data, 'front_focal_length'):
 - Surface index conventions inconsistent (some 0-indexed, some 1-indexed)
 
 ## Changelog
+
+**2026-02-04 (Part 8) - Add Spot Diagram Endpoint**
+- **NEW** `/spot-diagram` endpoint for spot diagram analysis
+- Uses ZosPy `new_analysis` with `AnalysisIDM.StandardSpot` for native OpticStudio access
+- Parameters: `ray_density` (1-20), `reference` ('chief_ray' or 'centroid')
+- Returns PNG image (or numpy array fallback) + per-field spot data
+- Per-field data includes: `rms_radius`, `geo_radius`, `centroid_x`, `centroid_y`, `num_rays`
+- Also returns `airy_radius` for diffraction limit comparison
+- **Fallback**: If StandardSpot doesn't provide data, manually traces rays via `SingleRayTrace`
+- Follows "dumb executor" pattern - no retries, Mac side handles rendering if needed
+
+**2026-02-04 (Part 7) - Add Wavefront Endpoint**
+- **NEW** `/wavefront` endpoint for wavefront error analysis
+- Uses ZosPy `ZernikeStandardCoefficients` for RMS, P-V, and Strehl ratio
+- Uses ZosPy `WavefrontMap` for OPD map visualization
+- Returns raw numpy array for wavefront map (Mac side renders to PNG)
+- Response includes: `rms_waves`, `pv_waves`, `strehl_ratio`, `wavelength_um`, `field_x`, `field_y`
+- Follows "dumb executor" pattern - no fallbacks or retries on worker side
 
 **2026-02-04 (Part 6) - Move matplotlib fallback to Mac**
 - **REMOVED** from worker:

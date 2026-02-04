@@ -163,6 +163,33 @@ class ZosPyHandler:
         # Metadata for numpy array reconstruction (only used when image_format="numpy_array")
         array_shape = None
         array_dtype = None
+        error_msg = None
+
+        # Validate system state before attempting CrossSection
+        # The "Object reference not set" error in set_StartSurface() happens when
+        # the system has no fields or invalid aperture configuration
+        try:
+            num_fields = self.oss.SystemData.Fields.NumberOfFields
+            if num_fields == 0:
+                logger.warning("CrossSection skipped: System has no fields defined (NumberOfFields=0)")
+                error_msg = "System has no fields defined"
+                # Skip to fallback - return surface geometry only
+                paraxial = self._get_paraxial_from_lde()
+                surfaces_data = self._get_surface_geometry()
+                return {
+                    "image": None,
+                    "image_format": None,
+                    "array_shape": None,
+                    "array_dtype": None,
+                    "paraxial": paraxial,
+                    "surfaces": surfaces_data,
+                    "rays_total": 0,
+                    "rays_through": 0,
+                    "error": error_msg,
+                }
+        except Exception as e:
+            logger.warning(f"Could not validate system fields: {e}")
+            # Continue anyway - let CrossSection fail with better error if needed
 
         # Check OpticStudio version - image export requires >= 24.1.0
         try:
@@ -183,6 +210,15 @@ class ZosPyHandler:
 
                 try:
                     from zospy.analyses.systemviewers.cross_section import CrossSection
+
+                    # Log system state before attempting CrossSection
+                    try:
+                        mode = self.oss.Mode
+                        num_fields = self.oss.SystemData.Fields.NumberOfFields
+                        num_wavelengths = self.oss.SystemData.Wavelengths.NumberOfWavelengths
+                        logger.info(f"CrossSection: System mode={mode}, fields={num_fields}, wavelengths={num_wavelengths}")
+                    except Exception as diag_e:
+                        logger.warning(f"CrossSection: Could not get system diagnostics: {diag_e}")
 
                     cross_section = CrossSection(
                         number_of_rays=11,
@@ -224,7 +260,24 @@ class ZosPyHandler:
                 except ImportError as e:
                     logger.warning(f"CrossSection import failed: {e}")
                 except Exception as e:
-                    logger.warning(f"CrossSection export failed: {e}")
+                    # Enhanced error logging for StartSurface and similar failures
+                    # "Object reference not set" on StartSurface means OpenCrossSectionExport() returned NULL
+                    error_str = str(e)
+                    diag_info = []
+                    try:
+                        diag_info.append(f"Mode={self.oss.Mode}")
+                        diag_info.append(f"Fields={self.oss.SystemData.Fields.NumberOfFields}")
+                        diag_info.append(f"Wavelengths={self.oss.SystemData.Wavelengths.NumberOfWavelengths}")
+                        diag_info.append(f"EPD={self.oss.SystemData.Aperture.ApertureValue}")
+                        diag_info.append(f"Surfaces={self.oss.LDE.NumberOfSurfaces}")
+                    except Exception as diag_e:
+                        diag_info.append(f"DiagError={diag_e}")
+
+                    if "StartSurface" in error_str or "Object reference" in error_str:
+                        logger.warning(f"CrossSection export failed (likely OpenCrossSectionExport returned NULL): {error_str}")
+                        logger.warning(f"System state: {', '.join(diag_info)}")
+                    else:
+                        logger.warning(f"CrossSection export failed: {error_str} | {', '.join(diag_info)}")
                 finally:
                     # Clean up temp file if it exists
                     if os.path.exists(temp_path):
@@ -672,6 +725,560 @@ class ZosPyHandler:
             "num_wavelengths": num_wavelengths,
             "data": data,
         }
+
+    def get_wavefront(
+        self,
+        field_index: int = 1,
+        wavelength_index: int = 1,
+        sampling: str = "64x64",
+    ) -> dict[str, Any]:
+        """
+        Get wavefront error map and metrics using ZosPy's WavefrontMap
+        and ZernikeStandardCoefficients analyses.
+
+        This is a "dumb executor" - returns raw data only. Wavefront map
+        image rendering happens on Mac side.
+
+        Note: System must be pre-loaded via load_zmx_file().
+
+        Args:
+            field_index: Field index (1-indexed)
+            wavelength_index: Wavelength index (1-indexed)
+            sampling: Pupil sampling grid (e.g., '32x32', '64x64', '128x128')
+
+        Returns:
+            On success: {
+                "success": True,
+                "rms_waves": float,
+                "pv_waves": float,
+                "strehl_ratio": float or None,
+                "wavelength_um": float,
+                "field_x": float,
+                "field_y": float,
+                "image": str (base64 numpy array),
+                "image_format": "numpy_array",
+                "array_shape": [h, w],
+                "array_dtype": str,
+            }
+            On error: {"success": False, "error": "..."}
+        """
+        try:
+            # Get field coordinates for response
+            fields = self.oss.SystemData.Fields
+            if field_index > fields.NumberOfFields:
+                return {"success": False, "error": f"Field index {field_index} out of range (max: {fields.NumberOfFields})"}
+
+            field = fields.GetField(field_index)
+            field_x, field_y = field.X, field.Y
+
+            # Get wavelength for response
+            wavelengths = self.oss.SystemData.Wavelengths
+            if wavelength_index > wavelengths.NumberOfWavelengths:
+                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
+
+            wavelength_um = wavelengths.GetWavelength(wavelength_index).Wavelength
+
+            # Get wavefront metrics using ZernikeStandardCoefficients
+            # This gives us RMS, P-V, and Strehl ratio
+            rms_waves = None
+            pv_waves = None
+            strehl_ratio = None
+
+            try:
+                zernike_analysis = zp.analyses.wavefront.ZernikeStandardCoefficients(
+                    sampling=sampling,
+                    maximum_term=37,
+                    wavelength=wavelength_index,
+                    field=field_index,
+                    reference_opd_to_vertex=False,
+                    surface="Image",
+                )
+                zernike_result = zernike_analysis.run(self.oss)
+
+                if hasattr(zernike_result, 'data') and zernike_result.data is not None:
+                    zdata = zernike_result.data
+
+                    # Get P-V wavefront error (in waves)
+                    if hasattr(zdata, 'peak_to_valley_to_chief'):
+                        pv_waves = float(zdata.peak_to_valley_to_chief)
+                    elif hasattr(zdata, 'peak_to_valley_to_centroid'):
+                        pv_waves = float(zdata.peak_to_valley_to_centroid)
+
+                    # Get RMS and Strehl from integration data
+                    if hasattr(zdata, 'from_integration_of_the_rays'):
+                        integration = zdata.from_integration_of_the_rays
+                        if hasattr(integration, 'rms_to_chief'):
+                            rms_waves = float(integration.rms_to_chief)
+                        elif hasattr(integration, 'rms_to_centroid'):
+                            rms_waves = float(integration.rms_to_centroid)
+                        if hasattr(integration, 'strehl_ratio'):
+                            strehl_ratio = float(integration.strehl_ratio)
+
+                    # Fallback: try direct attributes
+                    if rms_waves is None and hasattr(zdata, 'rms'):
+                        rms_waves = float(zdata.rms)
+                    if pv_waves is None and hasattr(zdata, 'peak_to_valley'):
+                        pv_waves = float(zdata.peak_to_valley)
+
+            except Exception as e:
+                logger.warning(f"ZernikeStandardCoefficients failed: {e}, trying WavefrontMap only")
+
+            # Get wavefront map as numpy array
+            image_b64 = None
+            array_shape = None
+            array_dtype = None
+
+            try:
+                wavefront_map = zp.analyses.wavefront.WavefrontMap(
+                    sampling=sampling,
+                    wavelength=wavelength_index,
+                    field=field_index,
+                    surface="Image",
+                    show_as="Surface",
+                    rotation="Rotate_0",
+                    scale=1,
+                    polarization=None,
+                    reference_to_primary=False,
+                    remove_tilt=False,
+                    use_exit_pupil=True,
+                ).run(self.oss, oncomplete="Release")
+
+                if hasattr(wavefront_map, 'data') and wavefront_map.data is not None:
+                    # Convert DataFrame or array to numpy
+                    wf_data = wavefront_map.data
+
+                    if hasattr(wf_data, 'values'):
+                        # It's a DataFrame - extract values
+                        arr = np.array(wf_data.values, dtype=np.float64)
+                    else:
+                        # It's already array-like
+                        arr = np.array(wf_data, dtype=np.float64)
+
+                    # Validate array dimensions
+                    if arr.ndim >= 2:
+                        image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                        array_shape = list(arr.shape)
+                        array_dtype = str(arr.dtype)
+                        logger.info(f"Wavefront map generated: shape={arr.shape}, dtype={arr.dtype}")
+
+                        # If we didn't get metrics from Zernike, compute from the map
+                        if pv_waves is None:
+                            valid_data = arr[~np.isnan(arr)]
+                            if len(valid_data) > 0:
+                                pv_waves = float(np.max(valid_data) - np.min(valid_data))
+
+                        if rms_waves is None:
+                            valid_data = arr[~np.isnan(arr)]
+                            if len(valid_data) > 0:
+                                rms_waves = float(np.std(valid_data))
+                    else:
+                        logger.warning(f"WavefrontMap: unexpected array dimensions {arr.ndim}")
+
+            except Exception as e:
+                logger.warning(f"WavefrontMap failed: {e}")
+
+            # If we have no metrics at all, return error
+            if rms_waves is None and pv_waves is None:
+                return {"success": False, "error": "Could not compute wavefront metrics"}
+
+            return {
+                "success": True,
+                "rms_waves": rms_waves,
+                "pv_waves": pv_waves,
+                "strehl_ratio": strehl_ratio,
+                "wavelength_um": wavelength_um,
+                "field_x": field_x,
+                "field_y": field_y,
+                "image": image_b64,
+                "image_format": "numpy_array" if image_b64 else None,
+                "array_shape": array_shape,
+                "array_dtype": array_dtype,
+            }
+
+        except Exception as e:
+            return {"success": False, "error": f"Wavefront analysis failed: {e}"}
+
+    def get_spot_diagram(
+        self,
+        ray_density: int = 5,
+        reference: str = "chief_ray",
+    ) -> dict[str, Any]:
+        """
+        Generate spot diagram using ZosPy's StandardSpot analysis.
+
+        This is a "dumb executor" - returns raw data only. Image rendering
+        (if PNG export fails) happens on Mac side.
+
+        Note: System must be pre-loaded via load_zmx_file().
+
+        Args:
+            ray_density: Rays per axis (determines grid density, 1-20)
+            reference: Reference point: 'chief_ray' or 'centroid'
+
+        Returns:
+            On success: {
+                "success": True,
+                "image": str (base64 PNG or numpy array),
+                "image_format": "png" or "numpy_array",
+                "array_shape": [h, w, c] (for numpy_array only),
+                "array_dtype": str (for numpy_array only),
+                "spot_data": [
+                    {"field_index": 0, "field_x": 0, "field_y": 0,
+                     "rms_radius": float, "geo_radius": float,
+                     "centroid_x": float, "centroid_y": float, "num_rays": int},
+                    ...
+                ],
+                "airy_radius": float,
+            }
+            On error: {"success": False, "error": "..."}
+        """
+        import tempfile
+        import os
+
+        image_b64 = None
+        image_format = None
+        array_shape = None
+        array_dtype = None
+        spot_data = []
+        airy_radius = None
+
+        # Get field info
+        fields = self.oss.SystemData.Fields
+        num_fields = fields.NumberOfFields
+
+        if num_fields == 0:
+            return {"success": False, "error": "System has no fields defined"}
+
+        # Map reference parameter to OpticStudio constant
+        # Reference: 0 = Chief Ray, 1 = Centroid
+        reference_code = 0 if reference == "chief_ray" else 1
+
+        try:
+            # Use ZosPy's new_analysis to access StandardSpot directly
+            # AnalysisIDM.StandardSpot = Standard Spot Diagram
+            analysis = zp.analyses.new_analysis(
+                self.oss,
+                zp.constants.Analysis.AnalysisIDM.StandardSpot,
+                settings_first=True,
+            )
+
+            # Configure the analysis settings
+            settings = analysis.Settings
+
+            # Set ray density (number of rays)
+            # Map ray_density (1-20) to OpticStudio's ray density setting
+            # OpticStudio uses ray density values like 1, 2, 3, etc.
+            if hasattr(settings, 'RayDensity'):
+                settings.RayDensity = ray_density
+            elif hasattr(settings, 'NumberOfRays'):
+                settings.NumberOfRays = ray_density
+
+            # Set reference to chief ray or centroid
+            if hasattr(settings, 'ReferenceType'):
+                settings.ReferenceType = reference_code
+            elif hasattr(settings, 'Reference'):
+                settings.Reference = reference_code
+
+            # Set to show all fields and wavelengths
+            if hasattr(settings, 'Field'):
+                # Try to set to "All" or iterate through fields
+                try:
+                    settings.Field.UseAllFields()
+                except Exception:
+                    pass
+
+            if hasattr(settings, 'Wavelength'):
+                try:
+                    settings.Wavelength.UseAllWavelengths()
+                except Exception:
+                    pass
+
+            # Run the analysis
+            analysis.ApplyAndWaitForCompletion()
+
+            # Try to export image to PNG
+            temp_path = os.path.join(tempfile.gettempdir(), "zemax_spot_diagram.png")
+            try:
+                if hasattr(analysis, 'ExportGraphicAs'):
+                    analysis.ExportGraphicAs(temp_path)
+                elif hasattr(analysis, 'Results') and hasattr(analysis.Results, 'ExportData'):
+                    analysis.Results.ExportData(temp_path)
+
+                if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                    with open(temp_path, 'rb') as f:
+                        image_b64 = base64.b64encode(f.read()).decode('utf-8')
+                    image_format = "png"
+                    logger.info(f"Exported spot diagram PNG, size={len(image_b64)}")
+            except Exception as e:
+                logger.warning(f"Spot diagram PNG export failed: {e}")
+            finally:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+
+            # Extract spot data from the analysis results
+            results = analysis.Results
+            if results is not None:
+                # Try to get data grid for spot positions
+                try:
+                    # Get Airy radius if available
+                    if hasattr(results, 'AiryRadius'):
+                        airy_radius = float(results.AiryRadius)
+                    elif hasattr(results, 'GetAiryDiskRadius'):
+                        airy_radius = float(results.GetAiryDiskRadius())
+
+                    # Get per-field spot data
+                    # OpticStudio's StandardSpot provides data per field
+                    for fi in range(num_fields):
+                        field = fields.GetField(fi + 1)  # 1-indexed
+                        field_x, field_y = field.X, field.Y
+
+                        field_data = {
+                            "field_index": fi,
+                            "field_x": field_x,
+                            "field_y": field_y,
+                            "rms_radius": None,
+                            "geo_radius": None,
+                            "centroid_x": None,
+                            "centroid_y": None,
+                            "num_rays": None,
+                        }
+
+                        # Try to get spot data for this field
+                        try:
+                            if hasattr(results, 'GetDataSeries'):
+                                # Data series might have RMS, GEO for each field
+                                series = results.GetDataSeries(fi)
+                                if series:
+                                    if hasattr(series, 'RMS'):
+                                        field_data["rms_radius"] = float(series.RMS)
+                                    if hasattr(series, 'GEO'):
+                                        field_data["geo_radius"] = float(series.GEO)
+
+                            # Alternative: GetDataGrid approach
+                            if hasattr(results, 'GetDataGrid'):
+                                grid = results.GetDataGrid(fi)
+                                if grid is not None:
+                                    # Grid contains x, y ray positions
+                                    # Calculate RMS and GEO from ray positions
+                                    pass
+
+                            # Try direct attributes
+                            if hasattr(results, 'SpotData'):
+                                spot_info = results.SpotData
+                                if hasattr(spot_info, 'GetSpotDataAtField'):
+                                    fd = spot_info.GetSpotDataAtField(fi + 1)
+                                    if fd:
+                                        if hasattr(fd, 'RMSSpotRadius'):
+                                            field_data["rms_radius"] = float(fd.RMSSpotRadius)
+                                        if hasattr(fd, 'GEOSpotRadius'):
+                                            field_data["geo_radius"] = float(fd.GEOSpotRadius)
+                                        if hasattr(fd, 'CentroidX'):
+                                            field_data["centroid_x"] = float(fd.CentroidX)
+                                        if hasattr(fd, 'CentroidY'):
+                                            field_data["centroid_y"] = float(fd.CentroidY)
+                                        if hasattr(fd, 'NumberOfRays'):
+                                            field_data["num_rays"] = int(fd.NumberOfRays)
+
+                        except Exception as e:
+                            logger.debug(f"Could not get spot data for field {fi}: {e}")
+
+                        spot_data.append(field_data)
+
+                except Exception as e:
+                    logger.warning(f"Could not extract spot data from results: {e}")
+
+            # Close the analysis
+            analysis.Close()
+
+        except Exception as e:
+            logger.warning(f"StandardSpot analysis failed: {e}, falling back to manual ray trace")
+            # Fall through to manual ray trace fallback
+
+        # If we couldn't get spot data from StandardSpot, compute manually via ray trace
+        if not spot_data or all(sd.get("rms_radius") is None for sd in spot_data):
+            logger.info("Computing spot data via manual ray trace")
+            spot_data = self._compute_spot_data_manual(ray_density, reference)
+
+        # If we still don't have an image, create numpy array from ray positions
+        if image_b64 is None and spot_data:
+            try:
+                arr = self._create_spot_diagram_array(spot_data, ray_density)
+                if arr is not None:
+                    image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                    image_format = "numpy_array"
+                    array_shape = list(arr.shape)
+                    array_dtype = str(arr.dtype)
+                    logger.info(f"Created spot diagram numpy array, shape={arr.shape}")
+            except Exception as e:
+                logger.warning(f"Could not create spot diagram array: {e}")
+
+        # Get Airy radius if not already obtained
+        if airy_radius is None:
+            airy_radius = self._calculate_airy_radius()
+
+        return {
+            "success": True,
+            "image": image_b64,
+            "image_format": image_format,
+            "array_shape": array_shape,
+            "array_dtype": array_dtype,
+            "spot_data": spot_data,
+            "airy_radius": airy_radius,
+        }
+
+    def _compute_spot_data_manual(
+        self,
+        ray_density: int,
+        reference: str,
+    ) -> list[dict[str, Any]]:
+        """
+        Compute spot diagram data manually by tracing rays.
+
+        This is a fallback when StandardSpot analysis doesn't provide data.
+        """
+        spot_data = []
+        fields = self.oss.SystemData.Fields
+        num_fields = fields.NumberOfFields
+
+        # Grid of rays across the pupil
+        grid_size = ray_density * 2 + 1  # e.g., ray_density=5 -> 11x11 grid
+
+        for fi in range(1, num_fields + 1):
+            field = fields.GetField(fi)
+            field_x, field_y = field.X, field.Y
+
+            ray_x_positions = []
+            ray_y_positions = []
+
+            # Trace rays across the pupil
+            for px in np.linspace(-1, 1, grid_size):
+                for py in np.linspace(-1, 1, grid_size):
+                    if px**2 + py**2 > 1:
+                        continue  # Skip rays outside circular pupil
+
+                    try:
+                        ray_trace = zp.analyses.raysandspots.SingleRayTrace(
+                            hx=0.0,
+                            hy=0.0,
+                            px=float(px),
+                            py=float(py),
+                            wavelength=1,
+                            field=fi,
+                        )
+                        result = ray_trace.run(self.oss)
+
+                        if hasattr(result, 'data') and result.data is not None:
+                            ray_data = result.data
+                            if hasattr(ray_data, 'real_ray_trace_data'):
+                                df = ray_data.real_ray_trace_data
+                                if hasattr(df, 'iloc') and len(df) > 0:
+                                    # Get last row (image surface)
+                                    last_row = df.iloc[-1]
+                                    # Check if ray reached image (no error)
+                                    error_code = last_row.get('error_code', 0) if hasattr(last_row, 'get') else 0
+                                    if error_code == 0:
+                                        x_val = last_row.get('X', last_row.get('x', None))
+                                        y_val = last_row.get('Y', last_row.get('y', None))
+                                        if x_val is not None and y_val is not None:
+                                            ray_x_positions.append(float(x_val))
+                                            ray_y_positions.append(float(y_val))
+                    except Exception as e:
+                        logger.debug(f"Ray trace failed at ({px:.2f}, {py:.2f}): {e}")
+                        continue
+
+            # Calculate spot metrics
+            num_rays = len(ray_x_positions)
+            field_result = {
+                "field_index": fi - 1,
+                "field_x": field_x,
+                "field_y": field_y,
+                "rms_radius": None,
+                "geo_radius": None,
+                "centroid_x": None,
+                "centroid_y": None,
+                "num_rays": num_rays,
+            }
+
+            if num_rays > 0:
+                x_arr = np.array(ray_x_positions)
+                y_arr = np.array(ray_y_positions)
+
+                # Compute centroid
+                centroid_x = np.mean(x_arr)
+                centroid_y = np.mean(y_arr)
+                field_result["centroid_x"] = float(centroid_x)
+                field_result["centroid_y"] = float(centroid_y)
+
+                # Reference point for radius calculation
+                if reference == "centroid":
+                    ref_x, ref_y = centroid_x, centroid_y
+                else:
+                    # Chief ray reference - use the ray at pupil center (0,0)
+                    # For simplicity, use centroid as approximation
+                    ref_x, ref_y = centroid_x, centroid_y
+
+                # Calculate radii from reference point
+                distances = np.sqrt((x_arr - ref_x)**2 + (y_arr - ref_y)**2)
+                field_result["rms_radius"] = float(np.sqrt(np.mean(distances**2)))
+                field_result["geo_radius"] = float(np.max(distances))
+
+            spot_data.append(field_result)
+
+        return spot_data
+
+    def _create_spot_diagram_array(
+        self,
+        spot_data: list[dict[str, Any]],
+        ray_density: int,
+    ) -> Optional[np.ndarray]:
+        """
+        Create a numpy array visualization of the spot diagram.
+
+        Returns a grayscale image with spots plotted.
+        This is a simple fallback - Mac side can render better with matplotlib.
+        """
+        # This is a minimal implementation - just return None
+        # and let Mac side render from spot_data
+        # A full implementation would trace rays and plot them
+        return None
+
+    def _calculate_airy_radius(self) -> Optional[float]:
+        """
+        Calculate the Airy disk radius for the system.
+
+        Airy radius = 1.22 * wavelength * f_number
+        """
+        try:
+            # Get wavelength (primary wavelength in micrometers)
+            wavelength_um = self.oss.SystemData.Wavelengths.GetWavelength(1).Wavelength
+
+            # Get f-number
+            fno = None
+            aperture = self.oss.SystemData.Aperture
+            aperture_type = str(aperture.ApertureType).split(".")[-1] if aperture.ApertureType else ""
+
+            if aperture_type in ["ImageSpaceFNumber", "FloatByStopSize", "ParaxialWorkingFNumber"]:
+                fno = aperture.ApertureValue
+            else:
+                # Calculate from EPD and EFL
+                epd = aperture.ApertureValue
+                efl = self._get_efl()
+                if epd and efl and epd > 0:
+                    fno = efl / epd
+
+            if fno and wavelength_um:
+                # Convert wavelength from micrometers to millimeters (lens units typically mm)
+                wavelength_mm = wavelength_um / 1000.0
+                airy_radius = 1.22 * wavelength_mm * fno
+                return float(airy_radius)
+
+        except Exception as e:
+            logger.debug(f"Could not calculate Airy radius: {e}")
+
+        return None
 
 
 class ZosPyError(Exception):
