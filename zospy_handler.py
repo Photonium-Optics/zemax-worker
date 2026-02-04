@@ -899,33 +899,18 @@ class ZosPyHandler:
             logger.warning("Could not extract Zernike coefficients, using placeholder values")
             coefficients = [0.0] * 37
 
-        logger.debug(f"Seidel: Final coefficient count = {len(coefficients)}")
+        logger.debug(f"Zernike: Final coefficient count = {len(coefficients)}")
 
-        try:
-            # Convert Zernike to Seidel
-            from seidel_converter import zernike_to_seidel, build_seidel_response
+        # Return raw Zernike coefficients - conversion to Seidel happens on Mac side
+        wl_um = self.oss.SystemData.Wavelengths.GetWavelength(1).Wavelength
+        num_surfaces = self.oss.LDE.NumberOfSurfaces - 1
 
-            # Get wavelength for scaling
-            wl_um = self.oss.SystemData.Wavelengths.GetWavelength(1).Wavelength
-
-            seidel = zernike_to_seidel(
-                coefficients,
-                wavelength_um=wl_um,
-            )
-
-            # Get number of surfaces
-            num_surfaces = self.oss.LDE.NumberOfSurfaces - 1
-
-            # Build response
-            response = build_seidel_response(
-                seidel=seidel,
-                num_surfaces=num_surfaces,
-            )
-
-            return response
-
-        except Exception as e:
-            raise ZosPyError(f"Seidel analysis failed: {e}")
+        return {
+            "success": True,
+            "zernike_coefficients": coefficients,
+            "wavelength_um": wl_um,
+            "num_surfaces": num_surfaces,
+        }
 
     def trace_rays(
         self,

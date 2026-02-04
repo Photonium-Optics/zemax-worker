@@ -199,12 +199,11 @@ class RayTraceDiagnosticResponse(BaseModel):
     error: Optional[str] = Field(default=None)
 
 
-class SeidelResponse(BaseModel):
-    """Seidel aberration response."""
+class ZernikeResponse(BaseModel):
+    """Raw Zernike coefficients response - conversion to Seidel happens on Mac."""
     success: bool = Field(description="Whether the operation succeeded")
-    seidel_coefficients: Optional[dict[str, Any]] = Field(default=None)
-    per_surface: Optional[dict[str, Any]] = Field(default=None)
-    chromatic: Optional[dict[str, Any]] = Field(default=None)
+    zernike_coefficients: Optional[list[float]] = Field(default=None, description="Raw Zernike coefficients Z1-Z37")
+    wavelength_um: Optional[float] = Field(default=None, description="Wavelength in micrometers")
     num_surfaces: int = Field(default=0)
     error: Optional[str] = Field(default=None)
 
@@ -362,25 +361,24 @@ async def ray_trace_diagnostic(
             return RayTraceDiagnosticResponse(success=False, error=str(e))
 
 
-@app.post("/seidel", response_model=SeidelResponse)
-async def get_seidel(request: SystemRequest, _: None = Depends(verify_api_key)) -> SeidelResponse:
-    """Get Seidel aberrations via ZosPy's Zernike analysis with conversion."""
+@app.post("/seidel", response_model=ZernikeResponse)
+async def get_zernike(request: SystemRequest, _: None = Depends(verify_api_key)) -> ZernikeResponse:
+    """Get raw Zernike coefficients - conversion to Seidel happens on Mac side."""
     async with _zospy_lock:
         if _ensure_connected() is None:
-            return SeidelResponse(success=False, error=NOT_CONNECTED_ERROR)
+            return ZernikeResponse(success=False, error=NOT_CONNECTED_ERROR)
 
         try:
             result = zospy_handler.get_seidel(request.system)
-            return SeidelResponse(
+            return ZernikeResponse(
                 success=True,
-                seidel_coefficients=result.get("seidel_coefficients"),
-                per_surface=result.get("per_surface"),
-                chromatic=result.get("chromatic"),
+                zernike_coefficients=result.get("zernike_coefficients"),
+                wavelength_um=result.get("wavelength_um"),
                 num_surfaces=result.get("num_surfaces", 0),
             )
         except Exception as e:
-            _handle_zospy_error("Seidel", e)
-            return SeidelResponse(success=False, error=str(e))
+            _handle_zospy_error("Zernike", e)
+            return ZernikeResponse(success=False, error=str(e))
 
 
 @app.post("/trace-rays", response_model=TraceRaysResponse)
