@@ -7,8 +7,6 @@ Run this on the Windows machine with OpticStudio installed:
 
 This will tell us whether we can use the native Seidel analysis instead of
 deriving Seidel from Zernike coefficients.
-
-Based on GPT's suggestion - includes version info for debugging.
 """
 
 import zospy as zp
@@ -24,16 +22,9 @@ def main():
     zos = zp.ZOS()
     oss = zos.connect(mode="standalone")
 
-    # Print version info (helps debug missing enum members)
+    # Print version info
     print(f"\n[2] Version Info:")
     print(f"    ZOSPy version: {getattr(zp, '__version__', 'unknown')}")
-
-    # Get OpticStudio version - use direct attribute access (correct ZOSPy API)
-    try:
-        version = str(oss.Application.ZemaxVersion)
-        print(f"    OpticStudio version: {version}")
-    except Exception as e:
-        print(f"    OpticStudio version: (error: {e})")
 
     # Force-load constants (they're dynamic)
     print("\n[3] Loading ZOSPy constants...")
@@ -46,94 +37,109 @@ def main():
 
     print(f"    Total analysis types available: {len(names)}")
 
-    # Find Seidel-related entries (case-insensitive)
     seidelish = [n for n in names if "seidel" in n.lower()]
     print(f"    AnalysisIDM entries containing 'Seidel': {seidelish if seidelish else 'NONE FOUND'}")
 
-    # Also check for related aberration analyses
-    aberration_related = [n for n in names if any(
-        kw in n.lower() for kw in ['aberr', 'third', 'petzval', 'coma', 'astig']
-    )]
-    if aberration_related:
-        print(f"    Other aberration-related entries: {aberration_related}")
+    # Try SeidelCoefficients and extract actual data
+    print("\n[5] Running SeidelCoefficients analysis and extracting data...")
 
-    # Try to run Seidel analyses if present
-    print("\n[5] Attempting to run Seidel analyses...")
+    if "SeidelCoefficients" in names:
+        try:
+            an = zp.analyses.new_analysis(
+                oss,
+                idm.SeidelCoefficients,
+                settings_first=True
+            )
 
-    for candidate in ["SeidelCoefficients", "SeidelDiagram", "SeidelAberrations"]:
-        if candidate in names:
-            print(f"\n    Found '{candidate}' - attempting to run...")
-            try:
-                an = zp.analyses.new_analysis(
-                    oss,
-                    getattr(idm, candidate),
-                    settings_first=True
-                )
+            # Run the analysis
+            an.ApplyAndWaitForCompletion()
+            res = an.Results
 
-                # Check available settings using hasattr pattern
-                if hasattr(an, 'Settings'):
-                    settings = an.Settings
-                    settings_attrs = [a for a in dir(settings) if not a.startswith("_")]
-                    print(f"    Settings attributes: {settings_attrs[:15]}...")
+            # Explore DataGrids
+            print(f"\n    Number of DataGrids: {res.DataGrids}")
+            for i in range(res.DataGrids):
+                try:
+                    grid = res.GetDataGrid(i)
+                    print(f"\n    --- DataGrid[{i}] ---")
+                    print(f"    Type: {type(grid)}")
 
-                # Run with defaults
-                an.ApplyAndWaitForCompletion()
+                    # Check grid attributes
+                    grid_attrs = [a for a in dir(grid) if not a.startswith("_")]
+                    print(f"    Attributes: {grid_attrs}")
 
-                # Access results safely using hasattr
-                if hasattr(an, 'Results'):
-                    res = an.Results
+                    # Try to get dimensions
+                    if hasattr(grid, 'Rows'):
+                        print(f"    Rows: {grid.Rows}")
+                    if hasattr(grid, 'Cols'):
+                        print(f"    Cols: {grid.Cols}")
+                    if hasattr(grid, 'Values'):
+                        print(f"    Values: {grid.Values}")
 
-                    # Try to get text output (most reliable across versions)
-                    if hasattr(res, 'GetTextFile'):
-                        try:
-                            txt = res.GetTextFile()
-                            print(f"    Text output (first 800 chars):")
-                            print("-" * 50)
-                            print(txt[:800] if txt else "    (empty)")
-                            print("-" * 50)
-                        except Exception as e:
-                            print(f"    GetTextFile failed: {e}")
-
-                    # Try to get data grids
-                    if hasattr(res, 'GetDataGrid'):
-                        try:
-                            for i in range(3):  # Try first 3 grids
+                    # Try to iterate values
+                    if hasattr(grid, 'Rows') and hasattr(grid, 'Cols'):
+                        print(f"    Grid data ({grid.Rows}x{grid.Cols}):")
+                        for row in range(min(grid.Rows, 10)):  # First 10 rows
+                            row_data = []
+                            for col in range(min(grid.Cols, 8)):  # First 8 cols
                                 try:
-                                    grid = res.GetDataGrid(i)
-                                    if grid:
-                                        print(f"    DataGrid[{i}]: {grid}")
+                                    val = grid.GetDouble(row, col)
+                                    row_data.append(f"{val:.6f}")
                                 except:
-                                    break
-                        except Exception as e:
-                            print(f"    GetDataGrid failed: {e}")
+                                    try:
+                                        val = grid.GetString(row, col)
+                                        row_data.append(str(val)[:12])
+                                    except:
+                                        row_data.append("?")
+                            print(f"      Row {row}: {row_data}")
+                except Exception as e:
+                    print(f"    DataGrid[{i}] error: {e}")
 
-                    # Check results attributes
-                    results_attrs = [a for a in dir(res) if not a.startswith("_")]
-                    print(f"    Results attributes: {results_attrs[:15]}...")
+            # Explore DataSeries
+            print(f"\n    Number of DataSeries: {res.DataSeries}")
+            for i in range(min(res.DataSeries, 5)):  # First 5 series
+                try:
+                    series = res.GetDataSeries(i)
+                    print(f"\n    --- DataSeries[{i}] ---")
+                    print(f"    Type: {type(series)}")
 
-                an.Close()
-                print(f"    SUCCESS: '{candidate}' analysis works!")
+                    series_attrs = [a for a in dir(series) if not a.startswith("_")]
+                    print(f"    Attributes: {series_attrs}")
 
-            except Exception as e:
-                print(f"    ERROR running '{candidate}': {e}")
-        else:
-            print(f"    '{candidate}' not found in AnalysisIDM")
+                    if hasattr(series, 'Description'):
+                        print(f"    Description: {series.Description}")
+                    if hasattr(series, 'NumData'):
+                        print(f"    NumData: {series.NumData}")
+                        # Try to get values
+                        values = []
+                        for j in range(min(series.NumData, 10)):
+                            try:
+                                x = series.XData.Data(j)
+                                y = series.YData.Data(j)
+                                values.append(f"({x:.4f}, {y:.4f})")
+                            except:
+                                pass
+                        if values:
+                            print(f"    Values: {values}")
+                except Exception as e:
+                    print(f"    DataSeries[{i}] error: {e}")
 
-    # If no Seidel found, show what IS available for reference
-    if not seidelish:
-        print("\n[6] No Seidel analyses found. Showing all available analyses for reference:")
-        print(f"    {names[:30]}...")
-        if len(names) > 30:
-            print(f"    ... and {len(names) - 30} more")
+            an.Close()
+            print("\n    SeidelCoefficients analysis completed successfully!")
+
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print("    SeidelCoefficients not found!")
 
     # Cleanup
-    print("\n[7] Cleanup...")
+    print("\n[6] Cleanup...")
     zos.disconnect()
     print("    Disconnected from OpticStudio.")
 
     print("\n" + "=" * 70)
-    print("Diagnostic complete.")
-    print("Share this output to determine if native Seidel analysis is available.")
+    print("Diagnostic complete. Share this output to see the Seidel data structure.")
     print("=" * 70)
 
 
