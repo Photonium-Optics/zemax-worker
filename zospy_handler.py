@@ -216,11 +216,10 @@ class ZosPyHandler:
             weight = float(wl_spec.get("weight", 1.0))
             wl_data.AddWavelength(um, weight)
 
-        # Set primary wavelength
-        # Use MakePrimary() on the individual wavelength object, not SelectWavelength on collection
+        # Set primary wavelength using SelectWavelength on the collection
+        # Documentation shows: wl_data.SelectWavelength(index)
         if 1 <= primary_wavelength <= len(wavelengths):
-            wl = wl_data.GetWavelength(primary_wavelength)
-            wl.MakePrimary()
+            wl_data.SelectWavelength(primary_wavelength)
 
     # Mapping from LLM JSON field types to ZosPy constant names
     _FIELD_TYPE_MAP = {
@@ -341,10 +340,11 @@ class ZosPyHandler:
             if conic != 0.0:
                 surface.Conic = conic
 
-            # Set as stop surface
+            # Set as stop surface using MakeThisSurfaceTheStop() method
+            # Note: IsStop is a read-only property, use the method instead
             if i == stop_index:
                 try:
-                    surface.IsStop = True
+                    surface.MakeThisSurfaceTheStop()
                 except Exception as e:
                     raise ZosPyError(f"Failed to set surface {i} as stop: {e}")
 
@@ -373,20 +373,36 @@ class ZosPyHandler:
                     f = fields.GetField(i)
                     max_field = max(max_field, abs(f.Y), abs(f.X))
 
-            return {
-                "efl": gld.effective_focal_length_air,
-                "bfl": gld.back_focal_length,
-                "ffl": gld.front_focal_length,
-                "fno": gld.working_f_number,
-                "total_track": gld.total_track,
-                "epd": gld.entrance_pupil_diameter,
-                "exp": gld.exit_pupil_diameter,
-                "epl": gld.entrance_pupil_position,
-                "exl": gld.exit_pupil_position,
+            # Build result with available attributes (some may not exist in all ZosPy versions)
+            paraxial = {
                 "field_type": field_type,
                 "max_field": max_field,
                 "field_unit": "deg" if field_type == "object_angle" else "mm",
             }
+
+            # Required attributes (should always exist)
+            if hasattr(gld, 'effective_focal_length_air'):
+                paraxial["efl"] = gld.effective_focal_length_air
+            if hasattr(gld, 'back_focal_length'):
+                paraxial["bfl"] = gld.back_focal_length
+            if hasattr(gld, 'working_f_number'):
+                paraxial["fno"] = gld.working_f_number
+            if hasattr(gld, 'entrance_pupil_diameter'):
+                paraxial["epd"] = gld.entrance_pupil_diameter
+
+            # Optional attributes (may not exist in all versions)
+            if hasattr(gld, 'front_focal_length'):
+                paraxial["ffl"] = gld.front_focal_length
+            if hasattr(gld, 'total_track'):
+                paraxial["total_track"] = gld.total_track
+            if hasattr(gld, 'exit_pupil_diameter'):
+                paraxial["exp"] = gld.exit_pupil_diameter
+            if hasattr(gld, 'entrance_pupil_position'):
+                paraxial["epl"] = gld.entrance_pupil_position
+            if hasattr(gld, 'exit_pupil_position'):
+                paraxial["exl"] = gld.exit_pupil_position
+
+            return paraxial
         except Exception as e:
             print(f"Warning: Could not get paraxial data: {e}")
             return {}
@@ -407,7 +423,9 @@ class ZosPyHandler:
             result = cross_section.run(self.oss)
 
             # ZosPy returns the image in result.figure (matplotlib figure)
-            # or result.data depending on version
+            # or result.data (numpy array) depending on version/analysis
+            import matplotlib.pyplot as plt
+
             image_b64 = None
             if hasattr(result, 'figure') and result.figure is not None:
                 # result.figure is a matplotlib figure - save to PNG
@@ -416,9 +434,14 @@ class ZosPyHandler:
                 buffer.seek(0)
                 image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
             elif hasattr(result, 'data') and result.data is not None:
-                # Fallback: result.data might be PIL Image
+                # result.data is a numpy array - use matplotlib to save as PNG
+                fig, ax = plt.subplots(figsize=(10, 6))
+                ax.imshow(result.data)
+                ax.axis('off')
                 buffer = io.BytesIO()
-                result.data.save(buffer, format='PNG')
+                fig.savefig(buffer, format='PNG', dpi=150, bbox_inches='tight', pad_inches=0)
+                plt.close(fig)
+                buffer.seek(0)
                 image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
 
             # Get paraxial data
