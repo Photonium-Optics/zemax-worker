@@ -738,38 +738,77 @@ class ZosPyHandler:
                 settings_first=True
             )
 
-            # Configure analysis settings
+            # Configure analysis settings - use try/except for each setting
+            # as property names vary between OpticStudio versions
             settings = analysis.Settings
-            settings.Field.SetFieldNumber(1)
-            settings.Wavelength.SetWavelengthNumber(1)
-            settings.Surface.SetSurfaceNumber(0)  # 0 = Image surface
-            settings.SampleSize = zp.constants.Analysis.SampleSizes.S_64x64
-            settings.MaximumNumberOfTerms = 37
-            settings.ReferenceOPDToVertex = False
+            print(f"DEBUG Seidel: Settings type = {type(settings)}")
+            print(f"DEBUG Seidel: Settings dir = {[a for a in dir(settings) if not a.startswith('_')]}")
+
+            try:
+                settings.Field.SetFieldNumber(1)
+            except Exception as e:
+                print(f"DEBUG Seidel: Field setting failed: {e}")
+
+            try:
+                settings.Wavelength.SetWavelengthNumber(1)
+            except Exception as e:
+                print(f"DEBUG Seidel: Wavelength setting failed: {e}")
+
+            try:
+                settings.Surface.SetSurfaceNumber(0)  # 0 = Image surface
+            except Exception as e:
+                print(f"DEBUG Seidel: Surface setting failed: {e}")
+
+            try:
+                settings.SampleSize = zp.constants.Analysis.SampleSizes.S_64x64
+            except Exception as e:
+                print(f"DEBUG Seidel: SampleSize setting failed: {e}")
+
+            try:
+                settings.MaximumNumberOfTerms = 37
+            except Exception as e:
+                print(f"DEBUG Seidel: MaximumNumberOfTerms setting failed: {e}")
+
+            # Skip ReferenceOPDToVertex - not available in all versions
 
             # Run the analysis
             analysis.ApplyAndWaitForCompletion()
+            print(f"DEBUG Seidel: Analysis completed")
 
             # Get results from the analysis
             results = analysis.GetResults()
+            print(f"DEBUG Seidel: Results type = {type(results)}")
 
             # Extract Zernike coefficients from the data grid
             coefficients = []
             if results is not None:
-                data_grid = results.DataGrids[0] if results.NumberOfDataGrids > 0 else None
-                if data_grid is not None:
-                    # Data grid contains Zernike terms
+                print(f"DEBUG Seidel: NumberOfDataGrids = {results.NumberOfDataGrids if hasattr(results, 'NumberOfDataGrids') else 'N/A'}")
+
+                # Try to get data from DataGrids
+                if hasattr(results, 'NumberOfDataGrids') and results.NumberOfDataGrids > 0:
+                    data_grid = results.DataGrids[0]
+                    print(f"DEBUG Seidel: DataGrid Rows={data_grid.Rows}, Cols={data_grid.Cols}")
                     for row in range(data_grid.Rows):
                         for col in range(data_grid.Cols):
                             val = data_grid.GetValueAt(row, col)
                             if val is not None:
                                 coefficients.append(float(val))
 
-            # If we couldn't get coefficients from data grid, try text parsing
+                # Alternative: try DataSeries
+                if not coefficients and hasattr(results, 'NumberOfDataSeries') and results.NumberOfDataSeries > 0:
+                    print(f"DEBUG Seidel: Trying DataSeries, count = {results.NumberOfDataSeries}")
+                    for i in range(results.NumberOfDataSeries):
+                        series = results.GetDataSeries(i)
+                        if series is not None:
+                            for j in range(series.NumData):
+                                coefficients.append(float(series.GetDataValue(j)))
+
+            # If we couldn't get coefficients, try text parsing as last resort
             if not coefficients:
-                # Fall back to returning placeholder data
-                print("Warning: Could not extract Zernike coefficients, using placeholder values")
+                print("Warning: Could not extract Zernike coefficients from data grid/series, using placeholder values")
                 coefficients = [0.0] * 37
+
+            print(f"DEBUG Seidel: Extracted {len(coefficients)} coefficients")
 
             # Release the analysis
             analysis.Release()

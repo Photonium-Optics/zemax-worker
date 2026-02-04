@@ -2,6 +2,17 @@
 
 **IMPORTANT: Read this file before making changes to zemax-worker!**
 
+## ZosPy Documentation
+
+**Official ZosPy (Zemax API Python Wrapper) Resources:**
+- GitHub: https://github.com/MREYE-LUMC/ZOSPy
+- Documentation: https://zospy.readthedocs.io/
+- PyPI: https://pypi.org/project/zospy/
+
+**Context7 for AI-assisted lookup:**
+- Library ID: `/mreye-lumc/zospy`
+- Use Context7 MCP tools to query current API documentation
+
 ## Key Lessons Learned
 
 ### 1. ZosPy API Quirks
@@ -40,6 +51,10 @@ analysis = zp.analyses.new_analysis(
     settings_first=True
 )
 ```
+- **Settings property names vary between versions** - wrap each setting in try/except
+- `ReferenceOPDToVertex` may not exist on raw API settings object
+- Use `dir(settings)` to debug available properties
+- Results may be in `DataGrids` or `DataSeries` - check both
 
 #### GeneralLensData Attributes
 Not all attributes exist in all ZosPy versions. Use `hasattr()` checks:
@@ -81,6 +96,12 @@ Known issues:
 - Fixed response field name mismatch: worker returns `success`, not `ok`
 - zemax-analysis-service was checking `result.get("ok")` which was always None
 - Also fixed: `result.get("error")` can be None even on failure, use `or` fallback
+
+### 2026-02-04 (continued)
+- Added debug logging to CrossSection and Seidel analysis
+- Fixed Seidel: `ReferenceOPDToVertex` doesn't exist on raw ZOSAPI settings
+- Wrapped each settings property in try/except for version compatibility
+- Added fallback to DataSeries if DataGrids is empty
 
 ## TODO / Known Issues
 
