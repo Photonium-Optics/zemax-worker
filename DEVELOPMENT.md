@@ -6,14 +6,36 @@
 
 Only OpticStudio/ZosPy operations belong here. All other logic lives in `zemax-analysis-service/` (Mac side).
 
+## Architecture: ZMX-Based Loading (Preferred)
+
+As of 2026-02-04, the worker supports two system loading methods:
+
+```
+PREFERRED (new):
+  LLM JSON → Node.js /convert-to-zmx → .zmx content → Worker → oss.load(file)
+
+LEGACY (still supported):
+  LLM JSON → Worker → Manual surface building (_setup_* methods)
+```
+
+The preferred method uses the existing `zemax-converter` (TypeScript) to produce .zmx files,
+which are then loaded natively by OpticStudio. This is:
+- More reliable (uses native file format)
+- Single source of truth for conversion (zemax-converter)
+- Less code to maintain in the worker
+
+All endpoints accept `zmx_content` (base64) OR `system` (LLM JSON) in request body.
+
 **What stays on Windows:**
-- System loading (`load_system`, `_setup_*` methods)
+- System loading from .zmx files (`load_zmx_file`)
+- Legacy LLM JSON loading (`load_system`, `_setup_*` methods) - kept for backward compatibility
 - Ray tracing (`ray_trace_diagnostic`, `trace_rays`)
 - Analysis execution (`get_cross_section`, `get_seidel`, `calc_semi_diameters`)
 - Raw data extraction from LDE/SystemData
 - `_parse_zernike_text()` - Parses OpticStudio text output to extract raw coefficients
 
 **What lives on Mac:**
+- LLM JSON → ZMX conversion (via Node.js backend `/convert-to-zmx`)
 - `seidel_converter.py` - Zernike→Seidel conversion (pure math)
 - Response formatting and aggregation logic
 - Business logic (margin calculations, clamping, etc.)
@@ -98,7 +120,14 @@ if hasattr(data, 'front_focal_length'):
 
 ## Changelog
 
-**2026-02-04**
+**2026-02-04 (Part 2) - ZMX-Based Loading**
+- Added `load_zmx_file()` method for native .zmx file loading
+- All endpoints now support `zmx_content` (preferred) or `system` (legacy)
+- zemax-analysis-service now uses Node.js `/convert-to-zmx` for conversion
+- Added `skip_load` parameter to analysis methods for pre-loaded systems
+- Unified request model: `SystemRequest(zmx_content=..., system=...)`
+
+**2026-02-04 (Part 1)**
 - Fixed `SelectWavelength` → `MakePrimary()`
 - Added `float()` conversions for COM interop
 - Raw ZOSAPI fallback for Zernike analysis

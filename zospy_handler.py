@@ -174,6 +174,35 @@ class ZosPyHandler:
             "efl": self._get_efl(),
         }
 
+    def load_zmx_file(self, file_path: str) -> dict[str, Any]:
+        """
+        Load an optical system from a .zmx file directly into OpticStudio.
+
+        This is the preferred method for loading systems as it uses Zemax's
+        native file format and avoids manual surface construction.
+
+        Args:
+            file_path: Absolute path to the .zmx file
+
+        Returns:
+            Dict with load status and system info
+        """
+        import os
+        if not os.path.exists(file_path):
+            raise ZosPyError(f"ZMX file not found: {file_path}")
+
+        # Load the file directly using ZosPy's load method
+        # This replaces all manual surface building with native file loading
+        self.oss.load(file_path)
+
+        # Get system info after loading
+        num_surfaces = self.oss.LDE.NumberOfSurfaces - 1  # Exclude object surface
+
+        return {
+            "num_surfaces": num_surfaces,
+            "efl": self._get_efl(),
+        }
+
     def _setup_aperture(self, system: dict[str, Any]):
         """Configure system aperture using ZosPy API."""
         pupil = system.get("pupil") or {}
@@ -407,15 +436,22 @@ class ZosPyHandler:
 
         return paraxial
 
-    def get_cross_section(self, llm_json: dict[str, Any]) -> dict[str, Any]:
+    def get_cross_section(self, llm_json: dict[str, Any] = None, *, skip_load: bool = False) -> dict[str, Any]:
         """
         Generate cross-section diagram using ZosPy's CrossSection analysis.
 
         Requires ZosPy >= 1.3.0 and OpticStudio >= 24.1.0 for image export.
         Falls back to surface geometry if image export fails.
+
+        Args:
+            llm_json: LLM JSON optical system (required if skip_load=False)
+            skip_load: If True, assume system is already loaded in OpticStudio
         """
-        # Load the system first
-        self.load_system(llm_json)
+        # Load the system first (unless already loaded)
+        if not skip_load:
+            if llm_json is None:
+                raise ZosPyError("llm_json required when skip_load=False")
+            self.load_system(llm_json)
 
         image_b64 = None
         image_format = None
@@ -568,12 +604,19 @@ class ZosPyHandler:
 
         return surfaces
 
-    def calc_semi_diameters(self, llm_json: dict[str, Any]) -> dict[str, Any]:
+    def calc_semi_diameters(self, llm_json: dict[str, Any] = None, *, skip_load: bool = False) -> dict[str, Any]:
         """
         Calculate semi-diameters by reading from surfaces after ray trace.
+
+        Args:
+            llm_json: LLM JSON optical system (required if skip_load=False)
+            skip_load: If True, assume system is already loaded in OpticStudio
         """
-        # Load the system
-        self.load_system(llm_json)
+        # Load the system (unless already loaded)
+        if not skip_load:
+            if llm_json is None:
+                raise ZosPyError("llm_json required when skip_load=False")
+            self.load_system(llm_json)
 
         semi_diameters = []
         lde = self.oss.LDE
@@ -592,17 +635,28 @@ class ZosPyHandler:
 
     def ray_trace_diagnostic(
         self,
-        llm_json: dict[str, Any],
+        llm_json: dict[str, Any] = None,
         num_rays: int = 50,
         distribution: str = "hexapolar",
+        *,
+        skip_load: bool = False,
     ) -> dict[str, Any]:
         """
         Run ray trace diagnostic to identify ray failures.
 
         Uses ZosPy's ray tracing to trace rays and detect failures.
+
+        Args:
+            llm_json: LLM JSON optical system (required if skip_load=False)
+            num_rays: Number of rays per field
+            distribution: Ray distribution type
+            skip_load: If True, assume system is already loaded in OpticStudio
         """
-        # Load the system
-        self.load_system(llm_json)
+        # Load the system (unless already loaded)
+        if not skip_load:
+            if llm_json is None:
+                raise ZosPyError("llm_json required when skip_load=False")
+            self.load_system(llm_json)
 
         # Get paraxial data
         paraxial = self.get_paraxial_data()
@@ -725,15 +779,22 @@ class ZosPyHandler:
             "hotspots": hotspots,
         }
 
-    def get_seidel(self, llm_json: dict[str, Any]) -> dict[str, Any]:
+    def get_seidel(self, llm_json: dict[str, Any] = None, *, skip_load: bool = False) -> dict[str, Any]:
         """
         Get Seidel aberrations via Zernike coefficients.
 
         OpticStudio provides Zernike Standard Coefficients, which we
         convert to Seidel format using aberration theory.
+
+        Args:
+            llm_json: LLM JSON optical system (required if skip_load=False)
+            skip_load: If True, assume system is already loaded in OpticStudio
         """
-        # Load the system
-        self.load_system(llm_json)
+        # Load the system (unless already loaded)
+        if not skip_load:
+            if llm_json is None:
+                raise ZosPyError("llm_json required when skip_load=False")
+            self.load_system(llm_json)
 
         coefficients = []
 
@@ -882,14 +943,24 @@ class ZosPyHandler:
 
     def trace_rays(
         self,
-        llm_json: dict[str, Any],
+        llm_json: dict[str, Any] = None,
         num_rays: int = 7,
+        *,
+        skip_load: bool = False,
     ) -> dict[str, Any]:
         """
         Trace rays through the system and return positions at each surface.
+
+        Args:
+            llm_json: LLM JSON optical system (required if skip_load=False)
+            num_rays: Number of rays to trace
+            skip_load: If True, assume system is already loaded in OpticStudio
         """
-        # Load the system
-        self.load_system(llm_json)
+        # Load the system (unless already loaded)
+        if not skip_load:
+            if llm_json is None:
+                raise ZosPyError("llm_json required when skip_load=False")
+            self.load_system(llm_json)
 
         # Get system info
         num_surfaces = self.oss.LDE.NumberOfSurfaces
