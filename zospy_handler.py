@@ -67,8 +67,7 @@ class ZosPyHandler:
             self.zos = zp.ZOS()
 
             # Connect to OpticStudio (starts instance if needed)
-            # Use 'extension' mode for programmatic control
-            self.oss: OpticStudioSystem = self.zos.connect(mode="extension")
+            self.oss: OpticStudioSystem = self.zos.connect(mode="standalone")
 
             if self.oss is None:
                 raise ZosPyError("Failed to connect to OpticStudio")
