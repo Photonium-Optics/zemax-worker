@@ -23,9 +23,12 @@ surface.Radius = float(radius)
 This applies to: radius, thickness, semi_diameter, conic, wavelength (um), weight, nd, vd, field x/y
 
 #### CrossSection Analysis
+- **REQUIRES OpticStudio >= 24.1.0** for image export (check `zos.version`)
 - `result.data` is a **numpy array**, NOT a PIL Image
 - Use `plt.imshow(result.data)` then save the figure to PNG
-- Image export may fail on some OpticStudio versions - always have fallback
+- Image export will fail with "system viewer export tool failed" on older versions
+- Always provide surface geometry as fallback for client-side rendering
+- Check version with: `if zos.version < (24, 1, 0): warn("...")`
 
 #### Zernike/Seidel Analysis
 - ZosPy's `ZernikeStandardCoefficients().run()` has parsing bugs with OpticStudio v25.x
@@ -73,6 +76,11 @@ Known issues:
 - Fixed CrossSection to handle numpy array result instead of PIL Image
 - Made paraxial data extraction resilient with `hasattr()` checks
 - Switched Seidel analysis to raw ZOSAPI access to avoid parser bugs
+
+### 2026-02-04 (zemax-analysis-service)
+- Fixed response field name mismatch: worker returns `success`, not `ok`
+- zemax-analysis-service was checking `result.get("ok")` which was always None
+- Also fixed: `result.get("error")` can be None even on failure, use `or` fallback
 
 ## TODO / Known Issues
 

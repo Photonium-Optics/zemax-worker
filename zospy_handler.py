@@ -359,13 +359,12 @@ class ZosPyHandler:
             return None
 
     def get_paraxial_data(self) -> dict[str, Any]:
-        """Get first-order (paraxial) optical properties using ZosPy API."""
-        try:
-            # Use SystemData analysis for paraxial properties
-            result = zp.analyses.reports.SystemData().run(self.oss)
-            gld = result.data.general_lens_data
+        """Get first-order (paraxial) optical properties.
 
-            # Get field info
+        Uses direct ZOSAPI access to bypass ZosPy text parser issues with OpticStudio v25.
+        """
+        try:
+            # Get field info directly from SystemData
             fields = self.oss.SystemData.Fields
             field_type = "object_angle"  # Default
             max_field = 0.0
@@ -374,34 +373,48 @@ class ZosPyHandler:
                     f = fields.GetField(i)
                     max_field = max(max_field, abs(f.Y), abs(f.X))
 
-            # Build result with available attributes (some may not exist in all ZosPy versions)
             paraxial = {
                 "field_type": field_type,
                 "max_field": max_field,
                 "field_unit": "deg" if field_type == "object_angle" else "mm",
             }
 
-            # Required attributes (should always exist)
-            if hasattr(gld, 'effective_focal_length_air'):
-                paraxial["efl"] = gld.effective_focal_length_air
-            if hasattr(gld, 'back_focal_length'):
-                paraxial["bfl"] = gld.back_focal_length
-            if hasattr(gld, 'working_f_number'):
-                paraxial["fno"] = gld.working_f_number
-            if hasattr(gld, 'entrance_pupil_diameter'):
-                paraxial["epd"] = gld.entrance_pupil_diameter
+            # Get aperture info
+            aperture = self.oss.SystemData.Aperture
+            paraxial["epd"] = aperture.ApertureValue
 
-            # Optional attributes (may not exist in all versions)
-            if hasattr(gld, 'front_focal_length'):
-                paraxial["ffl"] = gld.front_focal_length
-            if hasattr(gld, 'total_track'):
-                paraxial["total_track"] = gld.total_track
-            if hasattr(gld, 'exit_pupil_diameter'):
-                paraxial["exp"] = gld.exit_pupil_diameter
-            if hasattr(gld, 'entrance_pupil_position'):
-                paraxial["epl"] = gld.entrance_pupil_position
-            if hasattr(gld, 'exit_pupil_position'):
-                paraxial["exl"] = gld.exit_pupil_position
+            # Calculate total track from LDE
+            lde = self.oss.LDE
+            total_track = 0.0
+            for i in range(1, lde.NumberOfSurfaces):
+                surface = lde.GetSurfaceAt(i)
+                total_track += abs(surface.Thickness)
+            paraxial["total_track"] = total_track
+
+            # Use raw ZOSAPI to get first-order data (bypass ZosPy parser)
+            try:
+                # Get first-order data from SystemData.FirstOrderData
+                first_order = self.oss.SystemData.FirstOrderData
+                if first_order is not None:
+                    # EFL - try different property names for different OpticStudio versions
+                    if hasattr(first_order, 'EffectiveFocalLength'):
+                        paraxial["efl"] = first_order.EffectiveFocalLength
+                    elif hasattr(first_order, 'EFL'):
+                        paraxial["efl"] = first_order.EFL
+
+                    # BFL
+                    if hasattr(first_order, 'BackFocalLength'):
+                        paraxial["bfl"] = first_order.BackFocalLength
+                    elif hasattr(first_order, 'BFL'):
+                        paraxial["bfl"] = first_order.BFL
+
+                    # F-number
+                    if hasattr(first_order, 'WorkingFNumber'):
+                        paraxial["fno"] = first_order.WorkingFNumber
+                    elif hasattr(first_order, 'ImageSpaceFNum'):
+                        paraxial["fno"] = first_order.ImageSpaceFNum
+            except Exception as e:
+                print(f"Warning: Could not get first-order data from ZOSAPI: {e}")
 
             return paraxial
         except Exception as e:
@@ -421,32 +434,52 @@ class ZosPyHandler:
         image_b64 = None
         image_format = None
 
+        # Check OpticStudio version - image export requires >= 24.1.0
         try:
-            # Run CrossSection analysis - ZosPy 1.3.0+ supports image export
-            cross_section = zp.analyses.systemviewers.CrossSection(
-                number_of_rays=11,
-                delete_vignetted=True,
-            )
-            result = cross_section.run(self.oss)
+            zos_version = self.zos.version if hasattr(self.zos, 'version') else None
+            print(f"DEBUG: ZosPy zos.version = {zos_version}")
+            print(f"DEBUG: ZosPy version = {zp.__version__ if hasattr(zp, '__version__') else 'unknown'}")
 
-            # Check if we got image data
-            if result.data is not None:
-                import matplotlib.pyplot as plt
+            if zos_version and zos_version < (24, 1, 0):
+                print(f"Warning: OpticStudio {zos_version} < 24.1.0 - image export not supported, using fallback")
+            else:
+                # Try CrossSection analysis
+                cross_section = zp.analyses.systemviewers.CrossSection(
+                    number_of_rays=11,
+                    delete_vignetted=True,
+                )
+                print(f"DEBUG: Created CrossSection analysis object")
 
-                # result.data is a numpy array (RGB image)
-                fig, ax = plt.subplots(figsize=(10, 6))
-                ax.imshow(result.data)
-                ax.axis('off')
-                buffer = io.BytesIO()
-                fig.savefig(buffer, format='PNG', dpi=150, bbox_inches='tight', pad_inches=0)
-                plt.close(fig)
-                buffer.seek(0)
-                image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-                image_format = "png"
+                result = cross_section.run(self.oss)
+                print(f"DEBUG: CrossSection.run() completed")
+                print(f"DEBUG: result type = {type(result)}")
+                print(f"DEBUG: result.data type = {type(result.data) if hasattr(result, 'data') else 'no data attr'}")
+                print(f"DEBUG: result.data is None = {result.data is None if hasattr(result, 'data') else 'N/A'}")
+
+                # Check if we got image data
+                if result.data is not None:
+                    import matplotlib.pyplot as plt
+                    print(f"DEBUG: result.data shape = {result.data.shape if hasattr(result.data, 'shape') else 'no shape'}")
+
+                    # result.data is a numpy array (RGB image)
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    ax.imshow(result.data)
+                    ax.axis('off')
+                    buffer = io.BytesIO()
+                    fig.savefig(buffer, format='PNG', dpi=150, bbox_inches='tight', pad_inches=0)
+                    plt.close(fig)
+                    buffer.seek(0)
+                    image_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                    image_format = "png"
+                    print(f"DEBUG: Successfully encoded image, length = {len(image_b64)}")
+                else:
+                    print(f"DEBUG: result.data is None - image export not available")
 
         except Exception as e:
             # Log but don't fail - we'll return surface geometry as fallback
+            import traceback
             print(f"Warning: CrossSection image export failed: {e}")
+            print(f"DEBUG: Full traceback:\n{traceback.format_exc()}")
 
         # Get paraxial data using direct LDE access (more reliable)
         paraxial = self._get_paraxial_from_lde()
@@ -632,10 +665,10 @@ class ZosPyHandler:
                                         if surf_idx not in all_surface_failures:
                                             all_surface_failures[surf_idx] = {
                                                 "surface_index": surf_idx,
-                                                "failure_count": 0,
-                                                "failure_mode": "VIGNETTE",
+                                                "total_failures": 0,
+                                                "dominant_mode": "VIGNETTE",
                                             }
-                                        all_surface_failures[surf_idx]["failure_count"] += 1
+                                        all_surface_failures[surf_idx]["total_failures"] += 1
                                     else:
                                         rays_reached += 1
                                 else:
@@ -663,7 +696,7 @@ class ZosPyHandler:
         aggregate_surface_failures = list(all_surface_failures.values())
 
         # Find hotspots (surfaces causing >10% of failures)
-        total_failures = sum(f["failure_count"] for f in aggregate_surface_failures)
+        total_failures = sum(f["total_failures"] for f in aggregate_surface_failures)
         hotspots = []
         if total_failures > 0:
             for sf in aggregate_surface_failures:
