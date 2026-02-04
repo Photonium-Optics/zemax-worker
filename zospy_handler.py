@@ -204,17 +204,20 @@ class ZosPyHandler:
                         with open(temp_path, 'rb') as f:
                             image_b64 = base64.b64encode(f.read()).decode('utf-8')
                         image_format = "png"
-                        os.remove(temp_path)
                         logger.info(f"Successfully exported CrossSection image, size = {len(image_b64)}")
                     elif result.data is not None:
                         # Fallback: return raw numpy array for Mac-side rendering
                         # This keeps matplotlib dependency on Mac side only
                         arr = np.array(result.data)
-                        image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
-                        image_format = "numpy_array"
-                        array_shape = list(arr.shape)
-                        array_dtype = str(arr.dtype)
-                        logger.info(f"Returning numpy array fallback for CrossSection, shape={arr.shape}, dtype={arr.dtype}")
+                        # Validate array is image-like (2D grayscale or 3D with channels)
+                        if arr.ndim < 2 or arr.ndim > 3:
+                            logger.warning(f"CrossSection: result.data has unexpected shape {arr.shape}, skipping numpy fallback")
+                        else:
+                            image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                            image_format = "numpy_array"
+                            array_shape = list(arr.shape)
+                            array_dtype = str(arr.dtype)
+                            logger.info(f"Returning numpy array fallback for CrossSection, shape={arr.shape}, dtype={arr.dtype}")
                     else:
                         logger.warning("CrossSection: no file created and result.data is None")
 
@@ -222,6 +225,13 @@ class ZosPyHandler:
                     logger.warning(f"CrossSection import failed: {e}")
                 except Exception as e:
                     logger.warning(f"CrossSection export failed: {e}")
+                finally:
+                    # Clean up temp file if it exists
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except OSError as e:
+                            logger.warning(f"Failed to clean up temp file {temp_path}: {e}")
 
         except Exception as e:
             # Log but don't fail - we'll return surface geometry as fallback

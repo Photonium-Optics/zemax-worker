@@ -78,7 +78,17 @@ result = CrossSection(
 ).run(oss, image_output_file="/tmp/output.png")
 ```
 Without `surface_line_thickness`, you only see rays - no lens elements.
-Always include surface geometry as fallback for client-side SVG rendering.
+Always include surface geometry in the numpy array as fallback for server-side rendering.
+
+**Numpy array fallback**: If PNG file export fails but `result.data` (numpy array) exists, the worker
+returns raw numpy array bytes with metadata:
+- `image_format="numpy_array"` - indicates fallback mode
+- `image`: base64-encoded raw array bytes
+- `array_shape=[height, width, channels]` - array dimensions
+- `array_dtype="uint8"` (or actual dtype) - array element type
+
+Mac side (`zemax-analysis-service`) reconstructs the numpy array and renders to PNG using matplotlib.
+This keeps matplotlib off Windows and makes the worker thinner.
 
 ### 6. SingleRayTrace Parameters
 - `px, py`: Pupil coordinates (iterate these)
@@ -112,6 +122,25 @@ if hasattr(data, 'front_focal_length'):
 - Surface index conventions inconsistent (some 0-indexed, some 1-indexed)
 
 ## Changelog
+
+**2026-02-04 (Part 6) - Move matplotlib fallback to Mac**
+- **REMOVED** from worker:
+  - matplotlib import and rendering in `get_cross_section()`
+- **NEW** cross-section fallback behavior:
+  - If PNG file export fails but `result.data` (numpy array) exists:
+    - Return `image_format="numpy_array"`
+    - Return `image` as base64-encoded raw array bytes
+    - Return `array_shape=[height, width, channels]` for array dimensions
+    - Return `array_dtype="uint8"` (or actual dtype) for element type
+  - Mac side (`zemax-analysis-service`) reconstructs the numpy array and renders to PNG using matplotlib
+- **BENEFIT**: matplotlib dependency removed from Windows worker, making it thinner
+
+**2026-02-04 (Part 5) - Remove Legacy LLM JSON Loading**
+- **REMOVED** `load_system()` method and all `_setup_*` methods
+- **REMOVED** `_extract_value()` and `_to_float()` helper methods
+- **REMOVED** `skip_load` parameter from all analysis methods
+- All endpoints now require `zmx_content` (no `system` field)
+- Simplified request models: `SystemRequest(zmx_content: str)`, `RayTraceDiagnosticRequest(zmx_content: str, ...)`
 
 **2026-02-04 (Part 4) - Dumb Executor Refactor for get_seidel**
 - Simplified `get_seidel()` from ~160 lines to ~80 lines
@@ -151,18 +180,11 @@ if hasattr(data, 'front_focal_length'):
 - Added `RawRay` Pydantic model for type safety
 - All aggregation logic now belongs in zemax-analysis-service (Mac side)
 
-**2026-02-04 (Part 5) - Remove Legacy LLM JSON Loading**
-- **REMOVED** `load_system()` method and all `_setup_*` methods
-- **REMOVED** `_extract_value()` and `_to_float()` helper methods
-- **REMOVED** `skip_load` parameter from all analysis methods
-- All endpoints now require `zmx_content` (no `system` field)
-- Simplified request models: `SystemRequest(zmx_content: str)`, `RayTraceDiagnosticRequest(zmx_content: str, ...)`
-
 **2026-02-04 (Part 2) - ZMX-Based Loading**
 - Added `load_zmx_file()` method for native .zmx file loading
 - zemax-analysis-service uses Node.js `/convert-to-zmx` for conversion
 
-**2026-02-04 (Part 1)**
+**2026-02-04 (Part 1) - Initial Wave**
 - Fixed `SelectWavelength` → `MakePrimary()`
 - Added `float()` conversions for COM interop
 - Standardized response field names (`success`, `total_failures`, `dominant_mode`)
