@@ -141,8 +141,9 @@ class CrossSectionResponse(BaseModel):
     """Cross-section diagram response."""
     success: bool = Field(description="Whether the operation succeeded")
     image: Optional[str] = Field(default=None, description="Base64-encoded PNG image")
-    image_format: str = Field(default="png", description="Image format")
+    image_format: Optional[str] = Field(default=None, description="Image format (png, etc.)")
     paraxial: Optional[dict[str, Any]] = Field(default=None, description="Paraxial properties")
+    surfaces: Optional[list[dict[str, Any]]] = Field(default=None, description="Surface geometry for fallback rendering")
     rays_total: Optional[int] = Field(default=None, description="Total rays traced")
     rays_through: Optional[int] = Field(default=None, description="Rays reaching image")
     error: Optional[str] = Field(default=None, description="Error message")
@@ -271,8 +272,9 @@ async def get_cross_section(request: SystemRequest, _: None = Depends(verify_api
             return CrossSectionResponse(
                 success=True,
                 image=result.get("image"),
-                image_format=result.get("image_format", "png"),
+                image_format=result.get("image_format"),
                 paraxial=result.get("paraxial"),
+                surfaces=result.get("surfaces"),
                 rays_total=result.get("rays_total"),
                 rays_through=result.get("rays_through"),
             )
