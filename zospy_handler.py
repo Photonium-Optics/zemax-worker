@@ -1517,7 +1517,7 @@ class ZosPyHandler:
             try:
                 wfm_start = time.perf_counter()
                 try:
-                    wavefront_map = zp.analyses.wavefront.WavefrontMap(
+                    wavefront_map = self._zp.analyses.wavefront.WavefrontMap(
                         sampling=sampling,
                         wavelength=wavelength_index,
                         field=field_index,
@@ -1644,9 +1644,9 @@ class ZosPyHandler:
 
         try:
             # Use ZosPy's new_analysis to access StandardSpot directly
-            analysis = zp.analyses.new_analysis(
+            analysis = self._zp.analyses.new_analysis(
                 self.oss,
-                zp.constants.Analysis.AnalysisIDM.StandardSpot,
+                self._zp.constants.Analysis.AnalysisIDM.StandardSpot,
                 settings_first=True,
             )
 
@@ -1949,7 +1949,7 @@ class ZosPyHandler:
                             continue  # Skip rays outside circular pupil
 
                         try:
-                            ray_trace = zp.analyses.raysandspots.SingleRayTrace(
+                            ray_trace = self._zp.analyses.raysandspots.SingleRayTrace(
                                 hx=0.0,
                                 hy=0.0,
                                 px=float(px),

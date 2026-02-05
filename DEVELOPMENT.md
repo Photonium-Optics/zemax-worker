@@ -31,6 +31,15 @@ python main.py
 uvicorn main:app --host 0.0.0.0 --port 8787 --workers 1
 ```
 
+## Service Ports
+
+| Service | Port |
+|---------|------|
+| Quadoa Analysis Service | 8000 |
+| Optiland Analysis Service | 8001 |
+| Zemax Analysis Service | **8002** |
+| Zemax Worker (this service) | 8787 |
+
 ## Architecture: ZMX-Based Loading
 
 ```
@@ -466,6 +475,30 @@ Means system has no fields defined (`NumberOfFields = 0`) or invalid aperture. C
 | 3 | Ray reversed |
 | 4 | Ray vignetted |
 
+### Startup Hang (ZOSAPI imported to clr, then nothing)
+
+**Symptom:** Logs show "ZOSAPI imported to clr" but server never starts.
+
+**Cause:** ZosPy import loads ZOSAPI DLLs into the .NET CLR at module import time. On some systems, this DLL loading hangs due to:
+- OpticStudio not installed or corrupt installation
+- ZOSAPI DLL registration issues
+- .NET Framework compatibility problems
+- DLL trying to connect to OpticStudio immediately
+
+**Fix:** ZosPy is now lazily imported in `zospy_handler.py`. The import only happens when `ZosPyHandler()` is first instantiated (in the lifespan function), not at module load time. This allows:
+- FastAPI server to start immediately
+- `/health` endpoint to respond (showing `opticstudio_connected: false`)
+- The actual ZosPy import to happen in the background
+
+If you still see hangs, check:
+1. OpticStudio is properly installed
+2. Python version matches OpticStudio requirements (3.9-3.11)
+3. Try running OpticStudio manually first to ensure it works
+
+### Doubled "ZOSAPI imported to clr" Log
+
+Normal when running with `uvicorn main:app` (string reference). Uvicorn re-imports the module in its worker process. Each import triggers ZosPy's DLL loading. The second import is a no-op (DLLs already loaded).
+
 ### Other Known Issues
 
 | Issue | Notes |
@@ -511,6 +544,27 @@ logger.info(f"System state: mode={mode}, fields={num_fields}, wls={num_wavelengt
 - GitHub: https://github.com/MREYE-LUMC/ZOSPy
 - Docs: https://zospy.readthedocs.io/
 - Context7 library ID: `/mreye-lumc/zospy`
+
+---
+
+## Changelog
+
+### 2026-02-05: Lazy Connection on Startup
+
+**Change:** Removed eager `_init_zospy()` call from the `lifespan()` startup function.
+
+**Why:**
+- Server now starts instantly without waiting for ZosPy import and OpticStudio connection
+- ZosPy import can take several seconds (loads .NET CLR and ZOSAPI DLLs)
+- OpticStudio connection can hang on some systems
+- `/health` endpoint was already designed to handle `zospy_handler = None`
+- All other endpoints use `_ensure_connected()` which lazily connects on first request
+
+**Behavior change:**
+- Before: Server waits for OpticStudio connection on startup, then responds to requests
+- After: Server starts immediately, `/health` returns `opticstudio_connected: false`, first real request triggers connection
+
+**Connection mode:** Always uses `zos.connect(mode="standalone")` - no extension mode is attempted.
 
 ---
 

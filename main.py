@@ -171,11 +171,9 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler."""
     global zospy_handler
 
-    # Startup: Initialize ZosPy connection
-    logger.info("Starting Zemax Worker - Connecting to OpticStudio...")
-    zospy_handler = _init_zospy()
-    if zospy_handler is None:
-        logger.warning("OpticStudio not available at startup. Will attempt to connect on first request.")
+    # Startup: Connection is lazy - happens on first request via _ensure_connected()
+    # This allows the server to start instantly without waiting for OpticStudio/ZosPy
+    logger.info("Starting Zemax Worker (lazy connection mode - connects on first request)")
 
     yield
 
