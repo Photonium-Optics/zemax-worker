@@ -88,9 +88,9 @@ async def timed_lock_acquire(
     """
     start = time.perf_counter()
     await lock.acquire()
-    elapsed_ms = (time.perf_counter() - start) * 1000
-    log_timing(logger, f"{name}_lock_wait", elapsed_ms)
     try:
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        log_timing(logger, f"{name}_lock_wait", elapsed_ms)
         yield
     finally:
         lock.release()

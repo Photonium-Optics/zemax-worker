@@ -99,15 +99,16 @@ def _extract_value(obj: Any, default: float = 0.0) -> float:
     """
     if obj is None:
         return default
-    # Handle UnitField objects (have .value attribute)
-    if hasattr(obj, 'value'):
-        try:
-            return float(obj.value)
-        except (TypeError, ValueError):
-            return default
-    # Handle plain numeric types
+
+    # Unwrap UnitField objects (have .value attribute)
+    value = obj.value if hasattr(obj, 'value') else obj
+
     try:
-        return float(obj)
+        result = float(value)
+        # Check for NaN
+        if np.isnan(result):
+            return default
+        return result
     except (TypeError, ValueError):
         return default
 
@@ -129,17 +130,41 @@ def _get_column_value(row: Any, column_names: list[str], default: Any = None) ->
     """
     for col in column_names:
         try:
-            # Try bracket access first (works for both Series and dict)
-            if hasattr(row, '__contains__') and col in row:
+            if col in row:
                 return row[col]
-            # Fallback to .get() if available (dict-like)
-            if hasattr(row, 'get'):
-                val = row.get(col)
-                if val is not None:
-                    return val
         except (KeyError, TypeError):
-            continue
+            # Some objects may not support 'in' operator
+            pass
+
+        # Fallback to .get() for dict-like objects
+        if hasattr(row, 'get'):
+            val = row.get(col)
+            if val is not None:
+                return val
+
     return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    """
+    Safely convert a value to int, handling None and NaN.
+
+    Args:
+        value: Value to convert
+        default: Default value if conversion fails
+
+    Returns:
+        Integer value or default
+    """
+    if value is None:
+        return default
+    try:
+        # Check for NaN (only floats can be NaN)
+        if isinstance(value, float) and np.isnan(value):
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 # F/# aperture types
@@ -683,14 +708,15 @@ class ZosPyHandler:
                                         if len(error_rows) > 0:
                                             first_error = error_rows.iloc[0]
                                             ray_result["reached_image"] = False
-                                            ray_result["failed_surface"] = int(first_error.get('surface', 0))
+                                            # Use _safe_int to handle NaN values from DataFrame
+                                            ray_result["failed_surface"] = _safe_int(first_error.get('surface', 0), 0)
                                             # Map error code to failure mode string
-                                            error_code = int(first_error.get('error_code', 0))
+                                            error_code = _safe_int(first_error.get('error_code', 0), 0)
                                             ray_result["failure_mode"] = self._error_code_to_mode(error_code)
                                         else:
                                             ray_result["reached_image"] = True
                                     else:
-                                        # No error column - assume success
+                                        # No error column in ZosPy 2.x - assume success if ray data exists
                                         ray_result["reached_image"] = True
                                 else:
                                     ray_result["failure_mode"] = "NO_DATA"
@@ -1229,10 +1255,12 @@ class ZosPyHandler:
 
         data = []
 
-        # Trace rays for each field and wavelength
-        for fi in range(1, num_fields + 1):
-            for wi in range(1, num_wavelengths + 1):
-                surfaces_data = []
+        trace_start = time.perf_counter()
+        try:
+            # Trace rays for each field and wavelength
+            for fi in range(1, num_fields + 1):
+                for wi in range(1, num_wavelengths + 1):
+                    surfaces_data = []
 
                 # Initialize arrays for each surface
                 for si in range(num_surfaces):
@@ -1292,11 +1320,14 @@ class ZosPyHandler:
                             surfaces_data[si]["y"].append(None)
                             surfaces_data[si]["z"].append(None)
 
-                data.append({
-                    "field_index": fi - 1,
-                    "wavelength_index": wi - 1,
-                    "surfaces": surfaces_data,
-                })
+                    data.append({
+                        "field_index": fi - 1,
+                        "wavelength_index": wi - 1,
+                        "surfaces": surfaces_data,
+                    })
+        finally:
+            trace_elapsed_ms = (time.perf_counter() - trace_start) * 1000
+            log_timing(logger, "trace_rays_all", trace_elapsed_ms)
 
         return {
             "num_surfaces": num_surfaces,
@@ -1830,8 +1861,10 @@ class ZosPyHandler:
         # Grid of rays across the pupil
         grid_size = ray_density * 2 + 1  # e.g., ray_density=5 -> 11x11 grid
 
-        for fi in range(1, num_fields + 1):
-            field = fields.GetField(fi)
+        manual_start = time.perf_counter()
+        try:
+            for fi in range(1, num_fields + 1):
+                field = fields.GetField(fi)
             # Use _extract_value for UnitField objects
             field_x = _extract_value(field.X)
             field_y = _extract_value(field.Y)
@@ -1921,7 +1954,10 @@ class ZosPyHandler:
                 field_result["rms_radius"] = float(np.sqrt(np.mean(distances**2)))
                 field_result["geo_radius"] = float(np.max(distances))
 
-            spot_data.append(field_result)
+                spot_data.append(field_result)
+        finally:
+            manual_elapsed_ms = (time.perf_counter() - manual_start) * 1000
+            log_timing(logger, "_compute_spot_data_manual", manual_elapsed_ms)
 
         return spot_data
 
@@ -1952,12 +1988,15 @@ class ZosPyHandler:
         """
         try:
             # Get wavelength (primary wavelength in micrometers)
-            wavelength_um = self.oss.SystemData.Wavelengths.GetWavelength(1).Wavelength
+            # Use _extract_value for UnitField objects in ZosPy 2.x
+            wavelength_um = _extract_value(
+                self.oss.SystemData.Wavelengths.GetWavelength(1).Wavelength, 0.5876
+            )
 
             # Get f-number
             fno = self._get_fno()
 
-            if fno and wavelength_um:
+            if fno and wavelength_um and wavelength_um > 0:
                 # Convert wavelength from micrometers to millimeters (lens units typically mm)
                 wavelength_mm = wavelength_um / 1000.0
                 airy_radius = 1.22 * wavelength_mm * fno

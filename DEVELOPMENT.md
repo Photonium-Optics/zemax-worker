@@ -1584,10 +1584,13 @@ if hasattr(oss, 'SystemData'):
   - Use `X-coordinate`, `Y-coordinate`, `Z-coordinate` (NOT `X`, `x`, `Y`, `y`)
 - **REMOVED**: `error_code` column check (doesn't exist in ZosPy 2.x)
 - **ADDED**: `_get_column_value()` helper for safe DataFrame/Series column access
+- **ADDED**: `_safe_int()` helper to handle NaN values from DataFrame
 - **FIXED**: UnitField extraction - ZosPy 2.x returns UnitField objects, not floats
   - Applied `_extract_value()` to: `ApertureValue`, `field.X/Y`, `surface.Radius/Thickness/SemiDiameter/Conic`, `Wavelength`, EFL
-  - Locations: `get_paraxial_data()`, `get_surfaces()`, `calc_semi_diameters()`, `ray_trace_diagnostic()`, `trace_rays()`, `get_wavefront()`, `_compute_spot_data_manual()`, `calc_fno()`
+  - Locations: `get_paraxial_data()`, `get_surfaces()`, `calc_semi_diameters()`, `ray_trace_diagnostic()`, `trace_rays()`, `get_wavefront()`, `_compute_spot_data_manual()`, `calc_fno()`, `_calculate_airy_radius()`
 - **FIXED**: Enum handling in `calc_fno()` - use `.name` attribute when available
+- **IMPROVED**: `_extract_value()` now also handles NaN values
+- **IMPROVED**: `_get_column_value()` simplified and cleaned up
 - **UPDATED**: `_compute_spot_data_manual()` and cross-section ray tracing
 - Spot diagram now works correctly with ZosPy 2.1.4
 

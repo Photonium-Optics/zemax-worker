@@ -23,7 +23,6 @@ import base64
 import logging
 import os
 import tempfile
-from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Header, Depends
