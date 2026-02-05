@@ -79,6 +79,35 @@ RAY_ERROR_CODES = {
     4: "VIGNETTE",
 }
 
+
+def _extract_value(obj: Any, default: float = 0.0) -> float:
+    """
+    Extract a numeric value from various ZosPy types.
+
+    ZosPy 2.x returns UnitField objects for many values instead of plain floats.
+    This helper handles both UnitField and plain numeric types.
+
+    Args:
+        obj: Value to extract (UnitField, float, int, etc.)
+        default: Default value if extraction fails
+
+    Returns:
+        Float value extracted from the object
+    """
+    if obj is None:
+        return default
+    # Handle UnitField objects (have .value attribute)
+    if hasattr(obj, 'value'):
+        try:
+            return float(obj.value)
+        except (TypeError, ValueError):
+            return default
+    # Handle plain numeric types
+    try:
+        return float(obj)
+    except (TypeError, ValueError):
+        return default
+
 # F/# aperture types
 FNO_APERTURE_TYPES = ["ImageSpaceFNumber", "FloatByStopSize", "ParaxialWorkingFNumber"]
 
@@ -718,8 +747,9 @@ class ZosPyHandler:
             if not coefficients:
                 return {"success": False, "error": "No coefficients extracted from ZosPy result"}
 
-            # Get system info
-            wl_um = self.oss.SystemData.Wavelengths.GetWavelength(1).Wavelength
+            # Get system info - handle UnitField objects from ZosPy 2.x
+            wl_obj = self.oss.SystemData.Wavelengths.GetWavelength(1).Wavelength
+            wl_um = _extract_value(wl_obj, 0.5876)
             num_surfaces = self.oss.LDE.NumberOfSurfaces - 1
 
             return {
@@ -910,11 +940,17 @@ class ZosPyHandler:
         per_surface: list[dict[str, Any]] = []
         totals: dict[str, float] = {}
         in_table = False
+        found_totals = False
 
         for line in lines:
             line_stripped = line.strip()
             if not line_stripped:
                 continue
+
+            # Stop parsing after we find the totals row (TOT or Sum)
+            # This prevents parsing the "Seidel Aberration Coefficients in Waves" table
+            if found_totals:
+                break
 
             # Parse header values (lines with colon before table)
             if ':' in line_stripped and not in_table:
@@ -927,7 +963,7 @@ class ZosPyHandler:
 
             # Parse data rows
             if in_table:
-                self._parse_seidel_data_row(line_stripped, per_surface, totals)
+                found_totals = self._parse_seidel_data_row(line_stripped, per_surface, totals)
 
         return {
             "header": header,
@@ -962,7 +998,7 @@ class ZosPyHandler:
         line: str,
         per_surface: list[dict[str, Any]],
         totals: dict[str, float],
-    ) -> None:
+    ) -> bool:
         """
         Parse a data row from Seidel coefficient table.
 
@@ -970,23 +1006,33 @@ class ZosPyHandler:
             line: Line from the Seidel table
             per_surface: List to append surface data to
             totals: Dict to update with totals row
+
+        Returns:
+            True if this was the totals row (TOT/Sum), False otherwise
         """
         parts = line.split()
         if not parts:
-            return
+            return False
 
-        first_part = parts[0]
+        first_part = parts[0].upper()
         values = self._extract_floats(parts[1:])
 
-        if first_part.isdigit() or first_part.upper() == 'STO':
+        if first_part.isdigit() or first_part == 'STO':
             # Surface data row - handle both numeric surface numbers and "STO" (aperture stop)
             # STO is typically the aperture stop surface; we use surface number 0 as a marker
-            surface_num = int(first_part) if first_part.isdigit() else 0
+            surface_num = int(parts[0]) if first_part.isdigit() else 0
             surface_data = self._build_seidel_coefficients(surface_num, values)
             per_surface.append(surface_data)
-        elif first_part.lower() == 'sum':
-            # Totals row
+            return False
+        elif first_part == 'IMA':
+            # Image surface - skip it (usually all zeros)
+            return False
+        elif first_part in ('TOT', 'SUM'):
+            # Totals row - parse and signal that we're done with this table
             totals.update(self._build_seidel_totals(values))
+            return True
+
+        return False
 
     def _extract_floats(self, parts: list[str]) -> list[float]:
         """

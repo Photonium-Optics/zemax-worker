@@ -417,23 +417,37 @@ def test_zernike_seidel(oss: Any, zp: Any) -> dict[str, Any]:
             metadata["wavelength"] = str(data.wavelength)
             print(f"    Wavelength: {metadata['wavelength']}")
 
-        # Get P-V and RMS
+        # Helper to extract values from UnitField objects (ZosPy 2.x)
+        def extract_value(obj, default=0.0):
+            if obj is None:
+                return default
+            if hasattr(obj, 'value'):
+                try:
+                    return float(obj.value)
+                except (TypeError, ValueError):
+                    return default
+            try:
+                return float(obj)
+            except (TypeError, ValueError):
+                return default
+
+        # Get P-V and RMS (handle UnitField objects from ZosPy 2.x)
         if hasattr(data, 'peak_to_valley_to_chief'):
-            metadata["pv_to_chief"] = float(data.peak_to_valley_to_chief)
+            metadata["pv_to_chief"] = extract_value(data.peak_to_valley_to_chief)
             print(f"    P-V to chief: {metadata['pv_to_chief']:.6f} waves")
 
         if hasattr(data, 'peak_to_valley_to_centroid'):
-            metadata["pv_to_centroid"] = float(data.peak_to_valley_to_centroid)
+            metadata["pv_to_centroid"] = extract_value(data.peak_to_valley_to_centroid)
             print(f"    P-V to centroid: {metadata['pv_to_centroid']:.6f} waves")
 
         # Get integration data
         if hasattr(data, 'from_integration_of_the_rays'):
             integration = data.from_integration_of_the_rays
             if hasattr(integration, 'rms_to_chief'):
-                metadata["rms_to_chief"] = float(integration.rms_to_chief)
+                metadata["rms_to_chief"] = extract_value(integration.rms_to_chief)
                 print(f"    RMS to chief: {metadata['rms_to_chief']:.6f} waves")
             if hasattr(integration, 'strehl_ratio'):
-                metadata["strehl_ratio"] = float(integration.strehl_ratio)
+                metadata["strehl_ratio"] = extract_value(integration.strehl_ratio)
                 print(f"    Strehl ratio: {metadata['strehl_ratio']:.6f}")
 
         results["metadata"] = metadata
@@ -598,7 +612,7 @@ def parse_seidel_text(text: str) -> dict[str, Any]:
             if not parts:
                 continue
 
-            first_part = parts[0]
+            first_part = parts[0].upper()
             values = []
             for p in parts[1:]:
                 try:
@@ -606,12 +620,17 @@ def parse_seidel_text(text: str) -> dict[str, Any]:
                 except ValueError:
                     continue
 
-            if first_part.isdigit() or first_part.upper() == 'STO':
-                surface_num = int(first_part) if first_part.isdigit() else 0
+            if first_part.isdigit() or first_part == 'STO':
+                surface_num = int(parts[0]) if first_part.isdigit() else 0
                 surface_data = build_seidel_coefficients(surface_num, values)
                 per_surface.append(surface_data)
-            elif first_part.lower() == 'sum':
+            elif first_part == 'IMA':
+                # Image surface - skip
+                continue
+            elif first_part in ('TOT', 'SUM'):
+                # Totals row - stop parsing after this
                 totals.update(build_seidel_totals(values))
+                break  # Stop parsing to avoid the "in Waves" table
 
     return {
         "header": header,
