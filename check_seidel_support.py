@@ -16,15 +16,28 @@ def setup_simple_lens(oss):
     # Create new system
     oss.new()
 
-    # Set up system basics
-    oss.SystemData.Aperture.ApertureValue = 10.0  # EPD = 10mm
-    oss.SystemData.Wavelengths.GetWavelength(1).Wavelength = 0.55  # 550nm
+    # Set up aperture - use float() for COM interop
+    oss.SystemData.Aperture.ApertureType = zp.constants.SystemData.ZemaxApertureType.EntrancePupilDiameter
+    oss.SystemData.Aperture.ApertureValue = float(10.0)  # EPD = 10mm
 
-    # Add a field point
-    oss.SystemData.Fields.AddField(0, 5, 1.0)  # 5 degree field
+    # Set up wavelength
+    wl = oss.SystemData.Wavelengths.GetWavelength(1)
+    wl.Wavelength = float(0.55)  # 550nm
+
+    # Set up fields - use smaller field angle to ensure chief ray traces
+    oss.SystemData.Fields.SetFieldType(zp.constants.SystemData.FieldType.Angle)
+    field1 = oss.SystemData.Fields.GetField(1)
+    field1.Y = float(0.0)  # On-axis field
+
+    # Add off-axis field
+    oss.SystemData.Fields.AddField(float(0.0), float(2.0), float(1.0))  # 2 degree field
 
     # Get the lens data editor
     lde = oss.LDE
+
+    # Set object to infinity
+    obj_surf = lde.GetSurfaceAt(0)
+    obj_surf.Thickness = float(1e10)  # Infinity
 
     # Insert surfaces for a simple singlet
     lde.InsertNewSurfaceAt(1)  # Front surface
@@ -32,18 +45,24 @@ def setup_simple_lens(oss):
 
     # Configure front surface (Surface 1)
     surf1 = lde.GetSurfaceAt(1)
-    surf1.Radius = float(50.0)
-    surf1.Thickness = float(5.0)
+    surf1.Radius = float(100.0)  # 100mm radius - gentler curve
+    surf1.Thickness = float(6.0)  # 6mm thick
     surf1.Material = "N-BK7"
-    surf1.SemiDiameter = float(10.0)
+    surf1.SemiDiameter = float(15.0)
 
     # Configure back surface (Surface 2)
     surf2 = lde.GetSurfaceAt(2)
-    surf2.Radius = float(-50.0)
-    surf2.Thickness = float(45.0)
-    surf2.SemiDiameter = float(10.0)
+    surf2.Radius = float(-100.0)  # Symmetric biconvex
+    surf2.Thickness = float(95.0)  # Distance to image (~focal length)
+    surf2.SemiDiameter = float(15.0)
 
-    print("    Simple singlet lens created (biconvex, f~50mm)")
+    # Image surface is Surface 3
+    img_surf = lde.GetSurfaceAt(3)
+    img_surf.SemiDiameter = float(20.0)
+
+    print("    Singlet lens created: biconvex 100/-100mm, 6mm thick, EPD=10mm")
+    print(f"    Number of surfaces: {lde.NumberOfSurfaces}")
+    print(f"    Number of fields: {oss.SystemData.Fields.NumberOfFields}")
 
 
 def safe_len(obj):
@@ -51,17 +70,14 @@ def safe_len(obj):
     if obj is None:
         return 0
     try:
-        # Try Python len first
         return len(obj)
     except TypeError:
         pass
     try:
-        # Try .NET Length property
         return obj.Length
     except:
         pass
     try:
-        # Try Count property
         return obj.Count
     except:
         pass
@@ -94,11 +110,9 @@ def main():
         zos.disconnect()
         return
 
-    print("\n[5] Checking AnalysisIDM for Seidel analyses...")
+    print("\n[5] Checking AnalysisIDM...")
     idm = zp.constants.Analysis.AnalysisIDM
     names = [n for n in dir(idm) if not n.startswith("_")]
-    print(f"    Total analysis types: {len(names)}")
-
     seidelish = [n for n in names if "seidel" in n.lower()]
     print(f"    Seidel entries: {seidelish}")
 
@@ -116,80 +130,85 @@ def main():
             an.ApplyAndWaitForCompletion()
             res = an.Results
 
-            # Check all result attributes
-            print(f"\n    Results object type: {type(res)}")
-            res_attrs = [a for a in dir(res) if not a.startswith("_")]
-            print(f"    Results attributes: {res_attrs}")
+            # Check messages first
+            print(f"\n    Messages: {an.messages}")
 
-            # Try NumberOfDataGrids if it exists
-            if hasattr(res, 'NumberOfDataGrids'):
-                print(f"    NumberOfDataGrids: {res.NumberOfDataGrids}")
+            # Check counts using proper attributes
+            num_grids = res.NumberOfDataGrids if hasattr(res, 'NumberOfDataGrids') else 0
+            num_series = res.NumberOfDataSeries if hasattr(res, 'NumberOfDataSeries') else 0
 
-            # Explore DataGrids - it might be an array
-            print(f"\n    DataGrids raw value: {res.DataGrids}")
-            print(f"    DataGrids type: {type(res.DataGrids)}")
+            print(f"    NumberOfDataGrids: {num_grids}")
+            print(f"    NumberOfDataSeries: {num_series}")
 
-            num_grids = safe_len(res.DataGrids)
-            print(f"    DataGrids count: {num_grids}")
-
-            # Try to iterate DataGrids if it's an array
+            # Extract DataGrids
             if num_grids > 0:
                 for i in range(num_grids):
                     try:
                         grid = res.GetDataGrid(i)
                         print(f"\n    --- DataGrid[{i}] ---")
-                        rows = getattr(grid, 'Rows', None)
-                        cols = getattr(grid, 'Cols', None)
-                        print(f"    Dimensions: {rows}x{cols}")
+                        rows = getattr(grid, 'Rows', 0) or 0
+                        cols = getattr(grid, 'Cols', 0) or 0
+                        print(f"    Size: {rows}x{cols}")
 
-                        if rows and cols and rows > 0 and cols > 0:
-                            print(f"    Data:")
-                            for row in range(min(rows, 12)):
+                        if rows > 0 and cols > 0:
+                            # Get header row if present
+                            if hasattr(grid, 'GetLabel'):
+                                labels = []
+                                for c in range(min(cols, 8)):
+                                    try:
+                                        labels.append(grid.GetLabel(c))
+                                    except:
+                                        labels.append(f"Col{c}")
+                                print(f"    Labels: {labels}")
+
+                            # Get data rows
+                            for row in range(min(rows, 15)):
                                 row_data = []
-                                for col in range(min(cols, 6)):
+                                for col in range(min(cols, 8)):
                                     try:
                                         val = grid.GetDouble(row, col)
-                                        row_data.append(f"{val:12.6f}")
+                                        row_data.append(f"{val:12.6g}")
                                     except:
                                         try:
                                             val = grid.GetString(row, col)
                                             row_data.append(f"{str(val):>12}")
                                         except:
-                                            row_data.append("     ?      ")
-                                print(f"      [{row:2d}]: {' '.join(row_data)}")
+                                            row_data.append("      -     ")
+                                print(f"    [{row:2d}]: {' '.join(row_data)}")
                     except Exception as e:
                         print(f"    DataGrid[{i}] error: {e}")
 
-            # Explore DataSeries
-            print(f"\n    DataSeries raw value: {res.DataSeries}")
-            print(f"    DataSeries type: {type(res.DataSeries)}")
-
-            num_series = safe_len(res.DataSeries)
-            print(f"    DataSeries count: {num_series}")
-
+            # Extract DataSeries
             if num_series > 0:
                 for i in range(min(num_series, 10)):
                     try:
                         series = res.GetDataSeries(i)
                         print(f"\n    --- DataSeries[{i}] ---")
-                        if hasattr(series, 'Description'):
-                            print(f"    Description: {series.Description}")
-                        if hasattr(series, 'SeriesLabel'):
-                            print(f"    SeriesLabel: {series.SeriesLabel}")
+
+                        # Print all series attributes
+                        s_attrs = [a for a in dir(series) if not a.startswith("_") and not a.startswith("get_")]
+                        print(f"    Attributes: {s_attrs}")
+
+                        desc = getattr(series, 'Description', '')
+                        label = getattr(series, 'SeriesLabel', '')
+                        print(f"    Description: '{desc}', Label: '{label}'")
+
+                        # Try to get data
+                        if hasattr(series, 'XData') and hasattr(series, 'YData'):
+                            xdata = series.XData
+                            ydata = series.YData
+                            if xdata and ydata:
+                                num_pts = getattr(xdata, 'Length', 0) or safe_len(xdata)
+                                print(f"    NumPoints: {num_pts}")
+                                for j in range(min(num_pts, 20)):
+                                    try:
+                                        x = xdata.Data(j) if hasattr(xdata, 'Data') else xdata[j]
+                                        y = ydata.Data(j) if hasattr(ydata, 'Data') else ydata[j]
+                                        print(f"      [{j:2d}]: x={x:12.6g}, y={y:12.6g}")
+                                    except Exception as e:
+                                        print(f"      [{j:2d}]: error - {e}")
                     except Exception as e:
                         print(f"    DataSeries[{i}] error: {e}")
-
-            # Try alternative: maybe data is in header_data or other attributes
-            print("\n    Checking analysis wrapper attributes...")
-            an_attrs = [a for a in dir(an) if not a.startswith("_")]
-            print(f"    Analysis attributes: {an_attrs}")
-
-            if hasattr(an, 'header_data'):
-                print(f"    header_data: {an.header_data}")
-            if hasattr(an, 'metadata'):
-                print(f"    metadata: {an.metadata}")
-            if hasattr(an, 'messages'):
-                print(f"    messages: {an.messages}")
 
             an.Close()
             print("\n    SeidelCoefficients completed!")
@@ -198,8 +217,6 @@ def main():
             print(f"    ERROR: {e}")
             import traceback
             traceback.print_exc()
-    else:
-        print("    SeidelCoefficients not found!")
 
     # Cleanup
     print("\n[7] Cleanup...")
