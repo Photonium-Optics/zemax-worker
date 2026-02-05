@@ -1333,19 +1333,34 @@ class ZosPyHandler:
             Tuple of (base64_image, image_format) or (None, None) if export fails
         """
         try:
-            if hasattr(analysis, 'ExportGraphicAs'):
-                analysis.ExportGraphicAs(temp_path)
-            elif hasattr(analysis, 'Results') and hasattr(analysis.Results, 'ExportData'):
-                analysis.Results.ExportData(temp_path)
+            has_export_graphic = hasattr(analysis, 'ExportGraphicAs')
+            has_export_data = hasattr(analysis, 'Results') and hasattr(analysis.Results, 'ExportData')
+            logger.info(f"_export_analysis_image: ExportGraphicAs={has_export_graphic}, ExportData={has_export_data}, temp_path={temp_path}")
 
-            if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+            if has_export_graphic:
+                analysis.ExportGraphicAs(temp_path)
+                logger.info("Called ExportGraphicAs")
+            elif has_export_data:
+                analysis.Results.ExportData(temp_path)
+                logger.info("Called ExportData")
+            else:
+                logger.warning("No export method available on analysis object")
+                return None, None
+
+            exists = os.path.exists(temp_path)
+            size = os.path.getsize(temp_path) if exists else 0
+            logger.info(f"After export: exists={exists}, size={size}")
+
+            if exists and size > 0:
                 with open(temp_path, 'rb') as f:
                     image_b64 = base64.b64encode(f.read()).decode('utf-8')
                 logger.info(f"Exported analysis PNG, size={len(image_b64)}")
                 return image_b64, "png"
+            else:
+                logger.warning(f"Export file missing or empty: exists={exists}, size={size}")
 
         except Exception as e:
-            logger.warning(f"Analysis PNG export failed: {e}")
+            logger.warning(f"Analysis PNG export failed: {e}", exc_info=True)
 
         return None, None
 
