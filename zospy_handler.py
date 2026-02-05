@@ -24,15 +24,78 @@ from utils.timing import log_timing
 # Configure module logger
 logger = logging.getLogger(__name__)
 
-# ZosPy imports - these will fail on non-Windows or without OpticStudio
-try:
-    import zospy as zp
-    from zospy.zpcore import OpticStudioSystem
-    ZOSPY_AVAILABLE = True
-except ImportError:
-    ZOSPY_AVAILABLE = False
-    zp = None
-    OpticStudioSystem = None
+# =============================================================================
+# Lazy ZosPy Import
+# =============================================================================
+#
+# CRITICAL: ZosPy imports are LAZY to prevent blocking during module load.
+#
+# When `import zospy` runs, it:
+# 1. Imports pythonnet (.NET interop)
+# 2. Loads ZOSAPI DLLs into the CLR
+# 3. This can HANG on some systems (DLL loading issues, OpticStudio not found, etc.)
+#
+# By making imports lazy, the FastAPI server starts immediately and can respond
+# to /health checks. ZosPy is only imported when the first real request comes in.
+#
+# The doubled "ZOSAPI imported to clr" log happens because uvicorn re-imports
+# the module in its worker process. This is normal with string-based app references.
+# =============================================================================
+
+# Lazy-loaded module references
+_zp = None  # zospy module
+_OpticStudioSystem = None  # zospy.zpcore.OpticStudioSystem class
+_ZOSPY_IMPORT_ATTEMPTED = False
+_ZOSPY_AVAILABLE = False
+
+
+def _ensure_zospy_imported() -> bool:
+    """
+    Lazily import ZosPy on first use.
+
+    This prevents blocking during module load. The import only happens
+    when ZosPyHandler is instantiated (typically in the lifespan function
+    or on first request).
+
+    Returns:
+        True if ZosPy is available, False otherwise.
+    """
+    global _zp, _OpticStudioSystem, _ZOSPY_IMPORT_ATTEMPTED, _ZOSPY_AVAILABLE
+
+    if _ZOSPY_IMPORT_ATTEMPTED:
+        return _ZOSPY_AVAILABLE
+
+    _ZOSPY_IMPORT_ATTEMPTED = True
+    logger.info("Lazily importing ZosPy (this may take a moment)...")
+
+    try:
+        import zospy as zp_module
+        from zospy.zpcore import OpticStudioSystem as OSS
+
+        _zp = zp_module
+        _OpticStudioSystem = OSS
+        _ZOSPY_AVAILABLE = True
+        logger.info(f"ZosPy {zp_module.__version__} imported successfully")
+        return True
+    except ImportError as e:
+        logger.error(f"Failed to import ZosPy: {e}")
+        _ZOSPY_AVAILABLE = False
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error importing ZosPy: {e}")
+        _ZOSPY_AVAILABLE = False
+        return False
+
+
+def get_zospy_module():
+    """Get the zospy module, importing it lazily if needed."""
+    _ensure_zospy_imported()
+    return _zp
+
+
+def is_zospy_available() -> bool:
+    """Check if ZosPy is available (imports lazily if not yet attempted)."""
+    return _ensure_zospy_imported()
 
 
 # =============================================================================
@@ -183,15 +246,20 @@ class ZosPyHandler:
 
     def __init__(self):
         """Initialize ZosPy and connect to OpticStudio."""
-        if not ZOSPY_AVAILABLE:
+        # Lazily import ZosPy - this is where the actual import happens
+        if not is_zospy_available():
             raise ZosPyError("ZosPy is not available. Install it with: pip install zospy")
+
+        self._zp = get_zospy_module()
+        if self._zp is None:
+            raise ZosPyError("ZosPy module not loaded")
 
         try:
             # Initialize ZOS connection
-            self.zos = zp.ZOS()
+            self.zos = self._zp.ZOS()
 
             # Connect to OpticStudio (starts instance if needed)
-            self.oss: OpticStudioSystem = self.zos.connect(mode="standalone")
+            self.oss = self.zos.connect(mode="standalone")
 
             if self.oss is None:
                 raise ZosPyError("Failed to connect to OpticStudio")
@@ -238,7 +306,7 @@ class ZosPyHandler:
                 - zospy_version: str - ZosPy library version
         """
         try:
-            zospy_version = zp.__version__
+            zospy_version = self._zp.__version__
         except Exception:
             zospy_version = "Unknown"
 
@@ -291,7 +359,7 @@ class ZosPyHandler:
         """
         try:
             # Use the SystemData analysis to get first-order properties
-            result = zp.analyses.reports.SystemData().run(self.oss)
+            result = self._zp.analyses.reports.SystemData().run(self.oss)
             # Use _extract_value for potential UnitField object
             return _extract_value(result.data.general_lens_data.effective_focal_length_air, None)
         except Exception:
@@ -362,7 +430,7 @@ class ZosPyHandler:
         try:
             zos_version = self.zos.version if hasattr(self.zos, 'version') else None
             logger.debug(f"ZosPy zos.version = {zos_version}")
-            logger.debug(f"ZosPy version = {zp.__version__ if hasattr(zp, '__version__') else 'unknown'}")
+            logger.debug(f"ZosPy version = {self._zp.__version__ if hasattr(self._zp, '__version__') else 'unknown'}")
 
             if zos_version and zos_version < MIN_IMAGE_EXPORT_VERSION:
                 logger.warning(f"OpticStudio {zos_version} < 24.1.0 - image export not supported, using fallback")
@@ -680,7 +748,7 @@ class ZosPyHandler:
                             # ZosPy SingleRayTrace: px/py are normalized pupil coordinates (-1 to 1)
                             # hx/hy are normalized field coordinates (set to 0 when using field index)
                             # CRITICAL: px/py must be Python float(), not numpy.float64, for COM interop
-                            ray_trace = zp.analyses.raysandspots.SingleRayTrace(
+                            ray_trace = self._zp.analyses.raysandspots.SingleRayTrace(
                                 hx=0.0,
                                 hy=0.0,
                                 px=float(px),
@@ -781,7 +849,7 @@ class ZosPyHandler:
         """
         # Try ZosPy Zernike analysis
         try:
-            zernike_analysis = zp.analyses.wavefront.ZernikeStandardCoefficients(
+            zernike_analysis = self._zp.analyses.wavefront.ZernikeStandardCoefficients(
                 sampling=DEFAULT_SAMPLING,
                 maximum_term=DEFAULT_MAX_ZERNIKE_TERM,
                 wavelength=1,
@@ -886,10 +954,10 @@ class ZosPyHandler:
         temp_path = os.path.join(tempfile.gettempdir(), SEIDEL_TEMP_FILENAME)
 
         try:
-            idm = zp.constants.Analysis.AnalysisIDM
+            idm = self._zp.constants.Analysis.AnalysisIDM
 
             # Create and run SeidelCoefficients analysis
-            analysis = zp.analyses.new_analysis(
+            analysis = self._zp.analyses.new_analysis(
                 self.oss,
                 idm.SeidelCoefficients,
                 settings_first=True
@@ -1275,7 +1343,7 @@ class ZosPyHandler:
                         # ZosPy SingleRayTrace: px/py are normalized pupil coordinates (-1 to 1)
                         # hx/hy are normalized field coordinates (not used when field index specified)
                         # CRITICAL: py must be Python float(), not numpy.float64, for COM interop
-                        ray_trace = zp.analyses.raysandspots.SingleRayTrace(
+                        ray_trace = self._zp.analyses.raysandspots.SingleRayTrace(
                             hx=0.0,
                             hy=0.0,
                             px=0.0,  # Meridional fan (x=0)
@@ -1398,7 +1466,7 @@ class ZosPyHandler:
             strehl_ratio = None
 
             try:
-                zernike_analysis = zp.analyses.wavefront.ZernikeStandardCoefficients(
+                zernike_analysis = self._zp.analyses.wavefront.ZernikeStandardCoefficients(
                     sampling=sampling,
                     maximum_term=37,
                     wavelength=wavelength_index,
