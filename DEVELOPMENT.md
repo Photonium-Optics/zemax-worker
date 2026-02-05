@@ -1399,6 +1399,42 @@ def safe_analysis(oss):
         return {"success": False, "error": f"Analysis failed: {e}"}
 ```
 
+### Handling ZosPy 2.x UnitField Objects
+
+ZosPy 2.x returns `UnitField` objects for values with units instead of plain floats:
+
+```python
+# ZosPy 2.x returns objects like:
+# UnitField(value=0.5876, unit='µm')
+# UnitField(value=50.0, unit='mm')
+
+# WRONG - will fail with TypeError
+wavelength = result.data.wavelength  # UnitField object, not float!
+calculation = wavelength * 2  # TypeError!
+
+# RIGHT - use helper to extract value
+def _extract_value(obj: Any, default: float = 0.0) -> float:
+    """Safely extract numeric value from ZosPy objects."""
+    if obj is None:
+        return default
+    if hasattr(obj, 'value'):
+        try:
+            return float(obj.value)
+        except (TypeError, ValueError):
+            return default
+    try:
+        return float(obj)
+    except (TypeError, ValueError):
+        return default
+
+wavelength = _extract_value(result.data.wavelength, 0.5876)
+```
+
+**When to use `_extract_value()`:**
+- Extracting wavelength from Zernike analysis results
+- Any value that might have units (lengths, angles, etc.)
+- When unsure if ZosPy version returns plain float or UnitField
+
 ### Version Compatibility
 
 ZosPy works with OpticStudio 20.1+ and Python 3.9-3.11.
@@ -1427,6 +1463,34 @@ if hasattr(oss, 'SystemData'):
 ---
 
 ## Changelog
+
+### 2026-02-05 - Critical Bug Fixes (Seidel Parsing - Multiple Tables, TOT Row, UnitField)
+
+**zospy_handler.py - Seidel Text Parser:**
+- **FIXED** Parser reading multiple tables (44 surfaces instead of 13)
+  - OpticStudio's Seidel text output contains multiple tables: "Seidel Aberration Coefficients" followed by "Seidel Aberration Coefficients in Waves"
+  - Parser now stops after finding the TOT/Sum row instead of continuing into subsequent tables
+  - Added `break` after `found_totals = True` in `_parse_seidel_text()`
+- **FIXED** "No totals data parsed" error
+  - OpticStudio uses "TOT" for the totals row, but parser only checked for "sum"
+  - `_parse_seidel_data_row()` now checks for both "TOT" and "SUM" (case-insensitive)
+- **FIXED** ZosPy 2.x UnitField objects causing failures
+  - ZosPy 2.x returns `UnitField(value=0.4861, unit='µm')` objects instead of plain floats
+  - Added `_extract_value()` helper to safely extract numeric values:
+  ```python
+  def _extract_value(obj: Any, default: float = 0.0) -> float:
+      if hasattr(obj, 'value'):
+          return float(obj.value)
+      return float(obj) if obj is not None else default
+  ```
+  - Applied to wavelength extraction in `get_seidel()` (Zernike method)
+- **FIXED** `/seidel` endpoint always returning `success=True`
+  - Endpoint now checks `result.get("success", False)` before returning success response
+  - Returns proper error message when analysis fails
+
+**main.py - /seidel endpoint:**
+- Added success check: `if not result.get("success", False): return error response`
+- Added logging: `logger.info("seidel-native: Starting native Seidel analysis")`
 
 ### 2026-02-05 - Medium Severity Bug Fixes (Seidel Parsing, Spot Diagram)
 
