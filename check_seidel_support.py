@@ -4,9 +4,6 @@ Diagnostic script to check if SeidelCoefficients analysis is available in ZOSPy.
 
 Run this on the Windows machine with OpticStudio installed:
     python check_seidel_support.py
-
-This will tell us whether we can use the native Seidel analysis instead of
-deriving Sernike from Zernike coefficients.
 """
 
 import zospy as zp
@@ -29,30 +26,46 @@ def setup_simple_lens(oss):
     # Get the lens data editor
     lde = oss.LDE
 
-    # Surface 0 is object (already exists)
-    # Surface 1 will be front of lens
-    # Surface 2 will be back of lens
-    # Surface 3 is image (already exists as surface 1, we'll insert before it)
-
     # Insert surfaces for a simple singlet
     lde.InsertNewSurfaceAt(1)  # Front surface
     lde.InsertNewSurfaceAt(2)  # Back surface
 
     # Configure front surface (Surface 1)
     surf1 = lde.GetSurfaceAt(1)
-    surf1.Radius = float(50.0)  # 50mm radius
-    surf1.Thickness = float(5.0)  # 5mm thick
+    surf1.Radius = float(50.0)
+    surf1.Thickness = float(5.0)
     surf1.Material = "N-BK7"
     surf1.SemiDiameter = float(10.0)
 
     # Configure back surface (Surface 2)
     surf2 = lde.GetSurfaceAt(2)
-    surf2.Radius = float(-50.0)  # -50mm radius (symmetric biconvex)
-    surf2.Thickness = float(45.0)  # Distance to image
+    surf2.Radius = float(-50.0)
+    surf2.Thickness = float(45.0)
     surf2.SemiDiameter = float(10.0)
 
-    # Image surface is Surface 3
     print("    Simple singlet lens created (biconvex, f~50mm)")
+
+
+def safe_len(obj):
+    """Safely get length of .NET array or Python object."""
+    if obj is None:
+        return 0
+    try:
+        # Try Python len first
+        return len(obj)
+    except TypeError:
+        pass
+    try:
+        # Try .NET Length property
+        return obj.Length
+    except:
+        pass
+    try:
+        # Try Count property
+        return obj.Count
+    except:
+        pass
+    return 0
 
 
 def main():
@@ -65,15 +78,12 @@ def main():
     zos = zp.ZOS()
     oss = zos.connect(mode="standalone")
 
-    # Print version info
     print(f"\n[2] Version Info:")
     print(f"    ZOSPy version: {getattr(zp, '__version__', 'unknown')}")
 
-    # Force-load constants (they're dynamic)
     print("\n[3] Loading ZOSPy constants...")
     _ = zp.constants
 
-    # Set up a simple lens system
     print("\n[4] Setting up test lens system...")
     try:
         setup_simple_lens(oss)
@@ -84,17 +94,15 @@ def main():
         zos.disconnect()
         return
 
-    # Check AnalysisIDM for Seidel-related entries
     print("\n[5] Checking AnalysisIDM for Seidel analyses...")
     idm = zp.constants.Analysis.AnalysisIDM
     names = [n for n in dir(idm) if not n.startswith("_")]
-
-    print(f"    Total analysis types available: {len(names)}")
+    print(f"    Total analysis types: {len(names)}")
 
     seidelish = [n for n in names if "seidel" in n.lower()]
     print(f"    Seidel entries: {seidelish}")
 
-    # Try SeidelCoefficients and extract actual data
+    # Run SeidelCoefficients
     print("\n[6] Running SeidelCoefficients analysis...")
 
     if "SeidelCoefficients" in names:
@@ -105,82 +113,86 @@ def main():
                 settings_first=True
             )
 
-            # Run the analysis
             an.ApplyAndWaitForCompletion()
             res = an.Results
 
-            # Explore DataGrids
-            num_grids = res.DataGrids if res.DataGrids is not None else 0
-            print(f"\n    Number of DataGrids: {num_grids}")
+            # Check all result attributes
+            print(f"\n    Results object type: {type(res)}")
+            res_attrs = [a for a in dir(res) if not a.startswith("_")]
+            print(f"    Results attributes: {res_attrs}")
 
-            for i in range(num_grids):
-                try:
-                    grid = res.GetDataGrid(i)
-                    print(f"\n    --- DataGrid[{i}] ---")
+            # Try NumberOfDataGrids if it exists
+            if hasattr(res, 'NumberOfDataGrids'):
+                print(f"    NumberOfDataGrids: {res.NumberOfDataGrids}")
 
-                    # Check grid attributes
-                    grid_attrs = [a for a in dir(grid) if not a.startswith("_")]
-                    print(f"    Attributes: {grid_attrs[:20]}")
+            # Explore DataGrids - it might be an array
+            print(f"\n    DataGrids raw value: {res.DataGrids}")
+            print(f"    DataGrids type: {type(res.DataGrids)}")
 
-                    # Try to get dimensions
-                    rows = getattr(grid, 'Rows', None)
-                    cols = getattr(grid, 'Cols', None)
-                    print(f"    Dimensions: {rows} rows x {cols} cols")
+            num_grids = safe_len(res.DataGrids)
+            print(f"    DataGrids count: {num_grids}")
 
-                    # Try to iterate values
-                    if rows and cols:
-                        print(f"    Grid data:")
-                        for row in range(min(rows, 15)):  # First 15 rows
-                            row_data = []
-                            for col in range(min(cols, 6)):  # First 6 cols
-                                try:
-                                    val = grid.GetDouble(row, col)
-                                    row_data.append(f"{val:12.6f}")
-                                except:
+            # Try to iterate DataGrids if it's an array
+            if num_grids > 0:
+                for i in range(num_grids):
+                    try:
+                        grid = res.GetDataGrid(i)
+                        print(f"\n    --- DataGrid[{i}] ---")
+                        rows = getattr(grid, 'Rows', None)
+                        cols = getattr(grid, 'Cols', None)
+                        print(f"    Dimensions: {rows}x{cols}")
+
+                        if rows and cols and rows > 0 and cols > 0:
+                            print(f"    Data:")
+                            for row in range(min(rows, 12)):
+                                row_data = []
+                                for col in range(min(cols, 6)):
                                     try:
-                                        val = grid.GetString(row, col)
-                                        row_data.append(f"{str(val):>12}")
+                                        val = grid.GetDouble(row, col)
+                                        row_data.append(f"{val:12.6f}")
                                     except:
-                                        row_data.append("     ?      ")
-                            print(f"      [{row:2d}]: {' '.join(row_data)}")
-                except Exception as e:
-                    print(f"    DataGrid[{i}] error: {e}")
+                                        try:
+                                            val = grid.GetString(row, col)
+                                            row_data.append(f"{str(val):>12}")
+                                        except:
+                                            row_data.append("     ?      ")
+                                print(f"      [{row:2d}]: {' '.join(row_data)}")
+                    except Exception as e:
+                        print(f"    DataGrid[{i}] error: {e}")
 
             # Explore DataSeries
-            num_series = res.DataSeries if res.DataSeries is not None else 0
-            print(f"\n    Number of DataSeries: {num_series}")
+            print(f"\n    DataSeries raw value: {res.DataSeries}")
+            print(f"    DataSeries type: {type(res.DataSeries)}")
 
-            for i in range(min(num_series, 10)):
-                try:
-                    series = res.GetDataSeries(i)
-                    print(f"\n    --- DataSeries[{i}] ---")
+            num_series = safe_len(res.DataSeries)
+            print(f"    DataSeries count: {num_series}")
 
-                    series_attrs = [a for a in dir(series) if not a.startswith("_")]
-                    print(f"    Attributes: {series_attrs[:15]}")
+            if num_series > 0:
+                for i in range(min(num_series, 10)):
+                    try:
+                        series = res.GetDataSeries(i)
+                        print(f"\n    --- DataSeries[{i}] ---")
+                        if hasattr(series, 'Description'):
+                            print(f"    Description: {series.Description}")
+                        if hasattr(series, 'SeriesLabel'):
+                            print(f"    SeriesLabel: {series.SeriesLabel}")
+                    except Exception as e:
+                        print(f"    DataSeries[{i}] error: {e}")
 
-                    if hasattr(series, 'Description'):
-                        print(f"    Description: {series.Description}")
-                    if hasattr(series, 'SeriesLabel'):
-                        print(f"    SeriesLabel: {series.SeriesLabel}")
-                    if hasattr(series, 'NumData'):
-                        num_data = series.NumData
-                        print(f"    NumData: {num_data}")
-                        # Try to get values
-                        if num_data and num_data > 0:
-                            print(f"    Values:")
-                            for j in range(min(num_data, 10)):
-                                try:
-                                    if hasattr(series, 'XData') and hasattr(series, 'YData'):
-                                        x = series.XData.Data(j)
-                                        y = series.YData.Data(j)
-                                        print(f"      [{j}]: x={x:.6f}, y={y:.6f}")
-                                except Exception as e:
-                                    print(f"      [{j}]: error - {e}")
-                except Exception as e:
-                    print(f"    DataSeries[{i}] error: {e}")
+            # Try alternative: maybe data is in header_data or other attributes
+            print("\n    Checking analysis wrapper attributes...")
+            an_attrs = [a for a in dir(an) if not a.startswith("_")]
+            print(f"    Analysis attributes: {an_attrs}")
+
+            if hasattr(an, 'header_data'):
+                print(f"    header_data: {an.header_data}")
+            if hasattr(an, 'metadata'):
+                print(f"    metadata: {an.metadata}")
+            if hasattr(an, 'messages'):
+                print(f"    messages: {an.messages}")
 
             an.Close()
-            print("\n    SeidelCoefficients analysis completed!")
+            print("\n    SeidelCoefficients completed!")
 
         except Exception as e:
             print(f"    ERROR: {e}")
@@ -189,41 +201,13 @@ def main():
     else:
         print("    SeidelCoefficients not found!")
 
-    # Also try SeidelDiagram
-    print("\n[7] Running SeidelDiagram analysis...")
-    if "SeidelDiagram" in names:
-        try:
-            an = zp.analyses.new_analysis(
-                oss,
-                idm.SeidelDiagram,
-                settings_first=True
-            )
-
-            an.ApplyAndWaitForCompletion()
-            res = an.Results
-
-            num_grids = res.DataGrids if res.DataGrids is not None else 0
-            num_series = res.DataSeries if res.DataSeries is not None else 0
-            print(f"    DataGrids: {num_grids}, DataSeries: {num_series}")
-
-            # Show first grid if available
-            if num_grids > 0:
-                grid = res.GetDataGrid(0)
-                rows = getattr(grid, 'Rows', 0)
-                cols = getattr(grid, 'Cols', 0)
-                print(f"    Grid[0]: {rows}x{cols}")
-
-            an.Close()
-        except Exception as e:
-            print(f"    ERROR: {e}")
-
     # Cleanup
-    print("\n[8] Cleanup...")
+    print("\n[7] Cleanup...")
     zos.disconnect()
-    print("    Disconnected from OpticStudio.")
+    print("    Disconnected.")
 
     print("\n" + "=" * 70)
-    print("Diagnostic complete. Share this output to see the Seidel data structure.")
+    print("Done. Share output to see the Seidel data structure.")
     print("=" * 70)
 
 
