@@ -1619,6 +1619,48 @@ if hasattr(oss, 'SystemData'):
 
 ---
 
+## Diagnostic Scripts
+
+### diagnose_spot_diagram.py
+
+Use when spot diagram returns `success: true` but `image: null` and `num_rays: 0`.
+
+```bash
+cd zemax-worker
+python diagnose_spot_diagram.py [optional_zmx_file]
+```
+
+**What it tests:**
+1. SingleRayTrace API - checks `result.data.real_ray_trace_data` structure
+2. DataFrame column names - finds actual X/Y column names
+3. StandardSpot analysis - checks if this works as primary method
+
+**Known issue (2026-02):** The manual ray trace fallback in `_compute_spot_data_manual()` may fail silently because:
+- `last_row.get('X', ...)` on a pandas Series may not find columns if names differ
+- Column names vary by ZosPy version (could be `X`, `x`, `Position X`, etc.)
+- No error is reported when zero rays are captured
+
+### diagnose_wavefront.py
+
+Use when wavefront analysis returns `success: false` with error "Could not compute wavefront metrics".
+
+```bash
+cd zemax-worker
+python diagnose_wavefront.py [optional_zmx_file]
+```
+
+**What it tests:**
+1. ZernikeStandardCoefficients - P-V and RMS attribute paths
+2. WavefrontMap - wavefront array extraction
+3. Settings/Results attribute naming (lowercase vs PascalCase)
+
+**Known issue (2026-02):** Both Zernike and WavefrontMap analyses may fail to extract metrics because:
+- ZosPy version changes attribute paths
+- `from_integration_of_the_rays` nesting may not exist
+- `peak_to_valley_to_chief` vs `peak_to_valley` naming
+
+---
+
 ## Cross-Reference: zemax-analysis-service DEVELOPMENT.md
 
 For Mac-side implementation details, SSE streaming, and optimization architecture, see:
