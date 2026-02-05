@@ -26,10 +26,11 @@ def diagnose_zernike_analysis(oss):
     print("="*60)
 
     try:
-        from zospy.api.codecs import AnalysisIDM
+        # ZosPy 2.x: Use zp.constants.Analysis.AnalysisIDM
+        idm = zp.constants.Analysis.AnalysisIDM
 
         print("\n1. Creating ZernikeStandardCoefficients analysis...")
-        analysis = zp.analyses.new_analysis(oss, AnalysisIDM.ZernikeStandardCoefficients)
+        analysis = zp.analyses.new_analysis(oss, idm.ZernikeStandardCoefficients, settings_first=True)
 
         # Configure for field 1, wavelength 1
         if hasattr(analysis, 'settings') or hasattr(analysis, 'Settings'):
@@ -126,10 +127,11 @@ def diagnose_wavefront_map(oss):
     print("="*60)
 
     try:
-        from zospy.api.codecs import AnalysisIDM
+        # ZosPy 2.x: Use zp.constants.Analysis.AnalysisIDM
+        idm = zp.constants.Analysis.AnalysisIDM
 
         print("\n1. Creating WavefrontMap analysis...")
-        analysis = zp.analyses.new_analysis(oss, AnalysisIDM.WavefrontMap)
+        analysis = zp.analyses.new_analysis(oss, idm.WavefrontMap, settings_first=True)
 
         # Configure
         if hasattr(analysis, 'settings') or hasattr(analysis, 'Settings'):

@@ -23,6 +23,7 @@ import base64
 import logging
 import os
 import tempfile
+import time
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -31,6 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from zospy_handler import ZosPyHandler, ZosPyError
+from utils.timing import timed_operation, log_timing
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -463,71 +465,86 @@ async def health_check() -> HealthResponse:
 @app.post("/load-system", response_model=LoadSystemResponse)
 async def load_system(request: SystemRequest, _: None = Depends(verify_api_key)) -> LoadSystemResponse:
     """Load an optical system into OpticStudio from zmx_content."""
-    async with _zospy_lock:
-        if _ensure_connected() is None:
-            return LoadSystemResponse(success=False, error=NOT_CONNECTED_ERROR)
+    with timed_operation(logger, "/load-system"):
+        lock_start = time.perf_counter()
+        async with _zospy_lock:
+            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
+            log_timing(logger, "lock_wait", lock_wait_ms)
 
-        try:
-            result = _load_system_from_request(request)
-            return LoadSystemResponse(
-                success=True,
-                num_surfaces=result.get("num_surfaces"),
-                efl=result.get("efl"),
-            )
-        except Exception as e:
-            _handle_zospy_error("Load system", e)
-            return LoadSystemResponse(success=False, error=str(e))
+            if _ensure_connected() is None:
+                return LoadSystemResponse(success=False, error=NOT_CONNECTED_ERROR)
+
+            try:
+                result = _load_system_from_request(request)
+                return LoadSystemResponse(
+                    success=True,
+                    num_surfaces=result.get("num_surfaces"),
+                    efl=result.get("efl"),
+                )
+            except Exception as e:
+                _handle_zospy_error("Load system", e)
+                return LoadSystemResponse(success=False, error=str(e))
 
 
 @app.post("/cross-section", response_model=CrossSectionResponse)
 async def get_cross_section(request: SystemRequest, _: None = Depends(verify_api_key)) -> CrossSectionResponse:
     """Generate cross-section diagram using ZosPy's CrossSection analysis."""
-    async with _zospy_lock:
-        if _ensure_connected() is None:
-            return CrossSectionResponse(success=False, error=NOT_CONNECTED_ERROR)
+    with timed_operation(logger, "/cross-section"):
+        lock_start = time.perf_counter()
+        async with _zospy_lock:
+            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
+            log_timing(logger, "lock_wait", lock_wait_ms)
 
-        try:
-            # Load system from request
-            _load_system_from_request(request)
+            if _ensure_connected() is None:
+                return CrossSectionResponse(success=False, error=NOT_CONNECTED_ERROR)
 
-            # Generate cross-section (system already loaded)
-            result = zospy_handler.get_cross_section()
-            return CrossSectionResponse(
-                success=True,
-                image=result.get("image"),
-                image_format=result.get("image_format"),
-                array_shape=result.get("array_shape"),
-                array_dtype=result.get("array_dtype"),
-                paraxial=result.get("paraxial"),
-                surfaces=result.get("surfaces"),
-                rays_total=result.get("rays_total"),
-                rays_through=result.get("rays_through"),
-            )
-        except Exception as e:
-            _handle_zospy_error("Cross-section", e)
-            return CrossSectionResponse(success=False, error=str(e))
+            try:
+                # Load system from request
+                _load_system_from_request(request)
+
+                # Generate cross-section (system already loaded)
+                result = zospy_handler.get_cross_section()
+                return CrossSectionResponse(
+                    success=True,
+                    image=result.get("image"),
+                    image_format=result.get("image_format"),
+                    array_shape=result.get("array_shape"),
+                    array_dtype=result.get("array_dtype"),
+                    paraxial=result.get("paraxial"),
+                    surfaces=result.get("surfaces"),
+                    rays_total=result.get("rays_total"),
+                    rays_through=result.get("rays_through"),
+                )
+            except Exception as e:
+                _handle_zospy_error("Cross-section", e)
+                return CrossSectionResponse(success=False, error=str(e))
 
 
 @app.post("/calc-semi-diameters", response_model=SemiDiametersResponse)
 async def calc_semi_diameters(request: SystemRequest, _: None = Depends(verify_api_key)) -> SemiDiametersResponse:
     """Calculate semi-diameters by tracing edge rays."""
-    async with _zospy_lock:
-        if _ensure_connected() is None:
-            return SemiDiametersResponse(success=False, error=NOT_CONNECTED_ERROR)
+    with timed_operation(logger, "/calc-semi-diameters"):
+        lock_start = time.perf_counter()
+        async with _zospy_lock:
+            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
+            log_timing(logger, "lock_wait", lock_wait_ms)
 
-        try:
-            # Load system from request
-            _load_system_from_request(request)
+            if _ensure_connected() is None:
+                return SemiDiametersResponse(success=False, error=NOT_CONNECTED_ERROR)
 
-            # Calculate semi-diameters (system already loaded)
-            result = zospy_handler.calc_semi_diameters()
-            return SemiDiametersResponse(
-                success=True,
-                semi_diameters=result.get("semi_diameters", []),
-            )
-        except Exception as e:
-            _handle_zospy_error("Calc semi-diameters", e)
-            return SemiDiametersResponse(success=False, error=str(e))
+            try:
+                # Load system from request
+                _load_system_from_request(request)
+
+                # Calculate semi-diameters (system already loaded)
+                result = zospy_handler.calc_semi_diameters()
+                return SemiDiametersResponse(
+                    success=True,
+                    semi_diameters=result.get("semi_diameters", []),
+                )
+            except Exception as e:
+                _handle_zospy_error("Calc semi-diameters", e)
+                return SemiDiametersResponse(success=False, error=str(e))
 
 
 @app.post("/ray-trace-diagnostic", response_model=RayTraceDiagnosticResponse)
@@ -542,62 +559,72 @@ async def ray_trace_diagnostic(
     All aggregation, hotspot detection, and threshold calculations
     happen on the Mac side (zemax-analysis-service).
     """
-    async with _zospy_lock:
-        if _ensure_connected() is None:
-            return RayTraceDiagnosticResponse(success=False, error=NOT_CONNECTED_ERROR)
+    with timed_operation(logger, "/ray-trace-diagnostic"):
+        lock_start = time.perf_counter()
+        async with _zospy_lock:
+            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
+            log_timing(logger, "lock_wait", lock_wait_ms)
 
-        try:
-            # Load system from request
-            _load_system_from_request(request)
+            if _ensure_connected() is None:
+                return RayTraceDiagnosticResponse(success=False, error=NOT_CONNECTED_ERROR)
 
-            # Run ray trace (system already loaded)
-            result = zospy_handler.ray_trace_diagnostic(
-                num_rays=request.num_rays,
-                distribution=request.distribution,
-            )
-            return RayTraceDiagnosticResponse(
-                success=True,
-                paraxial=result.get("paraxial"),
-                num_surfaces=result.get("num_surfaces"),
-                num_fields=result.get("num_fields"),
-                raw_rays=result.get("raw_rays"),
-                surface_semi_diameters=result.get("surface_semi_diameters"),
-            )
-        except Exception as e:
-            _handle_zospy_error("Ray trace diagnostic", e)
-            return RayTraceDiagnosticResponse(success=False, error=str(e))
+            try:
+                # Load system from request
+                _load_system_from_request(request)
+
+                # Run ray trace (system already loaded)
+                result = zospy_handler.ray_trace_diagnostic(
+                    num_rays=request.num_rays,
+                    distribution=request.distribution,
+                )
+                return RayTraceDiagnosticResponse(
+                    success=True,
+                    paraxial=result.get("paraxial"),
+                    num_surfaces=result.get("num_surfaces"),
+                    num_fields=result.get("num_fields"),
+                    raw_rays=result.get("raw_rays"),
+                    surface_semi_diameters=result.get("surface_semi_diameters"),
+                )
+            except Exception as e:
+                _handle_zospy_error("Ray trace diagnostic", e)
+                return RayTraceDiagnosticResponse(success=False, error=str(e))
 
 
 @app.post("/seidel", response_model=ZernikeResponse)
 async def get_zernike(request: SystemRequest, _: None = Depends(verify_api_key)) -> ZernikeResponse:
     """Get raw Zernike coefficients - conversion to Seidel happens on Mac side."""
-    async with _zospy_lock:
-        if _ensure_connected() is None:
-            return ZernikeResponse(success=False, error=NOT_CONNECTED_ERROR)
+    with timed_operation(logger, "/seidel"):
+        lock_start = time.perf_counter()
+        async with _zospy_lock:
+            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
+            log_timing(logger, "lock_wait", lock_wait_ms)
 
-        try:
-            # Load system from request
-            _load_system_from_request(request)
+            if _ensure_connected() is None:
+                return ZernikeResponse(success=False, error=NOT_CONNECTED_ERROR)
 
-            # Get Zernike coefficients (system already loaded)
-            result = zospy_handler.get_seidel()
+            try:
+                # Load system from request
+                _load_system_from_request(request)
 
-            # Check if analysis succeeded
-            if not result.get("success", False):
+                # Get Zernike coefficients (system already loaded)
+                result = zospy_handler.get_seidel()
+
+                # Check if analysis succeeded
+                if not result.get("success", False):
+                    return ZernikeResponse(
+                        success=False,
+                        error=result.get("error", "Zernike analysis failed"),
+                    )
+
                 return ZernikeResponse(
-                    success=False,
-                    error=result.get("error", "Zernike analysis failed"),
+                    success=True,
+                    zernike_coefficients=result.get("zernike_coefficients"),
+                    wavelength_um=result.get("wavelength_um"),
+                    num_surfaces=result.get("num_surfaces", 0),
                 )
-
-            return ZernikeResponse(
-                success=True,
-                zernike_coefficients=result.get("zernike_coefficients"),
-                wavelength_um=result.get("wavelength_um"),
-                num_surfaces=result.get("num_surfaces", 0),
-            )
-        except Exception as e:
-            _handle_zospy_error("Zernike", e)
-            return ZernikeResponse(success=False, error=str(e))
+            except Exception as e:
+                _handle_zospy_error("Zernike", e)
+                return ZernikeResponse(success=False, error=str(e))
 
 
 @app.post("/seidel-native", response_model=NativeSeidelResponse)
@@ -608,49 +635,54 @@ async def get_seidel_native(request: SystemRequest, _: None = Depends(verify_api
     This provides accurate per-surface S1-S5 and chromatic aberrations (CLA, CTR)
     directly from OpticStudio, unlike the Zernike-based approximation in /seidel.
     """
-    logger.info("seidel-native: Starting native Seidel analysis")
-    async with _zospy_lock:
-        if _ensure_connected() is None:
-            return NativeSeidelResponse(success=False, error=NOT_CONNECTED_ERROR)
+    with timed_operation(logger, "/seidel-native"):
+        logger.info("seidel-native: Starting native Seidel analysis")
+        lock_start = time.perf_counter()
+        async with _zospy_lock:
+            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
+            log_timing(logger, "lock_wait", lock_wait_ms)
 
-        try:
-            # Load system from request
-            _load_system_from_request(request)
+            if _ensure_connected() is None:
+                return NativeSeidelResponse(success=False, error=NOT_CONNECTED_ERROR)
 
-            # Get native Seidel coefficients (system already loaded)
-            result = zospy_handler.get_seidel_native()
+            try:
+                # Load system from request
+                _load_system_from_request(request)
 
-            if not result.get("success", False):
+                # Get native Seidel coefficients (system already loaded)
+                result = zospy_handler.get_seidel_native()
+
+                if not result.get("success", False):
+                    return NativeSeidelResponse(
+                        success=False,
+                        error=result.get("error", "Native Seidel analysis failed"),
+                    )
+
+                # Convert per_surface dicts to SeidelSurfaceData models
+                per_surface = None
+                if result.get("per_surface"):
+                    per_surface = [SeidelSurfaceData(**sd) for sd in result["per_surface"]]
+
+                # Convert totals dict to SeidelTotals model
+                totals = None
+                if result.get("totals"):
+                    totals = SeidelTotals(**result["totals"])
+
+                # Convert header dict to SeidelHeaderData model
+                header = None
+                if result.get("header"):
+                    header = SeidelHeaderData(**result["header"])
+
                 return NativeSeidelResponse(
-                    success=False,
-                    error=result.get("error", "Native Seidel analysis failed"),
+                    success=True,
+                    per_surface=per_surface,
+                    totals=totals,
+                    header=header,
+                    num_surfaces=result.get("num_surfaces"),
                 )
-
-            # Convert per_surface dicts to SeidelSurfaceData models
-            per_surface = None
-            if result.get("per_surface"):
-                per_surface = [SeidelSurfaceData(**sd) for sd in result["per_surface"]]
-
-            # Convert totals dict to SeidelTotals model
-            totals = None
-            if result.get("totals"):
-                totals = SeidelTotals(**result["totals"])
-
-            # Convert header dict to SeidelHeaderData model
-            header = None
-            if result.get("header"):
-                header = SeidelHeaderData(**result["header"])
-
-            return NativeSeidelResponse(
-                success=True,
-                per_surface=per_surface,
-                totals=totals,
-                header=header,
-                num_surfaces=result.get("num_surfaces"),
-            )
-        except Exception as e:
-            _handle_zospy_error("Native Seidel", e)
-            return NativeSeidelResponse(success=False, error=str(e))
+            except Exception as e:
+                _handle_zospy_error("Native Seidel", e)
+                return NativeSeidelResponse(success=False, error=str(e))
 
 
 @app.post("/trace-rays", response_model=TraceRaysResponse)
@@ -660,26 +692,31 @@ async def trace_rays(
     _: None = Depends(verify_api_key),
 ) -> TraceRaysResponse:
     """Trace rays through the system and return positions at each surface."""
-    async with _zospy_lock:
-        if _ensure_connected() is None:
-            return TraceRaysResponse(success=False, error=NOT_CONNECTED_ERROR)
+    with timed_operation(logger, "/trace-rays"):
+        lock_start = time.perf_counter()
+        async with _zospy_lock:
+            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
+            log_timing(logger, "lock_wait", lock_wait_ms)
 
-        try:
-            # Load system from request
-            _load_system_from_request(request)
+            if _ensure_connected() is None:
+                return TraceRaysResponse(success=False, error=NOT_CONNECTED_ERROR)
 
-            # Trace rays (system already loaded)
-            result = zospy_handler.trace_rays(num_rays=num_rays)
-            return TraceRaysResponse(
-                success=True,
-                num_surfaces=result.get("num_surfaces"),
-                num_fields=result.get("num_fields"),
-                num_wavelengths=result.get("num_wavelengths"),
-                data=result.get("data"),
-            )
-        except Exception as e:
-            _handle_zospy_error("Trace rays", e)
-            return TraceRaysResponse(success=False, error=str(e))
+            try:
+                # Load system from request
+                _load_system_from_request(request)
+
+                # Trace rays (system already loaded)
+                result = zospy_handler.trace_rays(num_rays=num_rays)
+                return TraceRaysResponse(
+                    success=True,
+                    num_surfaces=result.get("num_surfaces"),
+                    num_fields=result.get("num_fields"),
+                    num_wavelengths=result.get("num_wavelengths"),
+                    data=result.get("data"),
+                )
+            except Exception as e:
+                _handle_zospy_error("Trace rays", e)
+                return TraceRaysResponse(success=False, error=str(e))
 
 
 @app.post("/wavefront", response_model=WavefrontResponse)

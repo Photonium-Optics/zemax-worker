@@ -29,21 +29,24 @@ def diagnose_single_ray_trace(oss):
     try:
         # Try to trace a single ray at pupil center
         print("\n1. Creating SingleRayTrace analysis...")
-        ray_trace = zp.analyses.raysandspots.single_ray_trace(
-            oss,
-            Hx=0.0,
-            Hy=0.0,
-            Px=0.0,
-            Py=0.0,
+        # ZosPy 2.x: Use SingleRayTrace class (not function), lowercase params
+        ray_trace = zp.analyses.raysandspots.SingleRayTrace(
+            hx=0.0,
+            hy=0.0,
+            px=0.0,
+            py=0.0,
             wavelength=1,
+            field=1,
         )
+        result = ray_trace.run(oss)
 
-        print(f"   Result type: {type(ray_trace)}")
-        print(f"   Result dir: {[a for a in dir(ray_trace) if not a.startswith('_')]}")
+        print(f"   ray_trace type: {type(ray_trace)}")
+        print(f"   result type: {type(result)}")
+        print(f"   result dir: {[a for a in dir(result) if not a.startswith('_')]}")
 
-        # Check for data attribute
-        if hasattr(ray_trace, 'data'):
-            data = ray_trace.data
+        # Check for data attribute on result (not ray_trace)
+        if hasattr(result, 'data'):
+            data = result.data
             print(f"\n2. ray_trace.data exists:")
             print(f"   Type: {type(data)}")
             print(f"   Attributes: {[a for a in dir(data) if not a.startswith('_')]}")
@@ -105,29 +108,8 @@ def diagnose_single_ray_trace(oss):
                 print("\n3. ✗ data.real_ray_trace_data does NOT exist")
                 print(f"   Available attributes: {[a for a in dir(data) if not a.startswith('_')]}")
         else:
-            print("\n2. ✗ ray_trace.data does NOT exist")
-
-        # Also try the new-style API
-        print("\n" + "-"*60)
-        print("TRYING ALTERNATIVE API: zp.analyses.new_analysis")
-        print("-"*60)
-
-        try:
-            from zospy.api.codecs import AnalysisIDM
-            analysis = zp.analyses.new_analysis(oss, AnalysisIDM.SingleRayTrace)
-            analysis.settings.Hx = 0.0
-            analysis.settings.Hy = 0.0
-            analysis.settings.Px = 0.0
-            analysis.settings.Py = 0.0
-            analysis.settings.Wavelength = 1
-            analysis.apply_and_wait_for_completion()
-
-            print(f"   New-style analysis type: {type(analysis)}")
-            if hasattr(analysis, 'results'):
-                print(f"   results type: {type(analysis.results)}")
-                print(f"   results dir: {[a for a in dir(analysis.results) if not a.startswith('_')]}")
-        except Exception as e:
-            print(f"   ✗ New-style API failed: {e}")
+            print("\n2. ✗ result.data does NOT exist")
+            print(f"   Available attributes on result: {[a for a in dir(result) if not a.startswith('_')]}")
 
     except Exception as e:
         print(f"\n✗ SingleRayTrace failed: {e}")
@@ -142,25 +124,27 @@ def diagnose_standard_spot(oss):
     print("="*60)
 
     try:
-        from zospy.api.codecs import AnalysisIDM
+        # ZosPy 2.x: Use zp.constants.Analysis.AnalysisIDM
+        idm = zp.constants.Analysis.AnalysisIDM
 
         print("\n1. Creating StandardSpot analysis...")
-        analysis = zp.analyses.new_analysis(oss, AnalysisIDM.StandardSpot)
-        analysis.apply_and_wait_for_completion()
+        analysis = zp.analyses.new_analysis(oss, idm.StandardSpot, settings_first=True)
+        analysis.ApplyAndWaitForCompletion()
 
         print(f"   Analysis type: {type(analysis)}")
         print(f"   Analysis dir: {[a for a in dir(analysis) if not a.startswith('_')]}")
 
-        if hasattr(analysis, 'results'):
-            results = analysis.results
-            print(f"\n2. analysis.results exists:")
+        # Try both lowercase and uppercase Results attribute
+        results = getattr(analysis, 'Results', None) or getattr(analysis, 'results', None)
+        if results is not None:
+            print(f"\n2. analysis.Results exists:")
             print(f"   Type: {type(results)}")
             print(f"   Attributes: {[a for a in dir(results) if not a.startswith('_')]}")
 
-            # Try to get spot data
-            if hasattr(results, 'data'):
-                data = results.data
-                print(f"\n3. results.data:")
+            # Try to get spot data - check both Data and data
+            data = getattr(results, 'Data', None) or getattr(results, 'data', None)
+            if data is not None:
+                print(f"\n3. results.Data:")
                 print(f"   Type: {type(data)}")
                 if hasattr(data, 'columns'):
                     print(f"   Columns: {list(data.columns)}")
@@ -171,10 +155,10 @@ def diagnose_standard_spot(oss):
                     print(data.head())
 
             # Try various attribute names for spot data
-            spot_attrs = ['spot_data', 'SpotData', 'data', 'Data', 'spot_diagram_data']
+            spot_attrs = ['spot_data', 'SpotData', 'data', 'Data', 'spot_diagram_data', 'AiryRadius']
             for attr in spot_attrs:
                 if hasattr(results, attr):
-                    print(f"\n   Found results.{attr}: {type(getattr(results, attr))}")
+                    print(f"\n   Found results.{attr}: {getattr(results, attr)}")
 
     except Exception as e:
         print(f"\n✗ StandardSpot failed: {e}")
