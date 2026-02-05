@@ -294,12 +294,15 @@ ray_trace = zp.analyses.raysandspots.SingleRayTrace(
 )
 result = ray_trace.run(self.oss)
 
-# Access ray data
+# Access ray data - ZosPy 2.1.4 uses 'X-coordinate', 'Y-coordinate' column names
 if hasattr(result.data, 'real_ray_trace_data'):
     df = result.data.real_ray_trace_data
+    # DataFrame columns: ['Surf', 'X-coordinate', 'Y-coordinate', 'Z-coordinate',
+    #                     'X-cosine', 'Y-cosine', 'Z-cosine', 'X-normal', 'Y-normal',
+    #                     'Z-normal', 'Angle in', 'Path length', 'Comment']
     last_row = df.iloc[-1]  # Image surface
-    x_val = last_row.get('X', last_row.get('x', None))
-    y_val = last_row.get('Y', last_row.get('y', None))
+    x_val = last_row['X-coordinate']  # NOT 'X' or 'x'
+    y_val = last_row['Y-coordinate']  # NOT 'Y' or 'y'
 ```
 
 ### ZernikeStandardCoefficients Analysis
@@ -1576,6 +1579,18 @@ if hasattr(oss, 'SystemData'):
 - **REMOVED** `skip_load` parameter from all methods
 - All endpoints now require `zmx_content` only
 
+### 2026-02-05 - ZosPy 2.1.4 Comprehensive Fix
+- **FIXED**: Column names in `real_ray_trace_data` DataFrame
+  - Use `X-coordinate`, `Y-coordinate`, `Z-coordinate` (NOT `X`, `x`, `Y`, `y`)
+- **REMOVED**: `error_code` column check (doesn't exist in ZosPy 2.x)
+- **ADDED**: `_get_column_value()` helper for safe DataFrame/Series column access
+- **FIXED**: UnitField extraction - ZosPy 2.x returns UnitField objects, not floats
+  - Applied `_extract_value()` to: `ApertureValue`, `field.X/Y`, `surface.Radius/Thickness/SemiDiameter/Conic`, `Wavelength`, EFL
+  - Locations: `get_paraxial_data()`, `get_surfaces()`, `calc_semi_diameters()`, `ray_trace_diagnostic()`, `trace_rays()`, `get_wavefront()`, `_compute_spot_data_manual()`, `calc_fno()`
+- **FIXED**: Enum handling in `calc_fno()` - use `.name` attribute when available
+- **UPDATED**: `_compute_spot_data_manual()` and cross-section ray tracing
+- Spot diagram now works correctly with ZosPy 2.1.4
+
 ### 2026-02-04 (Part 4) - Dumb Executor for get_seidel
 - Simplified from ~160 lines to ~80 lines
 - **REMOVED**: ZOSAPI fallback, `_parse_zernike_text()`, placeholder generation
@@ -1635,10 +1650,10 @@ python diagnose_spot_diagram.py [optional_zmx_file]
 2. DataFrame column names - finds actual X/Y column names
 3. StandardSpot analysis - checks if this works as primary method
 
-**Known issue (2026-02):** The manual ray trace fallback in `_compute_spot_data_manual()` may fail silently because:
-- `last_row.get('X', ...)` on a pandas Series may not find columns if names differ
-- Column names vary by ZosPy version (could be `X`, `x`, `Position X`, etc.)
-- No error is reported when zero rays are captured
+**RESOLVED (2026-02-05):** Fixed column name issue. ZosPy 2.1.4 uses:
+- `X-coordinate`, `Y-coordinate`, `Z-coordinate` (NOT `X`, `x`, `Y`, `y`)
+- No `error_code` column exists - rays that reach the image surface are valid
+- DataFrame columns: `['Surf', 'X-coordinate', 'Y-coordinate', 'Z-coordinate', 'X-cosine', 'Y-cosine', 'Z-cosine', 'X-normal', 'Y-normal', 'Z-normal', 'Angle in', 'Path length', 'Comment']`
 
 ### diagnose_wavefront.py
 

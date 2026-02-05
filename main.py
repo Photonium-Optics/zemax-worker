@@ -23,7 +23,6 @@ import base64
 import logging
 import os
 import tempfile
-import time
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -32,7 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from zospy_handler import ZosPyHandler, ZosPyError
-from utils.timing import timed_operation, log_timing
+from utils.timing import timed_operation, timed_lock_acquire
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -466,11 +465,7 @@ async def health_check() -> HealthResponse:
 async def load_system(request: SystemRequest, _: None = Depends(verify_api_key)) -> LoadSystemResponse:
     """Load an optical system into OpticStudio from zmx_content."""
     with timed_operation(logger, "/load-system"):
-        lock_start = time.perf_counter()
-        async with _zospy_lock:
-            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
-            log_timing(logger, "lock_wait", lock_wait_ms)
-
+        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
             if _ensure_connected() is None:
                 return LoadSystemResponse(success=False, error=NOT_CONNECTED_ERROR)
 
@@ -490,11 +485,7 @@ async def load_system(request: SystemRequest, _: None = Depends(verify_api_key))
 async def get_cross_section(request: SystemRequest, _: None = Depends(verify_api_key)) -> CrossSectionResponse:
     """Generate cross-section diagram using ZosPy's CrossSection analysis."""
     with timed_operation(logger, "/cross-section"):
-        lock_start = time.perf_counter()
-        async with _zospy_lock:
-            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
-            log_timing(logger, "lock_wait", lock_wait_ms)
-
+        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
             if _ensure_connected() is None:
                 return CrossSectionResponse(success=False, error=NOT_CONNECTED_ERROR)
 
@@ -524,11 +515,7 @@ async def get_cross_section(request: SystemRequest, _: None = Depends(verify_api
 async def calc_semi_diameters(request: SystemRequest, _: None = Depends(verify_api_key)) -> SemiDiametersResponse:
     """Calculate semi-diameters by tracing edge rays."""
     with timed_operation(logger, "/calc-semi-diameters"):
-        lock_start = time.perf_counter()
-        async with _zospy_lock:
-            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
-            log_timing(logger, "lock_wait", lock_wait_ms)
-
+        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
             if _ensure_connected() is None:
                 return SemiDiametersResponse(success=False, error=NOT_CONNECTED_ERROR)
 
@@ -560,11 +547,7 @@ async def ray_trace_diagnostic(
     happen on the Mac side (zemax-analysis-service).
     """
     with timed_operation(logger, "/ray-trace-diagnostic"):
-        lock_start = time.perf_counter()
-        async with _zospy_lock:
-            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
-            log_timing(logger, "lock_wait", lock_wait_ms)
-
+        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
             if _ensure_connected() is None:
                 return RayTraceDiagnosticResponse(success=False, error=NOT_CONNECTED_ERROR)
 
@@ -594,11 +577,7 @@ async def ray_trace_diagnostic(
 async def get_zernike(request: SystemRequest, _: None = Depends(verify_api_key)) -> ZernikeResponse:
     """Get raw Zernike coefficients - conversion to Seidel happens on Mac side."""
     with timed_operation(logger, "/seidel"):
-        lock_start = time.perf_counter()
-        async with _zospy_lock:
-            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
-            log_timing(logger, "lock_wait", lock_wait_ms)
-
+        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
             if _ensure_connected() is None:
                 return ZernikeResponse(success=False, error=NOT_CONNECTED_ERROR)
 
@@ -637,11 +616,7 @@ async def get_seidel_native(request: SystemRequest, _: None = Depends(verify_api
     """
     with timed_operation(logger, "/seidel-native"):
         logger.info("seidel-native: Starting native Seidel analysis")
-        lock_start = time.perf_counter()
-        async with _zospy_lock:
-            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
-            log_timing(logger, "lock_wait", lock_wait_ms)
-
+        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
             if _ensure_connected() is None:
                 return NativeSeidelResponse(success=False, error=NOT_CONNECTED_ERROR)
 
@@ -693,11 +668,7 @@ async def trace_rays(
 ) -> TraceRaysResponse:
     """Trace rays through the system and return positions at each surface."""
     with timed_operation(logger, "/trace-rays"):
-        lock_start = time.perf_counter()
-        async with _zospy_lock:
-            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
-            log_timing(logger, "lock_wait", lock_wait_ms)
-
+        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
             if _ensure_connected() is None:
                 return TraceRaysResponse(success=False, error=NOT_CONNECTED_ERROR)
 
@@ -731,11 +702,7 @@ async def get_wavefront(
     Wavefront map image rendering happens on Mac side using matplotlib.
     """
     with timed_operation(logger, "/wavefront"):
-        lock_start = time.perf_counter()
-        async with _zospy_lock:
-            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
-            log_timing(logger, "lock_wait", lock_wait_ms)
-
+        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
             if _ensure_connected() is None:
                 return WavefrontResponse(success=False, error=NOT_CONNECTED_ERROR)
 
@@ -786,11 +753,7 @@ async def get_spot_diagram(
     Spot diagram image rendering happens on Mac side if PNG export fails.
     """
     with timed_operation(logger, "/spot-diagram"):
-        lock_start = time.perf_counter()
-        async with _zospy_lock:
-            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
-            log_timing(logger, "lock_wait", lock_wait_ms)
-
+        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
             if _ensure_connected() is None:
                 return SpotDiagramResponse(success=False, error=NOT_CONNECTED_ERROR)
 

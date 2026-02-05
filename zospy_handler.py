@@ -111,6 +111,37 @@ def _extract_value(obj: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
 
+
+def _get_column_value(row: Any, column_names: list[str], default: Any = None) -> Any:
+    """
+    Safely extract a value from a pandas Series or dict-like object.
+
+    ZosPy 2.1.4 uses column names like 'X-coordinate', 'Y-coordinate', 'Z-coordinate'.
+    This helper tries multiple column name patterns for backwards compatibility.
+
+    Args:
+        row: pandas Series or dict-like object
+        column_names: List of column names to try in order
+        default: Default value if no column found
+
+    Returns:
+        Column value or default
+    """
+    for col in column_names:
+        try:
+            # Try bracket access first (works for both Series and dict)
+            if hasattr(row, '__contains__') and col in row:
+                return row[col]
+            # Fallback to .get() if available (dict-like)
+            if hasattr(row, 'get'):
+                val = row.get(col)
+                if val is not None:
+                    return val
+        except (KeyError, TypeError):
+            continue
+    return default
+
+
 # F/# aperture types
 FNO_APERTURE_TYPES = ["ImageSpaceFNumber", "FloatByStopSize", "ParaxialWorkingFNumber"]
 
@@ -211,10 +242,12 @@ class ZosPyHandler:
 
         # Load the file directly using ZosPy's load method
         # This replaces all manual surface building with native file loading
-        start = time.perf_counter()
-        self.oss.load(file_path)
-        elapsed_ms = (time.perf_counter() - start) * 1000
-        log_timing(logger, "oss.load", elapsed_ms)
+        load_start = time.perf_counter()
+        try:
+            self.oss.load(file_path)
+        finally:
+            load_elapsed_ms = (time.perf_counter() - load_start) * 1000
+            log_timing(logger, "oss.load", load_elapsed_ms)
 
         # Get system info after loading
         num_surfaces = self.oss.LDE.NumberOfSurfaces - 1  # Exclude object surface
@@ -234,7 +267,8 @@ class ZosPyHandler:
         try:
             # Use the SystemData analysis to get first-order properties
             result = zp.analyses.reports.SystemData().run(self.oss)
-            return result.data.general_lens_data.effective_focal_length_air
+            # Use _extract_value for potential UnitField object
+            return _extract_value(result.data.general_lens_data.effective_focal_length_air, None)
         except Exception:
             return None
 
@@ -341,9 +375,11 @@ class ZosPyHandler:
 
                     # Run with image_output_file to save to disk
                     cs_start = time.perf_counter()
-                    result = cross_section.run(self.oss, image_output_file=temp_path)
-                    cs_elapsed_ms = (time.perf_counter() - cs_start) * 1000
-                    log_timing(logger, "CrossSection.run", cs_elapsed_ms)
+                    try:
+                        result = cross_section.run(self.oss, image_output_file=temp_path)
+                    finally:
+                        cs_elapsed_ms = (time.perf_counter() - cs_start) * 1000
+                        log_timing(logger, "CrossSection.run", cs_elapsed_ms)
                     logger.debug(f"CrossSection.run completed, result.data type = {type(result.data) if hasattr(result, 'data') else 'N/A'}")
 
                     # Check if file was created
@@ -437,27 +473,27 @@ class ZosPyHandler:
         try:
             paraxial = {}
 
-            # Get aperture info
+            # Get aperture info - use _extract_value for UnitField objects
             aperture = self.oss.SystemData.Aperture
-            paraxial["epd"] = aperture.ApertureValue
+            paraxial["epd"] = _extract_value(aperture.ApertureValue)
 
-            # Get field info
+            # Get field info - use _extract_value for UnitField objects
             fields = self.oss.SystemData.Fields
             max_field = 0.0
             if fields.NumberOfFields > 0:
                 for i in range(1, fields.NumberOfFields + 1):
                     f = fields.GetField(i)
-                    max_field = max(max_field, abs(f.Y), abs(f.X))
+                    max_field = max(max_field, abs(_extract_value(f.Y)), abs(_extract_value(f.X)))
             paraxial["max_field"] = max_field
             paraxial["field_type"] = "object_angle"
             paraxial["field_unit"] = "deg"
 
-            # Calculate total track from LDE
+            # Calculate total track from LDE - use _extract_value for UnitField objects
             lde = self.oss.LDE
             total_track = 0.0
             for i in range(1, lde.NumberOfSurfaces):
                 surface = lde.GetSurfaceAt(i)
-                total_track += abs(surface.Thickness)
+                total_track += abs(_extract_value(surface.Thickness))
             paraxial["total_track"] = total_track
 
             return paraxial
@@ -485,19 +521,23 @@ class ZosPyHandler:
 
             # Radius of 0 in Zemax means infinity (flat surface)
             # We convert to None for client-side rendering
-            radius = surface.Radius
+            # Use _extract_value for all UnitField properties
+            radius = _extract_value(surface.Radius)
+            thickness = _extract_value(surface.Thickness)
+            semi_diameter = _extract_value(surface.SemiDiameter)
+            conic = _extract_value(surface.Conic)
             surf_data = {
                 "index": i,
                 "z": z_position,
                 "radius": radius if radius != 0 and abs(radius) < 1e10 else None,
-                "thickness": surface.Thickness,
-                "semi_diameter": surface.SemiDiameter,
-                "conic": surface.Conic,
+                "thickness": thickness,
+                "semi_diameter": semi_diameter,
+                "conic": conic,
                 "material": str(surface.Material) if surface.Material else None,
                 "is_stop": surface.IsStop,
             }
             surfaces.append(surf_data)
-            z_position += surface.Thickness
+            z_position += thickness
 
         return surfaces
 
@@ -518,9 +558,10 @@ class ZosPyHandler:
         lde = self.oss.LDE
 
         # For each surface, get the computed semi-diameter
+        # Use _extract_value for UnitField objects
         for i in range(1, lde.NumberOfSurfaces):
             surface = lde.GetSurfaceAt(i)
-            sd = surface.SemiDiameter
+            sd = _extract_value(surface.SemiDiameter)
 
             semi_diameters.append({
                 "index": i - 1,  # Convert to 0-indexed
@@ -573,10 +614,11 @@ class ZosPyHandler:
         num_fields = fields.NumberOfFields
 
         # Extract surface semi-diameters from LDE
+        # Use _extract_value for UnitField objects
         surface_semi_diameters = []
         for i in range(1, lde.NumberOfSurfaces):
             surface = lde.GetSurfaceAt(i)
-            surface_semi_diameters.append(surface.SemiDiameter)
+            surface_semi_diameters.append(_extract_value(surface.SemiDiameter))
 
         # Calculate grid size from num_rays
         grid_size = int(np.sqrt(num_rays))
@@ -585,81 +627,84 @@ class ZosPyHandler:
         raw_rays = []
 
         ray_trace_start = time.perf_counter()
-        for fi in range(1, num_fields + 1):
-            field = fields.GetField(fi)
-            field_x, field_y = field.X, field.Y
+        try:
+            for fi in range(1, num_fields + 1):
+                field = fields.GetField(fi)
+                # Use _extract_value for UnitField objects
+                field_x = _extract_value(field.X)
+                field_y = _extract_value(field.Y)
 
-            # Trace a grid of rays using ZosPy's single ray trace
-            for px in np.linspace(-1, 1, grid_size):
-                for py in np.linspace(-1, 1, grid_size):
-                    if px**2 + py**2 > 1:
-                        continue  # Skip rays outside pupil
+                # Trace a grid of rays using ZosPy's single ray trace
+                for px in np.linspace(-1, 1, grid_size):
+                    for py in np.linspace(-1, 1, grid_size):
+                        if px**2 + py**2 > 1:
+                            continue  # Skip rays outside pupil
 
-                    ray_result = {
-                        "field_index": fi - 1,  # 0-indexed
-                        "field_x": field_x,
-                        "field_y": field_y,
-                        "px": float(px),
-                        "py": float(py),
-                        "reached_image": False,
-                        "failed_surface": None,
-                        "failure_mode": None,
-                    }
+                        ray_result = {
+                            "field_index": fi - 1,  # 0-indexed
+                            "field_x": field_x,
+                            "field_y": field_y,
+                            "px": float(px),
+                            "py": float(py),
+                            "reached_image": False,
+                            "failed_surface": None,
+                            "failure_mode": None,
+                        }
 
-                    try:
-                        # ZosPy SingleRayTrace: px/py are normalized pupil coordinates (-1 to 1)
-                        # hx/hy are normalized field coordinates (set to 0 when using field index)
-                        # CRITICAL: px/py must be Python float(), not numpy.float64, for COM interop
-                        ray_trace = zp.analyses.raysandspots.SingleRayTrace(
-                            hx=0.0,
-                            hy=0.0,
-                            px=float(px),
-                            py=float(py),
-                            wavelength=1,
-                            field=fi,
-                        )
-                        result = ray_trace.run(self.oss)
+                        try:
+                            # ZosPy SingleRayTrace: px/py are normalized pupil coordinates (-1 to 1)
+                            # hx/hy are normalized field coordinates (set to 0 when using field index)
+                            # CRITICAL: px/py must be Python float(), not numpy.float64, for COM interop
+                            ray_trace = zp.analyses.raysandspots.SingleRayTrace(
+                                hx=0.0,
+                                hy=0.0,
+                                px=float(px),
+                                py=float(py),
+                                wavelength=1,
+                                field=fi,
+                            )
+                            result = ray_trace.run(self.oss)
 
-                        # Check result - ZosPy returns data in result.data.real_ray_trace_data
-                        if hasattr(result, 'data') and result.data is not None:
-                            ray_data = result.data
-                            # Access real_ray_trace_data if available (DataFrame)
-                            if hasattr(ray_data, 'real_ray_trace_data'):
-                                df = ray_data.real_ray_trace_data
-                            else:
-                                df = ray_data  # Fallback for older versions
+                            # Check result - ZosPy returns data in result.data.real_ray_trace_data
+                            if hasattr(result, 'data') and result.data is not None:
+                                ray_data = result.data
+                                # Access real_ray_trace_data if available (DataFrame)
+                                if hasattr(ray_data, 'real_ray_trace_data'):
+                                    df = ray_data.real_ray_trace_data
+                                else:
+                                    df = ray_data  # Fallback for older versions
 
-                            # Check if ray reached image
-                            if hasattr(df, '__len__') and len(df) > 0:
-                                # Check for error codes - vignetted rays have error_code != 0
-                                if hasattr(df, 'columns') and 'error_code' in df.columns:
-                                    # Find first surface with error
-                                    error_rows = df[df['error_code'] != 0]
-                                    if len(error_rows) > 0:
-                                        first_error = error_rows.iloc[0]
-                                        ray_result["reached_image"] = False
-                                        ray_result["failed_surface"] = int(first_error.get('surface', 0))
-                                        # Map error code to failure mode string
-                                        error_code = int(first_error.get('error_code', 0))
-                                        ray_result["failure_mode"] = self._error_code_to_mode(error_code)
+                                # Check if ray reached image
+                                if hasattr(df, '__len__') and len(df) > 0:
+                                    # Check for error codes - vignetted rays have error_code != 0
+                                    if hasattr(df, 'columns') and 'error_code' in df.columns:
+                                        # Find first surface with error
+                                        error_rows = df[df['error_code'] != 0]
+                                        if len(error_rows) > 0:
+                                            first_error = error_rows.iloc[0]
+                                            ray_result["reached_image"] = False
+                                            ray_result["failed_surface"] = int(first_error.get('surface', 0))
+                                            # Map error code to failure mode string
+                                            error_code = int(first_error.get('error_code', 0))
+                                            ray_result["failure_mode"] = self._error_code_to_mode(error_code)
+                                        else:
+                                            ray_result["reached_image"] = True
                                     else:
+                                        # No error column - assume success
                                         ray_result["reached_image"] = True
                                 else:
-                                    # No error column - assume success
-                                    ray_result["reached_image"] = True
+                                    ray_result["failure_mode"] = "NO_DATA"
                             else:
-                                ray_result["failure_mode"] = "NO_DATA"
-                        else:
-                            ray_result["failure_mode"] = "NO_RESULT"
+                                ray_result["failure_mode"] = "NO_RESULT"
 
-                    except Exception as e:
-                        logger.debug(f"Ray trace failed for field {fi}, pupil ({px:.2f}, {py:.2f}): {e}")
-                        ray_result["failure_mode"] = "EXCEPTION"
+                        except Exception as e:
+                            logger.debug(f"Ray trace failed for field {fi}, pupil ({px:.2f}, {py:.2f}): {e}")
+                            ray_result["failure_mode"] = "EXCEPTION"
 
-                    raw_rays.append(ray_result)
-
-        ray_trace_elapsed_ms = (time.perf_counter() - ray_trace_start) * 1000
-        log_timing(logger, "ray_trace_all", ray_trace_elapsed_ms)
+                        raw_rays.append(ray_result)
+        finally:
+            ray_trace_elapsed_ms = (time.perf_counter() - ray_trace_start) * 1000
+            log_timing(logger, "ray_trace_all", ray_trace_elapsed_ms)
 
         return {
             "paraxial": {
@@ -717,7 +762,12 @@ class ZosPyHandler:
                 field=1,
                 surface="Image",
             )
-            result = zernike_analysis.run(self.oss)
+            zernike_start = time.perf_counter()
+            try:
+                result = zernike_analysis.run(self.oss)
+            finally:
+                zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
+                log_timing(logger, "ZernikeStandardCoefficients.run (seidel)", zernike_elapsed_ms)
 
             # Extract coefficients from result
             if not hasattr(result, 'data') or result.data is None:
@@ -819,9 +869,11 @@ class ZosPyHandler:
                 settings_first=True
             )
             seidel_start = time.perf_counter()
-            analysis.ApplyAndWaitForCompletion()
-            seidel_elapsed_ms = (time.perf_counter() - seidel_start) * 1000
-            log_timing(logger, "SeidelCoefficients.ApplyAndWaitForCompletion", seidel_elapsed_ms)
+            try:
+                analysis.ApplyAndWaitForCompletion()
+            finally:
+                seidel_elapsed_ms = (time.perf_counter() - seidel_start) * 1000
+                log_timing(logger, "SeidelCoefficients.ApplyAndWaitForCompletion", seidel_elapsed_ms)
 
             # Check for error messages in analysis results
             error_msg = self._check_analysis_errors(analysis)
@@ -1217,9 +1269,10 @@ class ZosPyHandler:
                             if hasattr(df, 'iloc'):
                                 for si in range(min(len(df), num_surfaces)):
                                     row = df.iloc[si]
-                                    # Column names may be 'Y' or 'y' depending on version
-                                    y_val = row.get('Y', row.get('y', None))
-                                    z_val = row.get('Z', row.get('z', None))
+                                    # ZosPy 2.1.4 uses 'Y-coordinate', 'Z-coordinate' column names
+                                    # Use _get_column_value helper for safe access
+                                    y_val = _get_column_value(row, ['Y-coordinate', 'Y', 'y'])
+                                    z_val = _get_column_value(row, ['Z-coordinate', 'Z', 'z'])
                                     surfaces_data[si]["y"].append(y_val)
                                     surfaces_data[si]["z"].append(z_val)
                             else:
@@ -1295,14 +1348,17 @@ class ZosPyHandler:
                 return {"success": False, "error": f"Field index {field_index} out of range (max: {fields.NumberOfFields})"}
 
             field = fields.GetField(field_index)
-            field_x, field_y = field.X, field.Y
+            # Use _extract_value for UnitField objects
+            field_x = _extract_value(field.X)
+            field_y = _extract_value(field.Y)
 
             # Get wavelength for response
             wavelengths = self.oss.SystemData.Wavelengths
             if wavelength_index > wavelengths.NumberOfWavelengths:
                 return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
 
-            wavelength_um = wavelengths.GetWavelength(wavelength_index).Wavelength
+            # Use _extract_value for UnitField objects
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
 
             # Get wavefront metrics using ZernikeStandardCoefficients
             # This gives us RMS, P-V, and Strehl ratio
@@ -1320,9 +1376,11 @@ class ZosPyHandler:
                     surface="Image",
                 )
                 zernike_start = time.perf_counter()
-                zernike_result = zernike_analysis.run(self.oss)
-                zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
-                log_timing(logger, "ZernikeStandardCoefficients.run", zernike_elapsed_ms)
+                try:
+                    zernike_result = zernike_analysis.run(self.oss)
+                finally:
+                    zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
+                    log_timing(logger, "ZernikeStandardCoefficients.run", zernike_elapsed_ms)
 
                 if hasattr(zernike_result, 'data') and zernike_result.data is not None:
                     zdata = zernike_result.data
@@ -1359,21 +1417,23 @@ class ZosPyHandler:
 
             try:
                 wfm_start = time.perf_counter()
-                wavefront_map = zp.analyses.wavefront.WavefrontMap(
-                    sampling=sampling,
-                    wavelength=wavelength_index,
-                    field=field_index,
-                    surface="Image",
-                    show_as="Surface",
-                    rotation="Rotate_0",
-                    scale=1,
-                    polarization=None,
-                    reference_to_primary=False,
-                    remove_tilt=False,
-                    use_exit_pupil=True,
-                ).run(self.oss, oncomplete="Release")
-                wfm_elapsed_ms = (time.perf_counter() - wfm_start) * 1000
-                log_timing(logger, "WavefrontMap.run", wfm_elapsed_ms)
+                try:
+                    wavefront_map = zp.analyses.wavefront.WavefrontMap(
+                        sampling=sampling,
+                        wavelength=wavelength_index,
+                        field=field_index,
+                        surface="Image",
+                        show_as="Surface",
+                        rotation="Rotate_0",
+                        scale=1,
+                        polarization=None,
+                        reference_to_primary=False,
+                        remove_tilt=False,
+                        use_exit_pupil=True,
+                    ).run(self.oss, oncomplete="Release")
+                finally:
+                    wfm_elapsed_ms = (time.perf_counter() - wfm_start) * 1000
+                    log_timing(logger, "WavefrontMap.run", wfm_elapsed_ms)
 
                 if hasattr(wavefront_map, 'data') and wavefront_map.data is not None:
                     # Convert DataFrame or array to numpy
@@ -1494,9 +1554,11 @@ class ZosPyHandler:
             # Configure and run the analysis
             self._configure_spot_analysis(analysis.Settings, ray_density, reference_code)
             spot_start = time.perf_counter()
-            analysis.ApplyAndWaitForCompletion()
-            spot_elapsed_ms = (time.perf_counter() - spot_start) * 1000
-            log_timing(logger, "StandardSpot.ApplyAndWaitForCompletion", spot_elapsed_ms)
+            try:
+                analysis.ApplyAndWaitForCompletion()
+            finally:
+                spot_elapsed_ms = (time.perf_counter() - spot_start) * 1000
+                log_timing(logger, "StandardSpot.ApplyAndWaitForCompletion", spot_elapsed_ms)
 
             # Try to export image to PNG
             image_b64, image_format = self._export_analysis_image(analysis, temp_path)
@@ -1643,7 +1705,8 @@ class ZosPyHandler:
         try:
             for fi in range(num_fields):
                 field = fields.GetField(fi + 1)  # 1-indexed
-                field_data = self._create_field_spot_data(fi, field.X, field.Y)
+                # Use _extract_value for UnitField objects
+                field_data = self._create_field_spot_data(fi, _extract_value(field.X), _extract_value(field.Y))
 
                 # Try to get spot data for this field
                 self._populate_spot_data_from_results(results, fi, field_data)
@@ -1769,7 +1832,9 @@ class ZosPyHandler:
 
         for fi in range(1, num_fields + 1):
             field = fields.GetField(fi)
-            field_x, field_y = field.X, field.Y
+            # Use _extract_value for UnitField objects
+            field_x = _extract_value(field.X)
+            field_y = _extract_value(field.Y)
 
             ray_x_positions = []
             ray_y_positions = []
@@ -1800,12 +1865,12 @@ class ZosPyHandler:
                                 if hasattr(df, 'iloc') and len(df) > 0:
                                     # Get last row (image surface)
                                     last_row = df.iloc[-1]
-                                    # Check if ray reached image (no error)
-                                    error_code = last_row.get('error_code', 0) if hasattr(last_row, 'get') else 0
-                                    if error_code == 0:
-                                        x_val = last_row.get('X', last_row.get('x', None))
-                                        y_val = last_row.get('Y', last_row.get('y', None))
-                                        if x_val is not None and y_val is not None:
+                                    # ZosPy 2.1.4 uses 'X-coordinate', 'Y-coordinate' column names
+                                    # No error_code column in ZosPy 2.x - assume ray reached if we have data
+                                    # Use _get_column_value helper for safe access
+                                    x_val = _get_column_value(last_row, ['X-coordinate', 'X', 'x'])
+                                    y_val = _get_column_value(last_row, ['Y-coordinate', 'Y', 'y'])
+                                    if x_val is not None and y_val is not None:
                                             ray_x_positions.append(float(x_val))
                                             ray_y_positions.append(float(y_val))
                                             # Capture chief ray position (ray at pupil center px=0, py=0)
@@ -1915,13 +1980,21 @@ class ZosPyHandler:
         """
         try:
             aperture = self.oss.SystemData.Aperture
-            aperture_type = str(aperture.ApertureType).split(".")[-1] if aperture.ApertureType else ""
+            # Handle enum ApertureType - try .name first, then string split
+            aperture_type = ""
+            if aperture.ApertureType:
+                if hasattr(aperture.ApertureType, 'name'):
+                    aperture_type = aperture.ApertureType.name
+                else:
+                    aperture_type = str(aperture.ApertureType).split(".")[-1]
 
             if aperture_type in FNO_APERTURE_TYPES:
-                return aperture.ApertureValue
+                # Use _extract_value for UnitField objects
+                return _extract_value(aperture.ApertureValue)
 
             # Calculate from EPD and EFL
-            epd = aperture.ApertureValue
+            # Use _extract_value for UnitField objects
+            epd = _extract_value(aperture.ApertureValue)
             efl = self._get_efl()
             if epd and efl and epd > 0:
                 return efl / epd
