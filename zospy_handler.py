@@ -11,9 +11,12 @@ because ZosPy/COM requires single-threaded apartment (STA) semantics.
 """
 
 import base64
-import io
 import logging
+import os
+import tempfile
 from typing import Any, Optional
+
+import numpy as np
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -28,7 +31,56 @@ except ImportError:
     zp = None
     OpticStudioSystem = None
 
-import numpy as np
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+# Index Convention Notes:
+# -----------------------
+# OpticStudio/ZosPy uses 1-based indexing internally for surfaces, fields, wavelengths:
+#   - LDE.GetSurfaceAt(1) returns the first optical surface (after object surface 0)
+#   - Fields.GetField(1) returns the first field
+#   - Wavelengths.GetWavelength(1) returns the first wavelength
+#   - SingleRayTrace(field=1, wavelength=1) uses 1-based indices
+#
+# API Response Convention:
+#   - Surface indices in responses are CONVERTED to 0-based for consistency with
+#     the LLM JSON schema (surfaces[0] is the first surface after object)
+#   - Field indices in responses are 0-based (field_index=0 is first field)
+#   - Wavelength indices in responses are 0-based
+#
+# When calling ZosPy/OpticStudio methods, always use 1-based indices.
+# When returning data in API responses, convert to 0-based indices.
+
+# Analysis settings
+DEFAULT_SAMPLING = "64x64"
+DEFAULT_MAX_ZERNIKE_TERM = 37
+DEFAULT_NUM_CROSS_SECTION_RAYS = 11
+
+# Image export settings
+CROSS_SECTION_IMAGE_SIZE = (1200, 800)
+CROSS_SECTION_TEMP_FILENAME = "zemax_cross_section.png"
+SEIDEL_TEMP_FILENAME = "seidel_native.txt"
+SPOT_DIAGRAM_TEMP_FILENAME = "zemax_spot_diagram.png"
+
+# OpticStudio version requirements
+MIN_IMAGE_EXPORT_VERSION = (24, 1, 0)
+
+# Seidel coefficient keys (in order)
+SEIDEL_COEFFICIENT_KEYS = ["S1", "S2", "S3", "S4", "S5", "CLA", "CTR"]
+
+# Ray trace error codes
+RAY_ERROR_CODES = {
+    0: "OK",
+    1: "MISS",
+    2: "TIR",
+    3: "REVERSED",
+    4: "VIGNETTE",
+}
+
+# F/# aperture types
+FNO_APERTURE_TYPES = ["ImageSpaceFNumber", "FloatByStopSize", "ParaxialWorkingFNumber"]
 
 
 class ZosPyHandler:
@@ -155,24 +207,17 @@ class ZosPyHandler:
         """
         Get first-order (paraxial) optical properties.
 
-        Delegates to _get_paraxial_from_lde() and adds F/# if available
-        from the system aperture type.
+        Delegates to _get_paraxial_from_lde() and adds F/# if available.
 
         Returns:
             Dict with paraxial properties (epd, max_field, total_track, fno, etc.)
         """
         paraxial = self._get_paraxial_from_lde()
 
-        # Try to add F/# from aperture settings
-        try:
-            aperture = self.oss.SystemData.Aperture
-            aperture_type = aperture.ApertureType
-            fno_types = ["ImageSpaceFNumber", "FloatByStopSize", "ParaxialWorkingFNumber"]
-            aperture_type_name = str(aperture_type).split(".")[-1] if aperture_type else ""
-            if aperture_type_name in fno_types:
-                paraxial["fno"] = aperture.ApertureValue
-        except Exception as e:
-            logger.warning(f"Could not get F/# from aperture: {e}")
+        # Add F/# if available
+        fno = self._get_fno()
+        if fno is not None:
+            paraxial["fno"] = fno
 
         return paraxial
 
@@ -225,7 +270,7 @@ class ZosPyHandler:
             logger.debug(f"ZosPy zos.version = {zos_version}")
             logger.debug(f"ZosPy version = {zp.__version__ if hasattr(zp, '__version__') else 'unknown'}")
 
-            if zos_version and zos_version < (24, 1, 0):
+            if zos_version and zos_version < MIN_IMAGE_EXPORT_VERSION:
                 logger.warning(f"OpticStudio {zos_version} < 24.1.0 - image export not supported, using fallback")
             else:
                 # Use ZosPy's CrossSection wrapper with image_output_file parameter
@@ -233,7 +278,7 @@ class ZosPyHandler:
                 import tempfile
                 import os
 
-                temp_path = os.path.join(tempfile.gettempdir(), "zemax_cross_section.png")
+                temp_path = os.path.join(tempfile.gettempdir(), CROSS_SECTION_TEMP_FILENAME)
                 logger.debug(f"Trying ZosPy CrossSection with image_output_file={temp_path}")
 
                 try:
@@ -249,14 +294,14 @@ class ZosPyHandler:
                         logger.warning(f"CrossSection: Could not get system diagnostics: {diag_e}")
 
                     cross_section = CrossSection(
-                        number_of_rays=11,
+                        number_of_rays=DEFAULT_NUM_CROSS_SECTION_RAYS,
                         field="All",
                         wavelength="All",
                         color_rays_by="Fields",
                         delete_vignetted=True,
                         surface_line_thickness="Thick",  # Required to show lens surfaces
                         rays_line_thickness="Standard",
-                        image_size=(1200, 800),
+                        image_size=CROSS_SECTION_IMAGE_SIZE,
                     )
 
                     # Run with image_output_file to save to disk
@@ -327,7 +372,7 @@ class ZosPyHandler:
 
         # Count rays
         num_fields = self.oss.SystemData.Fields.NumberOfFields
-        rays_total = 11 * max(1, num_fields)
+        rays_total = DEFAULT_NUM_CROSS_SECTION_RAYS * max(1, num_fields)
         rays_through = rays_total  # Assume success
 
         return {
@@ -472,6 +517,14 @@ class ZosPyHandler:
                 - raw_rays: List of per-ray results with field, pupil coords, success/failure info
                 - surface_semi_diameters: List of semi-diameters from LDE
         """
+        # Note: 'distribution' parameter is accepted for API compatibility but only square grid
+        # is currently implemented. Log warning if hexapolar is requested.
+        if distribution != "square" and distribution != "grid":
+            logger.warning(
+                f"Distribution '{distribution}' requested but only square grid is implemented. "
+                "Using square grid instead."
+            )
+
         # Get paraxial data
         paraxial = self.get_paraxial_data()
 
@@ -517,11 +570,12 @@ class ZosPyHandler:
                     try:
                         # ZosPy SingleRayTrace: px/py are normalized pupil coordinates (-1 to 1)
                         # hx/hy are normalized field coordinates (set to 0 when using field index)
+                        # CRITICAL: px/py must be Python float(), not numpy.float64, for COM interop
                         ray_trace = zp.analyses.raysandspots.SingleRayTrace(
                             hx=0.0,
                             hy=0.0,
-                            px=px,
-                            py=py,
+                            px=float(px),
+                            py=float(py),
                             wavelength=1,
                             field=fi,
                         )
@@ -596,14 +650,7 @@ class ZosPyHandler:
         Returns:
             String describing the failure mode
         """
-        error_map = {
-            0: "OK",
-            1: "MISS",
-            2: "TIR",
-            3: "REVERSED",
-            4: "VIGNETTE",
-        }
-        return error_map.get(error_code, f"ERROR_{error_code}")
+        return RAY_ERROR_CODES.get(error_code, f"ERROR_{error_code}")
 
     def get_seidel(self) -> dict[str, Any]:
         """
@@ -622,8 +669,8 @@ class ZosPyHandler:
         # Try ZosPy Zernike analysis
         try:
             zernike_analysis = zp.analyses.wavefront.ZernikeStandardCoefficients(
-                sampling='64x64',
-                maximum_term=37,
+                sampling=DEFAULT_SAMPLING,
+                maximum_term=DEFAULT_MAX_ZERNIKE_TERM,
                 wavelength=1,
                 field=1,
                 surface="Image",
@@ -649,7 +696,7 @@ class ZosPyHandler:
                 int_keys = [int(k) for k in raw_coeffs.keys()]
                 max_term = max(int_keys) if int_keys else 0
 
-                for i in range(1, min(max_term + 1, 38)):
+                for i in range(1, min(max_term + 1, DEFAULT_MAX_ZERNIKE_TERM + 1)):
                     coeff = raw_coeffs.get(i) or raw_coeffs.get(str(i))
                     if coeff is not None:
                         if hasattr(coeff, 'value'):
@@ -684,6 +731,370 @@ class ZosPyHandler:
 
         except Exception as e:
             return {"success": False, "error": f"ZosPy analysis failed: {e}"}
+
+    def get_seidel_native(self) -> dict[str, Any]:
+        """
+        Get native Seidel coefficients using OpticStudio's SeidelCoefficients analysis.
+
+        This is a "dumb executor" - returns raw per-surface data only.
+        Uses GetTextFile() to extract full Seidel data including:
+        - Per-surface S1-S5 coefficients
+        - Per-surface chromatic: CLA (axial), CTR (transverse)
+        - Header data: Petzval radius, wavelength, optical invariant
+
+        Note: System must be pre-loaded via load_zmx_file().
+
+        Returns:
+            On success: {
+                "success": True,
+                "per_surface": [
+                    {"surface": 1, "S1": float, "S2": float, "S3": float,
+                     "S4": float, "S5": float, "CLA": float, "CTR": float},
+                    ...
+                ],
+                "totals": {"S1": float, "S2": float, "S3": float,
+                           "S4": float, "S5": float, "CLA": float, "CTR": float},
+                "header": {
+                    "petzval_radius": float,
+                    "wavelength_um": float,
+                    "optical_invariant": float,
+                },
+                "num_surfaces": int,
+            }
+            On error: {"success": False, "error": "..."}
+        """
+        analysis = None
+        temp_path = os.path.join(tempfile.gettempdir(), SEIDEL_TEMP_FILENAME)
+
+        try:
+            idm = zp.constants.Analysis.AnalysisIDM
+
+            # Create and run SeidelCoefficients analysis
+            analysis = zp.analyses.new_analysis(
+                self.oss,
+                idm.SeidelCoefficients,
+                settings_first=True
+            )
+            analysis.ApplyAndWaitForCompletion()
+
+            # Check for error messages in analysis results
+            error_msg = self._check_analysis_errors(analysis)
+            if error_msg:
+                return {"success": False, "error": error_msg}
+
+            # Export to text file and parse
+            analysis.Results.GetTextFile(temp_path)
+
+            if not os.path.exists(temp_path):
+                return {"success": False, "error": "GetTextFile did not create output file"}
+
+            text_content = self._read_opticstudio_text_file(temp_path)
+            if not text_content:
+                return {"success": False, "error": "Seidel text output is empty"}
+
+            # Parse the text content
+            parsed = self._parse_seidel_text(text_content)
+
+            per_surface = parsed.get("per_surface", [])
+            totals = parsed.get("totals", {})
+
+            # Validate that we actually got data - empty results indicate analysis failure
+            if not per_surface and not totals:
+                logger.warning("Seidel text file parsed but no coefficient data found")
+                logger.debug(f"Text content preview: {text_content[:500]}")
+                return {
+                    "success": False,
+                    "error": "Seidel analysis produced no coefficient data (system may be invalid or have no optical power)"
+                }
+
+            # Also check if totals are all zeros (another sign of failure)
+            if totals and all(abs(totals.get(key, 0.0)) < 1e-15 for key in SEIDEL_COEFFICIENT_KEYS[:5]):
+                logger.warning("Seidel totals are all zeros - likely invalid system")
+
+            return {
+                "success": True,
+                "per_surface": per_surface,
+                "totals": totals,
+                "header": parsed.get("header", {}),
+                "num_surfaces": len(per_surface),
+            }
+
+        except Exception as e:
+            return {"success": False, "error": f"SeidelCoefficients analysis failed: {e}"}
+        finally:
+            self._cleanup_analysis(analysis, temp_path)
+
+    def _check_analysis_errors(self, analysis: Any) -> Optional[str]:
+        """
+        Check if an OpticStudio analysis has error messages.
+
+        Args:
+            analysis: OpticStudio analysis object
+
+        Returns:
+            Error message string if errors found, None otherwise
+        """
+        if hasattr(analysis, 'messages') and analysis.messages:
+            for msg in analysis.messages:
+                if hasattr(msg, 'Message') and 'cannot' in str(msg.Message).lower():
+                    return str(msg.Message)
+        return None
+
+    def _read_opticstudio_text_file(self, file_path: str) -> str:
+        """
+        Read a text file exported by OpticStudio.
+
+        OpticStudio exports text files in UTF-16 encoding.
+
+        Args:
+            file_path: Path to the text file
+
+        Returns:
+            File content as string, or empty string if read fails
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-16') as f:
+                return f.read().strip()
+        except Exception as e:
+            logger.warning(f"Failed to read OpticStudio text file: {e}")
+            return ""
+
+    def _cleanup_analysis(self, analysis: Any, temp_path: Optional[str] = None) -> None:
+        """
+        Clean up an OpticStudio analysis and its temporary files.
+
+        Args:
+            analysis: OpticStudio analysis object to close
+            temp_path: Optional temp file path to delete
+        """
+        if analysis is not None:
+            try:
+                analysis.Close()
+            except Exception as e:
+                logger.warning(f"Failed to close analysis: {e}")
+
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError as e:
+                logger.warning(f"Failed to remove temp file {temp_path}: {e}")
+
+    def _parse_seidel_text(self, text: str) -> dict[str, Any]:
+        """
+        Parse Seidel text output from OpticStudio's SeidelCoefficients analysis.
+
+        Expected format (from GetTextFile):
+            Listing of Aberration Coefficient Data
+            ...
+            Wavelength                      :               0.5876 µm
+            Petzval radius                  :            -623.2905
+            Optical Invariant               :               4.1551
+            ...
+            Seidel Aberration Coefficients:
+
+            Surf     SPHA  S1    COMA  S2    ASTI  S3    FCUR  S4    DIST  S5    CLA    CTR
+              1      0.114175   -0.008176   0.000586   0.120467   -0.008669   -0.034   0.002
+              2      0.000396   -0.005093   0.065502  -0.042772   -0.292349   -0.002   0.029
+            ...
+            Sum      0.xxxxx    ...
+
+        Args:
+            text: Raw text from GetTextFile()
+
+        Returns:
+            Dict with keys: header, per_surface, totals
+        """
+        lines = text.strip().split('\n')
+
+        header: dict[str, Any] = {}
+        per_surface: list[dict[str, Any]] = []
+        totals: dict[str, float] = {}
+        in_table = False
+
+        for line in lines:
+            line_stripped = line.strip()
+            if not line_stripped:
+                continue
+
+            # Parse header values (lines with colon before table)
+            if ':' in line_stripped and not in_table:
+                self._parse_header_line(line_stripped, header)
+
+            # Detect table header row (contains SPHA or both S1 and S2)
+            if 'SPHA' in line_stripped or ('S1' in line_stripped and 'S2' in line_stripped):
+                in_table = True
+                continue
+
+            # Parse data rows
+            if in_table:
+                self._parse_seidel_data_row(line_stripped, per_surface, totals)
+
+        return {
+            "header": header,
+            "per_surface": per_surface,
+            "totals": totals,
+        }
+
+    def _parse_header_line(self, line: str, header: dict[str, Any]) -> None:
+        """
+        Parse a header line from Seidel text output.
+
+        Args:
+            line: Line containing key: value format
+            header: Dict to update with parsed value
+        """
+        parts = line.split(':', 1)
+        if len(parts) != 2:
+            return
+
+        key = parts[0].strip().lower().replace(' ', '_')
+        value = parts[1].strip()
+
+        # Try to extract numeric value (handle units like "0.5876 µm")
+        try:
+            numeric_part = value.split()[0] if value else ''
+            header[key] = float(numeric_part)
+        except (ValueError, IndexError):
+            header[key] = value
+
+    def _parse_seidel_data_row(
+        self,
+        line: str,
+        per_surface: list[dict[str, Any]],
+        totals: dict[str, float],
+    ) -> None:
+        """
+        Parse a data row from Seidel coefficient table.
+
+        Args:
+            line: Line from the Seidel table
+            per_surface: List to append surface data to
+            totals: Dict to update with totals row
+        """
+        parts = line.split()
+        if not parts:
+            return
+
+        first_part = parts[0]
+        values = self._extract_floats(parts[1:])
+
+        if first_part.isdigit() or first_part.upper() == 'STO':
+            # Surface data row - handle both numeric surface numbers and "STO" (aperture stop)
+            # STO is typically the aperture stop surface; we use surface number 0 as a marker
+            surface_num = int(first_part) if first_part.isdigit() else 0
+            surface_data = self._build_seidel_coefficients(surface_num, values)
+            per_surface.append(surface_data)
+        elif first_part.lower() == 'sum':
+            # Totals row
+            totals.update(self._build_seidel_totals(values))
+
+    def _extract_floats(self, parts: list[str]) -> list[float]:
+        """
+        Extract float values from string parts, skipping non-numeric values.
+
+        Args:
+            parts: List of string parts to parse
+
+        Returns:
+            List of successfully parsed float values
+        """
+        values: list[float] = []
+        for p in parts:
+            try:
+                values.append(float(p))
+            except ValueError:
+                continue
+        return values
+
+    def _build_seidel_coefficients(self, surface_num: int, values: list[float]) -> dict[str, Any]:
+        """
+        Build a per-surface Seidel coefficient dict.
+
+        OpticStudio Seidel text output has paired columns:
+        - 12 values: SPHA, S1, COMA, S2, ASTI, S3, FCUR, S4, DIST, S5, CLA, CTR
+          Paired values are duplicates, so extract indices 1, 3, 5, 7, 9, 10, 11
+        - 10 values: SPHA, S1, COMA, S2, ASTI, S3, FCUR, S4, DIST, S5 (no chromatic)
+          Extract indices 1, 3, 5, 7, 9
+        - 7 values: S1, S2, S3, S4, S5, CLA, CTR (already unpaired)
+          Use directly
+
+        Args:
+            surface_num: Surface number (1-indexed)
+            values: List of coefficient values from the text row
+
+        Returns:
+            Dict with surface number and coefficient keys
+        """
+        surface_data: dict[str, Any] = {"surface": surface_num}
+        num_values = len(values)
+
+        if num_values >= 12:
+            # Paired format with chromatic: SPHA, S1, COMA, S2, ASTI, S3, FCUR, S4, DIST, S5, CLA, CTR
+            # S1=values[1], S2=values[3], S3=values[5], S4=values[7], S5=values[9], CLA=values[10], CTR=values[11]
+            extracted = [values[1], values[3], values[5], values[7], values[9], values[10], values[11]]
+            logger.debug(f"Surface {surface_num}: 12+ values, extracted paired format: {extracted[:5]}")
+        elif num_values >= 10:
+            # Paired format without chromatic: SPHA, S1, COMA, S2, ASTI, S3, FCUR, S4, DIST, S5
+            # S1=values[1], S2=values[3], S3=values[5], S4=values[7], S5=values[9]
+            extracted = [values[1], values[3], values[5], values[7], values[9], 0.0, 0.0]
+            logger.debug(f"Surface {surface_num}: 10-11 values, extracted paired format: {extracted[:5]}")
+        elif num_values >= 7:
+            # Already unpaired format: S1, S2, S3, S4, S5, CLA, CTR
+            extracted = values[:7]
+            logger.debug(f"Surface {surface_num}: 7-9 values, using direct format: {extracted[:5]}")
+        elif num_values >= 5:
+            # Minimal format: S1, S2, S3, S4, S5
+            extracted = values[:5] + [0.0, 0.0]
+            logger.debug(f"Surface {surface_num}: 5-6 values, using minimal format: {extracted[:5]}")
+        else:
+            # Insufficient data
+            logger.warning(f"Surface {surface_num}: Only {num_values} values, padding with zeros")
+            extracted = values + [0.0] * (7 - num_values)
+
+        for i, key in enumerate(SEIDEL_COEFFICIENT_KEYS):
+            surface_data[key] = extracted[i] if i < len(extracted) else 0.0
+
+        return surface_data
+
+    def _build_seidel_totals(self, values: list[float]) -> dict[str, float]:
+        """
+        Build a Seidel totals dict.
+
+        Uses same extraction logic as _build_seidel_coefficients to handle
+        paired column format from OpticStudio.
+
+        Args:
+            values: List of total values from the Sum row
+
+        Returns:
+            Dict with coefficient keys and total values
+        """
+        num_values = len(values)
+
+        if num_values >= 12:
+            # Paired format with chromatic
+            extracted = [values[1], values[3], values[5], values[7], values[9], values[10], values[11]]
+            logger.debug(f"Totals: 12+ values, extracted paired format: {extracted[:5]}")
+        elif num_values >= 10:
+            # Paired format without chromatic
+            extracted = [values[1], values[3], values[5], values[7], values[9], 0.0, 0.0]
+            logger.debug(f"Totals: 10-11 values, extracted paired format: {extracted[:5]}")
+        elif num_values >= 7:
+            # Already unpaired format
+            extracted = values[:7]
+            logger.debug(f"Totals: 7-9 values, using direct format: {extracted[:5]}")
+        elif num_values >= 5:
+            # Minimal format
+            extracted = values[:5] + [0.0, 0.0]
+            logger.debug(f"Totals: 5-6 values, using minimal format: {extracted[:5]}")
+        else:
+            logger.warning(f"Totals: Only {num_values} values, padding with zeros")
+            extracted = values + [0.0] * (7 - num_values)
+
+        totals: dict[str, float] = {}
+        for i, key in enumerate(SEIDEL_COEFFICIENT_KEYS):
+            totals[key] = extracted[i] if i < len(extracted) else 0.0
+        return totals
 
     def trace_rays(
         self,
@@ -721,11 +1132,12 @@ class ZosPyHandler:
                     try:
                         # ZosPy SingleRayTrace: px/py are normalized pupil coordinates (-1 to 1)
                         # hx/hy are normalized field coordinates (not used when field index specified)
+                        # CRITICAL: py must be Python float(), not numpy.float64, for COM interop
                         ray_trace = zp.analyses.raysandspots.SingleRayTrace(
                             hx=0.0,
                             hy=0.0,
                             px=0.0,  # Meridional fan (x=0)
-                            py=py,   # Iterate over pupil Y
+                            py=float(py),   # Iterate over pupil Y - must be float() for COM
                             wavelength=wi,
                             field=fi,
                         )
@@ -984,15 +1396,14 @@ class ZosPyHandler:
             }
             On error: {"success": False, "error": "..."}
         """
-        import tempfile
-        import os
-
-        image_b64 = None
-        image_format = None
-        array_shape = None
-        array_dtype = None
-        spot_data = []
-        airy_radius = None
+        image_b64: Optional[str] = None
+        image_format: Optional[str] = None
+        array_shape: Optional[list[int]] = None
+        array_dtype: Optional[str] = None
+        spot_data: list[dict[str, Any]] = []
+        airy_radius: Optional[float] = None
+        analysis = None
+        temp_path = os.path.join(tempfile.gettempdir(), SPOT_DIAGRAM_TEMP_FILENAME)
 
         # Get field info
         fields = self.oss.SystemData.Fields
@@ -1001,153 +1412,33 @@ class ZosPyHandler:
         if num_fields == 0:
             return {"success": False, "error": "System has no fields defined"}
 
-        # Map reference parameter to OpticStudio constant
-        # Reference: 0 = Chief Ray, 1 = Centroid
+        # Map reference parameter to OpticStudio constant (0 = Chief Ray, 1 = Centroid)
         reference_code = 0 if reference == "chief_ray" else 1
 
         try:
             # Use ZosPy's new_analysis to access StandardSpot directly
-            # AnalysisIDM.StandardSpot = Standard Spot Diagram
             analysis = zp.analyses.new_analysis(
                 self.oss,
                 zp.constants.Analysis.AnalysisIDM.StandardSpot,
                 settings_first=True,
             )
 
-            # Configure the analysis settings
-            settings = analysis.Settings
-
-            # Set ray density (number of rays)
-            # Map ray_density (1-20) to OpticStudio's ray density setting
-            # OpticStudio uses ray density values like 1, 2, 3, etc.
-            if hasattr(settings, 'RayDensity'):
-                settings.RayDensity = ray_density
-            elif hasattr(settings, 'NumberOfRays'):
-                settings.NumberOfRays = ray_density
-
-            # Set reference to chief ray or centroid
-            if hasattr(settings, 'ReferenceType'):
-                settings.ReferenceType = reference_code
-            elif hasattr(settings, 'Reference'):
-                settings.Reference = reference_code
-
-            # Set to show all fields and wavelengths
-            if hasattr(settings, 'Field'):
-                # Try to set to "All" or iterate through fields
-                try:
-                    settings.Field.UseAllFields()
-                except Exception:
-                    pass
-
-            if hasattr(settings, 'Wavelength'):
-                try:
-                    settings.Wavelength.UseAllWavelengths()
-                except Exception:
-                    pass
-
-            # Run the analysis
+            # Configure and run the analysis
+            self._configure_spot_analysis(analysis.Settings, ray_density, reference_code)
             analysis.ApplyAndWaitForCompletion()
 
             # Try to export image to PNG
-            temp_path = os.path.join(tempfile.gettempdir(), "zemax_spot_diagram.png")
-            try:
-                if hasattr(analysis, 'ExportGraphicAs'):
-                    analysis.ExportGraphicAs(temp_path)
-                elif hasattr(analysis, 'Results') and hasattr(analysis.Results, 'ExportData'):
-                    analysis.Results.ExportData(temp_path)
+            image_b64, image_format = self._export_analysis_image(analysis, temp_path)
 
-                if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
-                    with open(temp_path, 'rb') as f:
-                        image_b64 = base64.b64encode(f.read()).decode('utf-8')
-                    image_format = "png"
-                    logger.info(f"Exported spot diagram PNG, size={len(image_b64)}")
-            except Exception as e:
-                logger.warning(f"Spot diagram PNG export failed: {e}")
-            finally:
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
-
-            # Extract spot data from the analysis results
-            results = analysis.Results
-            if results is not None:
-                # Try to get data grid for spot positions
-                try:
-                    # Get Airy radius if available
-                    if hasattr(results, 'AiryRadius'):
-                        airy_radius = float(results.AiryRadius)
-                    elif hasattr(results, 'GetAiryDiskRadius'):
-                        airy_radius = float(results.GetAiryDiskRadius())
-
-                    # Get per-field spot data
-                    # OpticStudio's StandardSpot provides data per field
-                    for fi in range(num_fields):
-                        field = fields.GetField(fi + 1)  # 1-indexed
-                        field_x, field_y = field.X, field.Y
-
-                        field_data = {
-                            "field_index": fi,
-                            "field_x": field_x,
-                            "field_y": field_y,
-                            "rms_radius": None,
-                            "geo_radius": None,
-                            "centroid_x": None,
-                            "centroid_y": None,
-                            "num_rays": None,
-                        }
-
-                        # Try to get spot data for this field
-                        try:
-                            if hasattr(results, 'GetDataSeries'):
-                                # Data series might have RMS, GEO for each field
-                                series = results.GetDataSeries(fi)
-                                if series:
-                                    if hasattr(series, 'RMS'):
-                                        field_data["rms_radius"] = float(series.RMS)
-                                    if hasattr(series, 'GEO'):
-                                        field_data["geo_radius"] = float(series.GEO)
-
-                            # Alternative: GetDataGrid approach
-                            if hasattr(results, 'GetDataGrid'):
-                                grid = results.GetDataGrid(fi)
-                                if grid is not None:
-                                    # Grid contains x, y ray positions
-                                    # Calculate RMS and GEO from ray positions
-                                    pass
-
-                            # Try direct attributes
-                            if hasattr(results, 'SpotData'):
-                                spot_info = results.SpotData
-                                if hasattr(spot_info, 'GetSpotDataAtField'):
-                                    fd = spot_info.GetSpotDataAtField(fi + 1)
-                                    if fd:
-                                        if hasattr(fd, 'RMSSpotRadius'):
-                                            field_data["rms_radius"] = float(fd.RMSSpotRadius)
-                                        if hasattr(fd, 'GEOSpotRadius'):
-                                            field_data["geo_radius"] = float(fd.GEOSpotRadius)
-                                        if hasattr(fd, 'CentroidX'):
-                                            field_data["centroid_x"] = float(fd.CentroidX)
-                                        if hasattr(fd, 'CentroidY'):
-                                            field_data["centroid_y"] = float(fd.CentroidY)
-                                        if hasattr(fd, 'NumberOfRays'):
-                                            field_data["num_rays"] = int(fd.NumberOfRays)
-
-                        except Exception as e:
-                            logger.debug(f"Could not get spot data for field {fi}: {e}")
-
-                        spot_data.append(field_data)
-
-                except Exception as e:
-                    logger.warning(f"Could not extract spot data from results: {e}")
-
-            # Close the analysis
-            analysis.Close()
+            # Extract spot data and airy radius from results
+            if analysis.Results is not None:
+                airy_radius = self._extract_airy_radius(analysis.Results)
+                spot_data = self._extract_spot_data_from_results(analysis.Results, fields, num_fields)
 
         except Exception as e:
             logger.warning(f"StandardSpot analysis failed: {e}, falling back to manual ray trace")
-            # Fall through to manual ray trace fallback
+        finally:
+            self._cleanup_analysis(analysis, temp_path)
 
         # If we couldn't get spot data from StandardSpot, compute manually via ray trace
         if not spot_data or all(sd.get("rms_radius") is None for sd in spot_data):
@@ -1156,16 +1447,9 @@ class ZosPyHandler:
 
         # If we still don't have an image, create numpy array from ray positions
         if image_b64 is None and spot_data:
-            try:
-                arr = self._create_spot_diagram_array(spot_data, ray_density)
-                if arr is not None:
-                    image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
-                    image_format = "numpy_array"
-                    array_shape = list(arr.shape)
-                    array_dtype = str(arr.dtype)
-                    logger.info(f"Created spot diagram numpy array, shape={arr.shape}")
-            except Exception as e:
-                logger.warning(f"Could not create spot diagram array: {e}")
+            image_b64, image_format, array_shape, array_dtype = self._create_spot_array_fallback(
+                spot_data, ray_density
+            )
 
         # Get Airy radius if not already obtained
         if airy_radius is None:
@@ -1180,6 +1464,220 @@ class ZosPyHandler:
             "spot_data": spot_data,
             "airy_radius": airy_radius,
         }
+
+    def _configure_spot_analysis(self, settings: Any, ray_density: int, reference_code: int) -> None:
+        """
+        Configure StandardSpot analysis settings.
+
+        Args:
+            settings: OpticStudio analysis settings object
+            ray_density: Rays per axis (1-20)
+            reference_code: Reference point (0=Chief Ray, 1=Centroid)
+        """
+        # Set ray density
+        if hasattr(settings, 'RayDensity'):
+            settings.RayDensity = ray_density
+        elif hasattr(settings, 'NumberOfRays'):
+            settings.NumberOfRays = ray_density
+
+        # Set reference point
+        if hasattr(settings, 'ReferenceType'):
+            settings.ReferenceType = reference_code
+        elif hasattr(settings, 'Reference'):
+            settings.Reference = reference_code
+
+        # Set to show all fields and wavelengths
+        if hasattr(settings, 'Field'):
+            try:
+                settings.Field.UseAllFields()
+            except Exception:
+                pass
+
+        if hasattr(settings, 'Wavelength'):
+            try:
+                settings.Wavelength.UseAllWavelengths()
+            except Exception:
+                pass
+
+    def _export_analysis_image(
+        self,
+        analysis: Any,
+        temp_path: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """
+        Export an analysis to PNG image.
+
+        Args:
+            analysis: OpticStudio analysis object
+            temp_path: Path for temporary PNG file
+
+        Returns:
+            Tuple of (base64_image, image_format) or (None, None) if export fails
+        """
+        try:
+            if hasattr(analysis, 'ExportGraphicAs'):
+                analysis.ExportGraphicAs(temp_path)
+            elif hasattr(analysis, 'Results') and hasattr(analysis.Results, 'ExportData'):
+                analysis.Results.ExportData(temp_path)
+
+            if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                with open(temp_path, 'rb') as f:
+                    image_b64 = base64.b64encode(f.read()).decode('utf-8')
+                logger.info(f"Exported analysis PNG, size={len(image_b64)}")
+                return image_b64, "png"
+
+        except Exception as e:
+            logger.warning(f"Analysis PNG export failed: {e}")
+
+        return None, None
+
+    def _extract_airy_radius(self, results: Any) -> Optional[float]:
+        """
+        Extract Airy disk radius from analysis results.
+
+        Args:
+            results: OpticStudio analysis results object
+
+        Returns:
+            Airy radius in lens units, or None if not available
+        """
+        try:
+            if hasattr(results, 'AiryRadius'):
+                return float(results.AiryRadius)
+            elif hasattr(results, 'GetAiryDiskRadius'):
+                return float(results.GetAiryDiskRadius())
+        except Exception as e:
+            logger.debug(f"Could not extract Airy radius: {e}")
+        return None
+
+    def _extract_spot_data_from_results(
+        self,
+        results: Any,
+        fields: Any,
+        num_fields: int,
+    ) -> list[dict[str, Any]]:
+        """
+        Extract per-field spot data from analysis results.
+
+        Args:
+            results: OpticStudio analysis results object
+            fields: OpticStudio fields object
+            num_fields: Number of fields in the system
+
+        Returns:
+            List of spot data dicts per field
+        """
+        spot_data: list[dict[str, Any]] = []
+
+        try:
+            for fi in range(num_fields):
+                field = fields.GetField(fi + 1)  # 1-indexed
+                field_data = self._create_field_spot_data(fi, field.X, field.Y)
+
+                # Try to get spot data for this field
+                self._populate_spot_data_from_results(results, fi, field_data)
+                spot_data.append(field_data)
+
+        except Exception as e:
+            logger.warning(f"Could not extract spot data from results: {e}")
+
+        return spot_data
+
+    def _create_field_spot_data(
+        self,
+        field_index: int,
+        field_x: float,
+        field_y: float,
+    ) -> dict[str, Any]:
+        """
+        Create an empty spot data dict for a field.
+
+        Args:
+            field_index: 0-indexed field number
+            field_x: Field X coordinate
+            field_y: Field Y coordinate
+
+        Returns:
+            Dict with field info and None values for spot metrics
+        """
+        return {
+            "field_index": field_index,
+            "field_x": field_x,
+            "field_y": field_y,
+            "rms_radius": None,
+            "geo_radius": None,
+            "centroid_x": None,
+            "centroid_y": None,
+            "num_rays": None,
+        }
+
+    def _populate_spot_data_from_results(
+        self,
+        results: Any,
+        field_index: int,
+        field_data: dict[str, Any],
+    ) -> None:
+        """
+        Populate spot data dict from analysis results.
+
+        Args:
+            results: OpticStudio analysis results object
+            field_index: 0-indexed field number
+            field_data: Dict to populate with spot metrics
+        """
+        try:
+            if hasattr(results, 'GetDataSeries'):
+                series = results.GetDataSeries(field_index)
+                if series:
+                    if hasattr(series, 'RMS'):
+                        field_data["rms_radius"] = float(series.RMS)
+                    if hasattr(series, 'GEO'):
+                        field_data["geo_radius"] = float(series.GEO)
+
+            if hasattr(results, 'SpotData'):
+                spot_info = results.SpotData
+                if hasattr(spot_info, 'GetSpotDataAtField'):
+                    fd = spot_info.GetSpotDataAtField(field_index + 1)
+                    if fd:
+                        if hasattr(fd, 'RMSSpotRadius'):
+                            field_data["rms_radius"] = float(fd.RMSSpotRadius)
+                        if hasattr(fd, 'GEOSpotRadius'):
+                            field_data["geo_radius"] = float(fd.GEOSpotRadius)
+                        if hasattr(fd, 'CentroidX'):
+                            field_data["centroid_x"] = float(fd.CentroidX)
+                        if hasattr(fd, 'CentroidY'):
+                            field_data["centroid_y"] = float(fd.CentroidY)
+                        if hasattr(fd, 'NumberOfRays'):
+                            field_data["num_rays"] = int(fd.NumberOfRays)
+
+        except Exception as e:
+            logger.debug(f"Could not get spot data for field {field_index}: {e}")
+
+    def _create_spot_array_fallback(
+        self,
+        spot_data: list[dict[str, Any]],
+        ray_density: int,
+    ) -> tuple[Optional[str], Optional[str], Optional[list[int]], Optional[str]]:
+        """
+        Create numpy array fallback for spot diagram.
+
+        Args:
+            spot_data: List of spot data dicts
+            ray_density: Rays per axis
+
+        Returns:
+            Tuple of (image_b64, image_format, array_shape, array_dtype)
+        """
+        try:
+            arr = self._create_spot_diagram_array(spot_data, ray_density)
+            if arr is not None:
+                image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                logger.info(f"Created spot diagram numpy array, shape={arr.shape}")
+                return image_b64, "numpy_array", list(arr.shape), str(arr.dtype)
+        except Exception as e:
+            logger.warning(f"Could not create spot diagram array: {e}")
+
+        return None, None, None, None
 
     def _compute_spot_data_manual(
         self,
@@ -1204,6 +1702,8 @@ class ZosPyHandler:
 
             ray_x_positions = []
             ray_y_positions = []
+            chief_ray_x: Optional[float] = None
+            chief_ray_y: Optional[float] = None
 
             # Trace rays across the pupil
             for px in np.linspace(-1, 1, grid_size):
@@ -1237,6 +1737,10 @@ class ZosPyHandler:
                                         if x_val is not None and y_val is not None:
                                             ray_x_positions.append(float(x_val))
                                             ray_y_positions.append(float(y_val))
+                                            # Capture chief ray position (ray at pupil center px=0, py=0)
+                                            if abs(px) < 0.01 and abs(py) < 0.01:
+                                                chief_ray_x = float(x_val)
+                                                chief_ray_y = float(y_val)
                     except Exception as e:
                         logger.debug(f"Ray trace failed at ({px:.2f}, {py:.2f}): {e}")
                         continue
@@ -1268,9 +1772,13 @@ class ZosPyHandler:
                 if reference == "centroid":
                     ref_x, ref_y = centroid_x, centroid_y
                 else:
-                    # Chief ray reference - use the ray at pupil center (0,0)
-                    # For simplicity, use centroid as approximation
-                    ref_x, ref_y = centroid_x, centroid_y
+                    # Chief ray reference - use actual chief ray position (px=0, py=0)
+                    # Fall back to centroid if chief ray wasn't captured (e.g., vignetted)
+                    if chief_ray_x is not None and chief_ray_y is not None:
+                        ref_x, ref_y = chief_ray_x, chief_ray_y
+                    else:
+                        logger.debug(f"Field {fi}: Chief ray not captured, using centroid as fallback")
+                        ref_x, ref_y = centroid_x, centroid_y
 
                 # Calculate radii from reference point
                 distances = np.sqrt((x_arr - ref_x)**2 + (y_arr - ref_y)**2)
@@ -1302,24 +1810,16 @@ class ZosPyHandler:
         Calculate the Airy disk radius for the system.
 
         Airy radius = 1.22 * wavelength * f_number
+
+        Returns:
+            Airy disk radius in lens units (typically mm), or None if calculation fails
         """
         try:
             # Get wavelength (primary wavelength in micrometers)
             wavelength_um = self.oss.SystemData.Wavelengths.GetWavelength(1).Wavelength
 
             # Get f-number
-            fno = None
-            aperture = self.oss.SystemData.Aperture
-            aperture_type = str(aperture.ApertureType).split(".")[-1] if aperture.ApertureType else ""
-
-            if aperture_type in ["ImageSpaceFNumber", "FloatByStopSize", "ParaxialWorkingFNumber"]:
-                fno = aperture.ApertureValue
-            else:
-                # Calculate from EPD and EFL
-                epd = aperture.ApertureValue
-                efl = self._get_efl()
-                if epd and efl and epd > 0:
-                    fno = efl / epd
+            fno = self._get_fno()
 
             if fno and wavelength_um:
                 # Convert wavelength from micrometers to millimeters (lens units typically mm)
@@ -1329,6 +1829,34 @@ class ZosPyHandler:
 
         except Exception as e:
             logger.debug(f"Could not calculate Airy radius: {e}")
+
+        return None
+
+    def _get_fno(self) -> Optional[float]:
+        """
+        Get the f-number of the optical system.
+
+        Tries to get f/# directly from aperture settings if the aperture type
+        is F/#-based, otherwise calculates from EPD and EFL.
+
+        Returns:
+            F-number, or None if it cannot be determined
+        """
+        try:
+            aperture = self.oss.SystemData.Aperture
+            aperture_type = str(aperture.ApertureType).split(".")[-1] if aperture.ApertureType else ""
+
+            if aperture_type in FNO_APERTURE_TYPES:
+                return aperture.ApertureValue
+
+            # Calculate from EPD and EFL
+            epd = aperture.ApertureValue
+            efl = self._get_efl()
+            if epd and efl and epd > 0:
+                return efl / epd
+
+        except Exception as e:
+            logger.debug(f"Could not get f-number: {e}")
 
         return None
 

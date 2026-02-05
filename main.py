@@ -18,9 +18,11 @@ multiple workers will cause race conditions and unpredictable failures.
 Example: uvicorn main:app --host 0.0.0.0 --port 8787 --workers 1
 """
 
-import os
 import asyncio
+import base64
 import logging
+import os
+import tempfile
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
@@ -34,18 +36,30 @@ from zospy_handler import ZosPyHandler, ZosPyError
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# Constants
+# =============================================================================
+
+# Error messages
+NOT_CONNECTED_ERROR = "OpticStudio not connected"
+
+# Default server configuration
+DEFAULT_PORT = 8787
+DEFAULT_HOST = "0.0.0.0"
+
+# API key for authentication (optional but recommended)
+ZEMAX_API_KEY = os.getenv("ZEMAX_API_KEY", None)
+
+# =============================================================================
+# Global State
+# =============================================================================
+
 # Initialize ZosPy handler (manages OpticStudio connection)
 zospy_handler: Optional[ZosPyHandler] = None
 
 # Thread safety lock - ZosPy/COM is single-threaded
 # All ZosPy operations must be serialized
 _zospy_lock = asyncio.Lock()
-
-# API key for authentication (optional but recommended)
-ZEMAX_API_KEY = os.getenv("ZEMAX_API_KEY", None)
-
-# Error message constant
-NOT_CONNECTED_ERROR = "OpticStudio not connected"
 
 
 def _init_zospy() -> Optional[ZosPyHandler]:
@@ -111,7 +125,7 @@ async def verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Ke
             raise HTTPException(status_code=401, detail="Invalid API key")
 
 
-def _load_system_from_request(request) -> dict[str, Any]:
+def _load_system_from_request(request: BaseModel) -> dict[str, Any]:
     """
     Load optical system from request into OpticStudio.
 
@@ -125,12 +139,6 @@ def _load_system_from_request(request) -> dict[str, Any]:
         ValueError: If zmx_content is missing or invalid
         ZosPyError: If loading fails
     """
-    import base64
-    import tempfile
-    import os
-
-    from zospy_handler import ZosPyError
-
     zmx_content = getattr(request, 'zmx_content', None)
 
     if not zmx_content:
@@ -140,7 +148,7 @@ def _load_system_from_request(request) -> dict[str, Any]:
     try:
         zmx_bytes = base64.b64decode(zmx_content)
     except Exception as e:
-        raise ValueError(f"Invalid base64 zmx_content: {e}")
+        raise ValueError(f"Invalid base64 zmx_content: {e}") from e
 
     with tempfile.NamedTemporaryFile(mode='wb', suffix='.zmx', delete=False) as f:
         f.write(zmx_bytes)
@@ -369,6 +377,51 @@ class SpotDiagramResponse(BaseModel):
     error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 
+class SeidelSurfaceData(BaseModel):
+    """Per-surface Seidel aberration coefficients from native OpticStudio analysis."""
+    surface: int = Field(description="Surface number (1-indexed)")
+    S1: float = Field(description="Spherical aberration (SPHA)")
+    S2: float = Field(description="Coma (COMA)")
+    S3: float = Field(description="Astigmatism (ASTI)")
+    S4: float = Field(description="Field curvature / Petzval (FCUR)")
+    S5: float = Field(description="Distortion (DIST)")
+    CLA: Optional[float] = Field(default=None, description="Axial chromatic aberration")
+    CTR: Optional[float] = Field(default=None, description="Transverse chromatic aberration")
+
+
+class SeidelTotals(BaseModel):
+    """Total (sum) Seidel aberration coefficients."""
+    S1: float = Field(description="Total spherical aberration")
+    S2: float = Field(description="Total coma")
+    S3: float = Field(description="Total astigmatism")
+    S4: float = Field(description="Total field curvature / Petzval")
+    S5: float = Field(description="Total distortion")
+    CLA: Optional[float] = Field(default=None, description="Total axial chromatic")
+    CTR: Optional[float] = Field(default=None, description="Total transverse chromatic")
+
+
+class SeidelHeaderData(BaseModel):
+    """Header metadata from Seidel analysis."""
+    wavelength_um: Optional[float] = Field(default=None, description="Primary wavelength in micrometers")
+    petzval_radius: Optional[float] = Field(default=None, description="Petzval radius")
+    optical_invariant: Optional[float] = Field(default=None, description="Optical invariant (Lagrange)")
+
+
+class NativeSeidelResponse(BaseModel):
+    """
+    Native Seidel coefficients response from OpticStudio SeidelCoefficients analysis.
+
+    This provides accurate per-surface S1-S5 and chromatic aberrations (CLA, CTR)
+    directly from OpticStudio, unlike the Zernike-based approximation.
+    """
+    success: bool = Field(description="Whether the operation succeeded")
+    per_surface: Optional[list[SeidelSurfaceData]] = Field(default=None, description="Per-surface Seidel coefficients")
+    totals: Optional[SeidelTotals] = Field(default=None, description="Total (sum) Seidel coefficients")
+    header: Optional[SeidelHeaderData] = Field(default=None, description="Analysis header metadata")
+    num_surfaces: Optional[int] = Field(default=None, description="Number of surfaces with Seidel data")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
 # =============================================================================
 # Endpoints
 # =============================================================================
@@ -528,6 +581,14 @@ async def get_zernike(request: SystemRequest, _: None = Depends(verify_api_key))
 
             # Get Zernike coefficients (system already loaded)
             result = zospy_handler.get_seidel()
+
+            # Check if analysis succeeded
+            if not result.get("success", False):
+                return ZernikeResponse(
+                    success=False,
+                    error=result.get("error", "Zernike analysis failed"),
+                )
+
             return ZernikeResponse(
                 success=True,
                 zernike_coefficients=result.get("zernike_coefficients"),
@@ -537,6 +598,59 @@ async def get_zernike(request: SystemRequest, _: None = Depends(verify_api_key))
         except Exception as e:
             _handle_zospy_error("Zernike", e)
             return ZernikeResponse(success=False, error=str(e))
+
+
+@app.post("/seidel-native", response_model=NativeSeidelResponse)
+async def get_seidel_native(request: SystemRequest, _: None = Depends(verify_api_key)) -> NativeSeidelResponse:
+    """
+    Get native Seidel coefficients using OpticStudio's SeidelCoefficients analysis.
+
+    This provides accurate per-surface S1-S5 and chromatic aberrations (CLA, CTR)
+    directly from OpticStudio, unlike the Zernike-based approximation in /seidel.
+    """
+    logger.info("seidel-native: Starting native Seidel analysis")
+    async with _zospy_lock:
+        if _ensure_connected() is None:
+            return NativeSeidelResponse(success=False, error=NOT_CONNECTED_ERROR)
+
+        try:
+            # Load system from request
+            _load_system_from_request(request)
+
+            # Get native Seidel coefficients (system already loaded)
+            result = zospy_handler.get_seidel_native()
+
+            if not result.get("success", False):
+                return NativeSeidelResponse(
+                    success=False,
+                    error=result.get("error", "Native Seidel analysis failed"),
+                )
+
+            # Convert per_surface dicts to SeidelSurfaceData models
+            per_surface = None
+            if result.get("per_surface"):
+                per_surface = [SeidelSurfaceData(**sd) for sd in result["per_surface"]]
+
+            # Convert totals dict to SeidelTotals model
+            totals = None
+            if result.get("totals"):
+                totals = SeidelTotals(**result["totals"])
+
+            # Convert header dict to SeidelHeaderData model
+            header = None
+            if result.get("header"):
+                header = SeidelHeaderData(**result["header"])
+
+            return NativeSeidelResponse(
+                success=True,
+                per_surface=per_surface,
+                totals=totals,
+                header=header,
+                num_surfaces=result.get("num_surfaces"),
+            )
+        except Exception as e:
+            _handle_zospy_error("Native Seidel", e)
+            return NativeSeidelResponse(success=False, error=str(e))
 
 
 @app.post("/trace-rays", response_model=TraceRaysResponse)
@@ -671,8 +785,8 @@ async def get_spot_diagram(
 if __name__ == "__main__":
     import uvicorn
 
-    port = int(os.getenv("PORT", "8787"))
-    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", str(DEFAULT_PORT)))
+    host = os.getenv("HOST", DEFAULT_HOST)
     dev_mode = os.getenv("DEV_MODE", "false").lower() == "true"
 
     # CRITICAL: Run with workers=1 for COM/STA compatibility
