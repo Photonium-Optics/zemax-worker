@@ -26,10 +26,25 @@ python main.py
 
 **Interactive API Docs:** http://localhost:8787/docs
 
-**CRITICAL:** Always run with single worker for COM/STA compatibility:
+**Multiple Workers (Parallelism):**
 ```bash
+# Single worker (default)
 uvicorn main:app --host 0.0.0.0 --port 8787 --workers 1
+
+# Multiple workers for parallel processing
+uvicorn main:app --host 0.0.0.0 --port 8787 --workers 3
 ```
+
+Each uvicorn worker is a separate process with its own OpticStudio connection. This allows true parallel processing but **each worker consumes a license seat**.
+
+**License limits (per Ansys):**
+| License Type | Max Simultaneous Instances |
+|--------------|---------------------------|
+| Professional (subscription) | 4 |
+| Premium (subscription) | 8 |
+| Perpetual (legacy 19.4+) | 2 |
+
+Set `--workers N` where N ≤ your license limit. On macOS, set `TASK_QUEUE_WORKERS=N` to match.
 
 ## Service Ports
 
@@ -59,7 +74,7 @@ All endpoints require `zmx_content` (base64-encoded .zmx file) in the request bo
 - Zernike to Seidel conversion (`seidel_converter.py`)
 - Response aggregation and hotspot detection
 - Business logic (margins, clamping, thresholds)
-- Matplotlib rendering (for numpy array fallback)
+- Matplotlib rendering (for wavefront numpy arrays)
 
 ## Project Structure
 
@@ -126,9 +141,18 @@ ray_trace = SingleRayTrace(px=float(px))
 
 This applies everywhere: `np.linspace()` results, values from DataFrames, anything from numpy.
 
-### 2. Single Worker Required
+### 2. Multiple Workers and Parallelism
 
-ZosPy/COM requires single-threaded apartment (STA). Multiple workers cause race conditions. An `asyncio.Lock()` serializes all requests.
+**Each uvicorn worker process gets its own ZOS connection and OpticStudio instance.** This is because:
+- ZOSPy's `ZOS` class is a singleton per process (only one instance allowed)
+- The ZOS-API only supports a single connection per process
+- But separate processes can each have their own connection
+
+**This means `--workers N` works for parallelism**, with each worker handling requests independently. The `asyncio.Lock()` serializes requests within a single process only.
+
+**Constraint:** Each worker consumes one OpticStudio license seat. Premium allows 8 instances, Professional allows 4, perpetual allows 2. Don't exceed your license limit.
+
+**On macOS (zemax-analysis-service):** Set `TASK_QUEUE_WORKERS=N` to match your Windows worker count, so the task queue sends N concurrent requests.
 
 ### 3. Index Conventions
 
@@ -243,21 +267,6 @@ cross_section = CrossSection(
     image_size=(1200, 800),
 )
 result = cross_section.run(oss, image_output_file="/tmp/output.png")
-```
-
-### Numpy Array Fallback (When PNG Export Fails)
-
-```python
-if os.path.exists(temp_path):
-    # PNG export succeeded
-    with open(temp_path, 'rb') as f:
-        image_b64 = base64.b64encode(f.read()).decode('utf-8')
-    image_format = "png"
-elif result.data is not None:
-    # Fallback: return numpy array (Mac renders with matplotlib)
-    arr = np.array(result.data)
-    image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
-    image_format = "numpy_array"
 ```
 
 ### Native Seidel Analysis
@@ -581,17 +590,65 @@ logger.info(f"System state: mode={mode}, fields={num_fields}, wls={num_wavelengt
 
 ## Changelog
 
-### 2026-02-05: Fix Wavefront ZernikeStandardCoefficients UnitField Error
+### 2026-02-05: Corrected Multi-Worker Documentation
 
-**Bug:** `ZernikeStandardCoefficients failed: float() argument must be a string or a real number, not 'UnitField'`
+**Previous docs (WRONG):** Claimed single worker required due to "COM/STA single-threaded apartment" limitations.
 
-**Root cause:** Lines 1489-1507 in `get_wavefront()` used `float()` directly on ZosPy 2.x `UnitField` objects instead of `_extract_value()`.
+**Actual truth (VERIFIED):** Multiple uvicorn workers work fine. Each process gets its own ZOS singleton and OpticStudio connection. The constraint is **license seats**, not threading.
 
-**Fix:** Replaced all `float(zdata.xxx)` calls with `_extract_value(zdata.xxx)` in `get_wavefront()`:
-- `peak_to_valley_to_chief` / `peak_to_valley_to_centroid`
-- `rms_to_chief` / `rms_to_centroid`
-- `strehl_ratio`
-- `rms` / `peak_to_valley` (fallback attributes)
+**Sources:**
+- https://optics.ansys.com/hc/en-us/articles/42712696418835-FAQ-on-opening-multiple-OpticStudio-instances
+- https://community.zemax.com/zos-api-12/python-multiprocessing-licensing-error-3117
+- ZOSPy FAQ: "The ZOS-API only supports a single connection per process"
+
+**Changes:**
+- Updated module docstring in `main.py`
+- Updated "Multiple Workers" section in DEVELOPMENT.md
+- Added `WORKERS` env var support to `main.py`
+- Removed incorrect "single worker required" warnings
+
+### 2026-02-05: Remove Manual Fallbacks — Enforce Dumb Executor Pattern
+
+**Change:** Removed all manual fallback implementations from analysis methods. The worker now returns `success: false` with an error message when a ZosPy analysis fails, instead of silently falling back to slow manual computations.
+
+**Removed:**
+- `_compute_spot_data_manual()` — traced individual rays via SingleRayTrace (~89s for ~291 rays)
+- `_create_spot_array_fallback()` — created numpy array from spot data
+- `_create_spot_diagram_array()` — stub that always returned None
+- `_calculate_airy_radius()` — manual Airy radius from wavelength/f-number
+
+**Methods simplified:**
+- `get_spot_diagram()` — returns error if StandardSpot analysis fails (no manual ray trace fallback)
+- `get_cross_section()` — returns error if PNG export fails (no numpy array fallback, no "always success" pattern)
+- `get_wavefront()` — returns error if ZernikeStandardCoefficients fails (no computing metrics from WavefrontMap array)
+
+**Why:** The old fallbacks violated the dumb executor pattern, were extremely slow, and masked real failures. If a native ZosPy analysis fails, the Mac side should see the error and handle it appropriately.
+
+### 2026-02-05: Fix UnitField Errors in Wavefront and Spot Diagram
+
+**Bug:** `float() argument must be a string or a real number, not 'UnitField'`
+
+**Root cause:** Multiple methods used `float()` directly on ZosPy 2.x `UnitField` objects instead of `_extract_value()`.
+
+**Fixes applied:**
+
+1. **`get_wavefront()`** - ZernikeStandardCoefficients metrics:
+   - `peak_to_valley_to_chief` / `peak_to_valley_to_centroid`
+   - `rms_to_chief` / `rms_to_centroid`
+   - `strehl_ratio`, `rms`, `peak_to_valley`
+
+2. **`_extract_airy_radius()`** - Spot diagram Airy radius:
+   - `results.AiryRadius`
+   - `results.GetAiryDiskRadius()`
+
+3. **`_populate_spot_data_from_results()`** - Spot diagram metrics:
+   - `series.RMS`, `series.GEO`
+   - `fd.RMSSpotRadius`, `fd.GEOSpotRadius`
+   - `fd.CentroidX`, `fd.CentroidY`
+   - `fd.NumberOfRays` (wrapped in `int(_extract_value(...))`)
+
+4. **`evaluate_merit_function()`** - Merit function total:
+   - `mfe.CalculateMeritFunction()` result
 
 **Lesson:** Always use `_extract_value()` for any ZosPy result attribute that might have units. See "Critical Rules for ZosPy" section 5.
 

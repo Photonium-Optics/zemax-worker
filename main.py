@@ -11,11 +11,20 @@ Prerequisites:
 - Python 3.9-3.11
 - ZosPy >= 1.2.0
 
-CRITICAL: This worker MUST run with a single uvicorn worker (--workers 1).
-ZosPy/COM requires single-threaded apartment (STA) semantics. Running with
-multiple workers will cause race conditions and unpredictable failures.
+Parallelism:
+Each uvicorn worker is a separate process with its own OpticStudio connection.
+Multiple workers enable parallel request processing, but each consumes a license seat.
 
-Example: uvicorn main:app --host 0.0.0.0 --port 8787 --workers 1
+License limits (per Ansys):
+- Professional (subscription): 4 instances
+- Premium (subscription): 8 instances
+- Perpetual (legacy 19.4+): 2 instances
+
+Examples:
+  uvicorn main:app --host 0.0.0.0 --port 8787 --workers 1  # Single worker
+  uvicorn main:app --host 0.0.0.0 --port 8787 --workers 3  # 3 parallel workers (uses 3 license seats)
+
+On macOS, set TASK_QUEUE_WORKERS to match the number of workers here.
 """
 
 import asyncio
@@ -58,8 +67,8 @@ ZEMAX_API_KEY = os.getenv("ZEMAX_API_KEY", None)
 # Initialize ZosPy handler (manages OpticStudio connection)
 zospy_handler: Optional[ZosPyHandler] = None
 
-# Thread safety lock - ZosPy/COM is single-threaded
-# All ZosPy operations must be serialized
+# Async lock - serializes ZosPy operations within this process
+# Each uvicorn worker process has its own lock and OpticStudio connection
 _zospy_lock = asyncio.Lock()
 
 
@@ -886,13 +895,15 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", str(DEFAULT_PORT)))
     host = os.getenv("HOST", DEFAULT_HOST)
     dev_mode = os.getenv("DEV_MODE", "false").lower() == "true"
+    # Number of workers - each gets its own OpticStudio connection (uses 1 license seat each)
+    # Default to 1, but can increase up to your license limit (Premium=8, Professional=4, Perpetual=2)
+    num_workers = int(os.getenv("WORKERS", "1"))
 
-    # CRITICAL: Run with workers=1 for COM/STA compatibility
     uvicorn.run(
         "main:app",
         host=host,
         port=port,
-        workers=1,  # Required for ZosPy/COM single-threaded apartment
+        workers=num_workers,
         reload=dev_mode,  # Only enable reload in development
         log_level="info",
     )

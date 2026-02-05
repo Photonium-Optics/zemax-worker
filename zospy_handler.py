@@ -388,170 +388,75 @@ class ZosPyHandler:
         Generate cross-section diagram using ZosPy's CrossSection analysis.
 
         Requires ZosPy >= 1.3.0 and OpticStudio >= 24.1.0 for image export.
-        Falls back to surface geometry if image export fails.
+        Returns error on failure — no fallbacks.
 
         Note: System must be pre-loaded via load_zmx_file().
         """
-
-        image_b64 = None
-        image_format = None
-        # Metadata for numpy array reconstruction (only used when image_format="numpy_array")
-        array_shape = None
-        array_dtype = None
-        error_msg = None
-
-        # Validate system state before attempting CrossSection
-        # The "Object reference not set" error in set_StartSurface() happens when
-        # the system has no fields or invalid aperture configuration
-        try:
-            num_fields = self.oss.SystemData.Fields.NumberOfFields
-            if num_fields == 0:
-                logger.warning("CrossSection skipped: System has no fields defined (NumberOfFields=0)")
-                error_msg = "System has no fields defined"
-                # Skip to fallback - return surface geometry only
-                paraxial = self._get_paraxial_from_lde()
-                surfaces_data = self._get_surface_geometry()
-                return {
-                    "image": None,
-                    "image_format": None,
-                    "array_shape": None,
-                    "array_dtype": None,
-                    "paraxial": paraxial,
-                    "surfaces": surfaces_data,
-                    "rays_total": 0,
-                    "rays_through": 0,
-                    "error": error_msg,
-                }
-        except Exception as e:
-            logger.warning(f"Could not validate system fields: {e}")
-            # Continue anyway - let CrossSection fail with better error if needed
-
-        # Check OpticStudio version - image export requires >= 24.1.0
-        try:
-            zos_version = self.zos.version if hasattr(self.zos, 'version') else None
-            logger.debug(f"ZosPy zos.version = {zos_version}")
-            logger.debug(f"ZosPy version = {self._zp.__version__ if hasattr(self._zp, '__version__') else 'unknown'}")
-
-            if zos_version and zos_version < MIN_IMAGE_EXPORT_VERSION:
-                logger.warning(f"OpticStudio {zos_version} < 24.1.0 - image export not supported, using fallback")
-            else:
-                # Use ZosPy's CrossSection wrapper with image_output_file parameter
-                # Per ZosPy docs: export to file, then read it back
-                import tempfile
-                import os
-
-                temp_path = os.path.join(tempfile.gettempdir(), CROSS_SECTION_TEMP_FILENAME)
-                logger.debug(f"Trying ZosPy CrossSection with image_output_file={temp_path}")
-
-                try:
-                    from zospy.analyses.systemviewers.cross_section import CrossSection
-
-                    # Log system state before attempting CrossSection
-                    try:
-                        mode = self.oss.Mode
-                        num_fields = self.oss.SystemData.Fields.NumberOfFields
-                        num_wavelengths = self.oss.SystemData.Wavelengths.NumberOfWavelengths
-                        logger.info(f"CrossSection: System mode={mode}, fields={num_fields}, wavelengths={num_wavelengths}")
-                    except Exception as diag_e:
-                        logger.warning(f"CrossSection: Could not get system diagnostics: {diag_e}")
-
-                    cross_section = CrossSection(
-                        number_of_rays=DEFAULT_NUM_CROSS_SECTION_RAYS,
-                        field="All",
-                        wavelength="All",
-                        color_rays_by="Fields",
-                        delete_vignetted=True,
-                        surface_line_thickness="Thick",  # Required to show lens surfaces
-                        rays_line_thickness="Standard",
-                        image_size=CROSS_SECTION_IMAGE_SIZE,
-                    )
-
-                    # Run with image_output_file to save to disk
-                    cs_start = time.perf_counter()
-                    try:
-                        result = cross_section.run(self.oss, image_output_file=temp_path)
-                    finally:
-                        cs_elapsed_ms = (time.perf_counter() - cs_start) * 1000
-                        log_timing(logger, "CrossSection.run", cs_elapsed_ms)
-                    logger.debug(f"CrossSection.run completed, result.data type = {type(result.data) if hasattr(result, 'data') else 'N/A'}")
-
-                    # Check if file was created
-                    if os.path.exists(temp_path):
-                        with open(temp_path, 'rb') as f:
-                            image_b64 = base64.b64encode(f.read()).decode('utf-8')
-                        image_format = "png"
-                        logger.info(f"Successfully exported CrossSection image, size = {len(image_b64)}")
-                    elif result.data is not None:
-                        # Fallback: return raw numpy array for Mac-side rendering
-                        # This keeps matplotlib dependency on Mac side only
-                        arr = np.array(result.data)
-                        # Validate array is image-like (2D grayscale or 3D with channels)
-                        if arr.ndim < 2 or arr.ndim > 3:
-                            logger.warning(f"CrossSection: result.data has unexpected shape {arr.shape}, skipping numpy fallback")
-                        else:
-                            image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
-                            image_format = "numpy_array"
-                            array_shape = list(arr.shape)
-                            array_dtype = str(arr.dtype)
-                            logger.info(f"Returning numpy array fallback for CrossSection, shape={arr.shape}, dtype={arr.dtype}")
-                    else:
-                        logger.warning("CrossSection: no file created and result.data is None")
-
-                except ImportError as e:
-                    logger.warning(f"CrossSection import failed: {e}")
-                except Exception as e:
-                    # Enhanced error logging for StartSurface and similar failures
-                    # "Object reference not set" on StartSurface means OpenCrossSectionExport() returned NULL
-                    error_str = str(e)
-                    diag_info = []
-                    try:
-                        diag_info.append(f"Mode={self.oss.Mode}")
-                        diag_info.append(f"Fields={self.oss.SystemData.Fields.NumberOfFields}")
-                        diag_info.append(f"Wavelengths={self.oss.SystemData.Wavelengths.NumberOfWavelengths}")
-                        diag_info.append(f"EPD={self.oss.SystemData.Aperture.ApertureValue}")
-                        diag_info.append(f"Surfaces={self.oss.LDE.NumberOfSurfaces}")
-                    except Exception as diag_e:
-                        diag_info.append(f"DiagError={diag_e}")
-
-                    if "StartSurface" in error_str or "Object reference" in error_str:
-                        logger.warning(f"CrossSection export failed (likely OpenCrossSectionExport returned NULL): {error_str}")
-                        logger.warning(f"System state: {', '.join(diag_info)}")
-                    else:
-                        logger.warning(f"CrossSection export failed: {error_str} | {', '.join(diag_info)}")
-                finally:
-                    # Clean up temp file if it exists
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except OSError as e:
-                            logger.warning(f"Failed to clean up temp file {temp_path}: {e}")
-
-        except Exception as e:
-            # Log but don't fail - we'll return surface geometry as fallback
-            logger.warning(f"CrossSection image export failed: {e}")
-            logger.debug(f"Full traceback:", exc_info=True)
-
-        # Get paraxial data using direct LDE access (more reliable)
-        paraxial = self._get_paraxial_from_lde()
-
-        # Get surface geometry for client-side rendering (fallback or supplement)
-        surfaces_data = self._get_surface_geometry()
-
-        # Count rays
+        # Validate system state
         num_fields = self.oss.SystemData.Fields.NumberOfFields
-        rays_total = DEFAULT_NUM_CROSS_SECTION_RAYS * max(1, num_fields)
-        rays_through = rays_total  # Assume success
+        if num_fields == 0:
+            return {"success": False, "error": "System has no fields defined"}
 
-        return {
-            "image": image_b64,
-            "image_format": image_format,
-            "array_shape": array_shape,  # For numpy_array reconstruction
-            "array_dtype": array_dtype,  # For numpy_array reconstruction
-            "paraxial": paraxial,
-            "surfaces": surfaces_data,  # Always include for fallback rendering
-            "rays_total": rays_total,
-            "rays_through": rays_through,
-        }
+        zos_version = self.zos.version if hasattr(self.zos, 'version') else None
+        if zos_version and zos_version < MIN_IMAGE_EXPORT_VERSION:
+            return {"success": False, "error": f"OpticStudio {zos_version} < 24.1.0 — image export not supported"}
+
+        temp_path = os.path.join(tempfile.gettempdir(), CROSS_SECTION_TEMP_FILENAME)
+
+        try:
+            from zospy.analyses.systemviewers.cross_section import CrossSection
+
+            cross_section = CrossSection(
+                number_of_rays=DEFAULT_NUM_CROSS_SECTION_RAYS,
+                field="All",
+                wavelength="All",
+                color_rays_by="Fields",
+                delete_vignetted=True,
+                surface_line_thickness="Thick",
+                rays_line_thickness="Standard",
+                image_size=CROSS_SECTION_IMAGE_SIZE,
+            )
+
+            cs_start = time.perf_counter()
+            try:
+                result = cross_section.run(self.oss, image_output_file=temp_path)
+            finally:
+                cs_elapsed_ms = (time.perf_counter() - cs_start) * 1000
+                log_timing(logger, "CrossSection.run", cs_elapsed_ms)
+
+            if not os.path.exists(temp_path):
+                return {"success": False, "error": "CrossSection analysis did not produce an image"}
+
+            with open(temp_path, 'rb') as f:
+                image_b64 = base64.b64encode(f.read()).decode('utf-8')
+            logger.info(f"Successfully exported CrossSection image, size = {len(image_b64)}")
+
+            # Get paraxial data and surface geometry
+            paraxial = self._get_paraxial_from_lde()
+            surfaces_data = self._get_surface_geometry()
+
+            rays_total = DEFAULT_NUM_CROSS_SECTION_RAYS * max(1, num_fields)
+
+            return {
+                "success": True,
+                "image": image_b64,
+                "image_format": "png",
+                "array_shape": None,
+                "array_dtype": None,
+                "paraxial": paraxial,
+                "surfaces": surfaces_data,
+                "rays_total": rays_total,
+                "rays_through": rays_total,
+            }
+
+        except Exception as e:
+            return {"success": False, "error": f"CrossSection analysis failed: {e}"}
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
     def _get_paraxial_from_lde(self) -> dict[str, Any]:
         """
@@ -1465,50 +1370,43 @@ class ZosPyHandler:
             pv_waves = None
             strehl_ratio = None
 
+            # Get wavefront metrics from ZernikeStandardCoefficients
+            zernike_analysis = self._zp.analyses.wavefront.ZernikeStandardCoefficients(
+                sampling=sampling,
+                maximum_term=37,
+                wavelength=wavelength_index,
+                field=field_index,
+                reference_opd_to_vertex=False,
+                surface="Image",
+            )
+            zernike_start = time.perf_counter()
             try:
-                zernike_analysis = self._zp.analyses.wavefront.ZernikeStandardCoefficients(
-                    sampling=sampling,
-                    maximum_term=37,
-                    wavelength=wavelength_index,
-                    field=field_index,
-                    reference_opd_to_vertex=False,
-                    surface="Image",
-                )
-                zernike_start = time.perf_counter()
-                try:
-                    zernike_result = zernike_analysis.run(self.oss)
-                finally:
-                    zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
-                    log_timing(logger, "ZernikeStandardCoefficients.run", zernike_elapsed_ms)
+                zernike_result = zernike_analysis.run(self.oss)
+            finally:
+                zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
+                log_timing(logger, "ZernikeStandardCoefficients.run", zernike_elapsed_ms)
 
-                if hasattr(zernike_result, 'data') and zernike_result.data is not None:
-                    zdata = zernike_result.data
+            if hasattr(zernike_result, 'data') and zernike_result.data is not None:
+                zdata = zernike_result.data
 
-                    # Get P-V wavefront error (in waves)
-                    # Use _extract_value() to handle ZosPy 2.x UnitField objects
-                    if hasattr(zdata, 'peak_to_valley_to_chief'):
-                        pv_waves = _extract_value(zdata.peak_to_valley_to_chief)
-                    elif hasattr(zdata, 'peak_to_valley_to_centroid'):
-                        pv_waves = _extract_value(zdata.peak_to_valley_to_centroid)
+                # Get P-V wavefront error (in waves)
+                if hasattr(zdata, 'peak_to_valley_to_chief'):
+                    pv_waves = _extract_value(zdata.peak_to_valley_to_chief)
+                elif hasattr(zdata, 'peak_to_valley_to_centroid'):
+                    pv_waves = _extract_value(zdata.peak_to_valley_to_centroid)
 
-                    # Get RMS and Strehl from integration data
-                    if hasattr(zdata, 'from_integration_of_the_rays'):
-                        integration = zdata.from_integration_of_the_rays
-                        if hasattr(integration, 'rms_to_chief'):
-                            rms_waves = _extract_value(integration.rms_to_chief)
-                        elif hasattr(integration, 'rms_to_centroid'):
-                            rms_waves = _extract_value(integration.rms_to_centroid)
-                        if hasattr(integration, 'strehl_ratio'):
-                            strehl_ratio = _extract_value(integration.strehl_ratio)
+                # Get RMS and Strehl from integration data
+                if hasattr(zdata, 'from_integration_of_the_rays'):
+                    integration = zdata.from_integration_of_the_rays
+                    if hasattr(integration, 'rms_to_chief'):
+                        rms_waves = _extract_value(integration.rms_to_chief)
+                    elif hasattr(integration, 'rms_to_centroid'):
+                        rms_waves = _extract_value(integration.rms_to_centroid)
+                    if hasattr(integration, 'strehl_ratio'):
+                        strehl_ratio = _extract_value(integration.strehl_ratio)
 
-                    # Fallback: try direct attributes
-                    if rms_waves is None and hasattr(zdata, 'rms'):
-                        rms_waves = _extract_value(zdata.rms)
-                    if pv_waves is None and hasattr(zdata, 'peak_to_valley'):
-                        pv_waves = _extract_value(zdata.peak_to_valley)
-
-            except Exception as e:
-                logger.warning(f"ZernikeStandardCoefficients failed: {e}, trying WavefrontMap only")
+            if rms_waves is None and pv_waves is None:
+                return {"success": False, "error": "ZernikeStandardCoefficients returned no metrics"}
 
             # Get wavefront map as numpy array
             image_b64 = None
@@ -1536,42 +1434,20 @@ class ZosPyHandler:
                     log_timing(logger, "WavefrontMap.run", wfm_elapsed_ms)
 
                 if hasattr(wavefront_map, 'data') and wavefront_map.data is not None:
-                    # Convert DataFrame or array to numpy
                     wf_data = wavefront_map.data
-
                     if hasattr(wf_data, 'values'):
-                        # It's a DataFrame - extract values
                         arr = np.array(wf_data.values, dtype=np.float64)
                     else:
-                        # It's already array-like
                         arr = np.array(wf_data, dtype=np.float64)
 
-                    # Validate array dimensions
                     if arr.ndim >= 2:
                         image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
                         array_shape = list(arr.shape)
                         array_dtype = str(arr.dtype)
                         logger.info(f"Wavefront map generated: shape={arr.shape}, dtype={arr.dtype}")
 
-                        # If we didn't get metrics from Zernike, compute from the map
-                        if pv_waves is None:
-                            valid_data = arr[~np.isnan(arr)]
-                            if len(valid_data) > 0:
-                                pv_waves = float(np.max(valid_data) - np.min(valid_data))
-
-                        if rms_waves is None:
-                            valid_data = arr[~np.isnan(arr)]
-                            if len(valid_data) > 0:
-                                rms_waves = float(np.std(valid_data))
-                    else:
-                        logger.warning(f"WavefrontMap: unexpected array dimensions {arr.ndim}")
-
             except Exception as e:
-                logger.warning(f"WavefrontMap failed: {e}")
-
-            # If we have no metrics at all, return error
-            if rms_waves is None and pv_waves is None:
-                return {"success": False, "error": "Could not compute wavefront metrics"}
+                logger.warning(f"WavefrontMap failed: {e} (metrics still available)")
 
             return {
                 "success": True,
@@ -1598,8 +1474,7 @@ class ZosPyHandler:
         """
         Generate spot diagram using ZosPy's StandardSpot analysis.
 
-        This is a "dumb executor" - returns raw data only. Image rendering
-        (if PNG export fails) happens on Mac side.
+        This is a "dumb executor" — returns raw data or error. No fallbacks.
 
         Note: System must be pre-loaded via load_zmx_file().
 
@@ -1610,26 +1485,13 @@ class ZosPyHandler:
         Returns:
             On success: {
                 "success": True,
-                "image": str (base64 PNG or numpy array),
-                "image_format": "png" or "numpy_array",
-                "array_shape": [h, w, c] (for numpy_array only),
-                "array_dtype": str (for numpy_array only),
-                "spot_data": [
-                    {"field_index": 0, "field_x": 0, "field_y": 0,
-                     "rms_radius": float, "geo_radius": float,
-                     "centroid_x": float, "centroid_y": float, "num_rays": int},
-                    ...
-                ],
+                "image": str (base64 PNG),
+                "image_format": "png",
+                "spot_data": [...],
                 "airy_radius": float,
             }
             On error: {"success": False, "error": "..."}
         """
-        image_b64: Optional[str] = None
-        image_format: Optional[str] = None
-        array_shape: Optional[list[int]] = None
-        array_dtype: Optional[str] = None
-        spot_data: list[dict[str, Any]] = []
-        airy_radius: Optional[float] = None
         analysis = None
         temp_path = os.path.join(tempfile.gettempdir(), SPOT_DIAGRAM_TEMP_FILENAME)
 
@@ -1664,39 +1526,26 @@ class ZosPyHandler:
             image_b64, image_format = self._export_analysis_image(analysis, temp_path)
 
             # Extract spot data and airy radius from results
+            spot_data: list[dict[str, Any]] = []
+            airy_radius: Optional[float] = None
             if analysis.Results is not None:
                 airy_radius = self._extract_airy_radius(analysis.Results)
                 spot_data = self._extract_spot_data_from_results(analysis.Results, fields, num_fields)
 
+            return {
+                "success": True,
+                "image": image_b64,
+                "image_format": image_format,
+                "array_shape": None,
+                "array_dtype": None,
+                "spot_data": spot_data,
+                "airy_radius": airy_radius,
+            }
+
         except Exception as e:
-            logger.warning(f"StandardSpot analysis failed: {e}, falling back to manual ray trace")
+            return {"success": False, "error": f"StandardSpot analysis failed: {e}"}
         finally:
             self._cleanup_analysis(analysis, temp_path)
-
-        # If we couldn't get spot data from StandardSpot, compute manually via ray trace
-        if not spot_data or all(sd.get("rms_radius") is None for sd in spot_data):
-            logger.info("Computing spot data via manual ray trace")
-            spot_data = self._compute_spot_data_manual(ray_density, reference)
-
-        # If we still don't have an image, create numpy array from ray positions
-        if image_b64 is None and spot_data:
-            image_b64, image_format, array_shape, array_dtype = self._create_spot_array_fallback(
-                spot_data, ray_density
-            )
-
-        # Get Airy radius if not already obtained
-        if airy_radius is None:
-            airy_radius = self._calculate_airy_radius()
-
-        return {
-            "success": True,
-            "image": image_b64,
-            "image_format": image_format,
-            "array_shape": array_shape,
-            "array_dtype": array_dtype,
-            "spot_data": spot_data,
-            "airy_radius": airy_radius,
-        }
 
     def _configure_spot_analysis(self, settings: Any, ray_density: int, reference_code: int) -> None:
         """
@@ -1775,10 +1624,11 @@ class ZosPyHandler:
             Airy radius in lens units, or None if not available
         """
         try:
+            # Use _extract_value() to handle ZosPy 2.x UnitField objects
             if hasattr(results, 'AiryRadius'):
-                return float(results.AiryRadius)
+                return _extract_value(results.AiryRadius)
             elif hasattr(results, 'GetAiryDiskRadius'):
-                return float(results.GetAiryDiskRadius())
+                return _extract_value(results.GetAiryDiskRadius())
         except Exception as e:
             logger.debug(f"Could not extract Airy radius: {e}")
         return None
@@ -1860,13 +1710,14 @@ class ZosPyHandler:
             field_data: Dict to populate with spot metrics
         """
         try:
+            # Use _extract_value() to handle ZosPy 2.x UnitField objects
             if hasattr(results, 'GetDataSeries'):
                 series = results.GetDataSeries(field_index)
                 if series:
                     if hasattr(series, 'RMS'):
-                        field_data["rms_radius"] = float(series.RMS)
+                        field_data["rms_radius"] = _extract_value(series.RMS)
                     if hasattr(series, 'GEO'):
-                        field_data["geo_radius"] = float(series.GEO)
+                        field_data["geo_radius"] = _extract_value(series.GEO)
 
             if hasattr(results, 'SpotData'):
                 spot_info = results.SpotData
@@ -1874,207 +1725,19 @@ class ZosPyHandler:
                     fd = spot_info.GetSpotDataAtField(field_index + 1)
                     if fd:
                         if hasattr(fd, 'RMSSpotRadius'):
-                            field_data["rms_radius"] = float(fd.RMSSpotRadius)
+                            field_data["rms_radius"] = _extract_value(fd.RMSSpotRadius)
                         if hasattr(fd, 'GEOSpotRadius'):
-                            field_data["geo_radius"] = float(fd.GEOSpotRadius)
+                            field_data["geo_radius"] = _extract_value(fd.GEOSpotRadius)
                         if hasattr(fd, 'CentroidX'):
-                            field_data["centroid_x"] = float(fd.CentroidX)
+                            field_data["centroid_x"] = _extract_value(fd.CentroidX)
                         if hasattr(fd, 'CentroidY'):
-                            field_data["centroid_y"] = float(fd.CentroidY)
+                            field_data["centroid_y"] = _extract_value(fd.CentroidY)
                         if hasattr(fd, 'NumberOfRays'):
-                            field_data["num_rays"] = int(fd.NumberOfRays)
+                            field_data["num_rays"] = int(_extract_value(fd.NumberOfRays))
 
         except Exception as e:
             logger.debug(f"Could not get spot data for field {field_index}: {e}")
 
-    def _create_spot_array_fallback(
-        self,
-        spot_data: list[dict[str, Any]],
-        ray_density: int,
-    ) -> tuple[Optional[str], Optional[str], Optional[list[int]], Optional[str]]:
-        """
-        Create numpy array fallback for spot diagram.
-
-        Args:
-            spot_data: List of spot data dicts
-            ray_density: Rays per axis
-
-        Returns:
-            Tuple of (image_b64, image_format, array_shape, array_dtype)
-        """
-        try:
-            arr = self._create_spot_diagram_array(spot_data, ray_density)
-            if arr is not None:
-                image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
-                logger.info(f"Created spot diagram numpy array, shape={arr.shape}")
-                return image_b64, "numpy_array", list(arr.shape), str(arr.dtype)
-        except Exception as e:
-            logger.warning(f"Could not create spot diagram array: {e}")
-
-        return None, None, None, None
-
-    def _compute_spot_data_manual(
-        self,
-        ray_density: int,
-        reference: str,
-    ) -> list[dict[str, Any]]:
-        """
-        Compute spot diagram data manually by tracing rays.
-
-        This is a fallback when StandardSpot analysis doesn't provide data.
-        """
-        spot_data = []
-        fields = self.oss.SystemData.Fields
-        num_fields = fields.NumberOfFields
-
-        # Grid of rays across the pupil
-        grid_size = ray_density * 2 + 1  # e.g., ray_density=5 -> 11x11 grid
-
-        manual_start = time.perf_counter()
-        try:
-            for fi in range(1, num_fields + 1):
-                field = fields.GetField(fi)
-                # Use _extract_value for UnitField objects
-                field_x = _extract_value(field.X)
-                field_y = _extract_value(field.Y)
-
-                ray_x_positions = []
-                ray_y_positions = []
-                chief_ray_x: Optional[float] = None
-                chief_ray_y: Optional[float] = None
-
-                # Trace rays across the pupil
-                for px in np.linspace(-1, 1, grid_size):
-                    for py in np.linspace(-1, 1, grid_size):
-                        if px**2 + py**2 > 1:
-                            continue  # Skip rays outside circular pupil
-
-                        try:
-                            ray_trace = self._zp.analyses.raysandspots.SingleRayTrace(
-                                hx=0.0,
-                                hy=0.0,
-                                px=float(px),
-                                py=float(py),
-                                wavelength=1,
-                                field=fi,
-                            )
-                            result = ray_trace.run(self.oss)
-
-                            if hasattr(result, 'data') and result.data is not None:
-                                ray_data = result.data
-                                if hasattr(ray_data, 'real_ray_trace_data'):
-                                    df = ray_data.real_ray_trace_data
-                                    if hasattr(df, 'iloc') and len(df) > 0:
-                                        # Get last row (image surface)
-                                        last_row = df.iloc[-1]
-                                        # ZosPy 2.1.4 uses 'X-coordinate', 'Y-coordinate' column names
-                                        # No error_code column in ZosPy 2.x - assume ray reached if we have data
-                                        # Use _get_column_value helper for safe access
-                                        x_val = _get_column_value(last_row, ['X-coordinate', 'X', 'x'])
-                                        y_val = _get_column_value(last_row, ['Y-coordinate', 'Y', 'y'])
-                                        if x_val is not None and y_val is not None:
-                                            ray_x_positions.append(float(x_val))
-                                            ray_y_positions.append(float(y_val))
-                                            # Capture chief ray position (ray at pupil center px=0, py=0)
-                                            if abs(px) < 0.01 and abs(py) < 0.01:
-                                                chief_ray_x = float(x_val)
-                                                chief_ray_y = float(y_val)
-                        except Exception as e:
-                            logger.debug(f"Ray trace failed at ({px:.2f}, {py:.2f}): {e}")
-                            continue
-
-                # Calculate spot metrics
-                num_rays = len(ray_x_positions)
-                field_result = {
-                    "field_index": fi - 1,
-                    "field_x": field_x,
-                    "field_y": field_y,
-                    "rms_radius": None,
-                    "geo_radius": None,
-                    "centroid_x": None,
-                    "centroid_y": None,
-                    "num_rays": num_rays,
-                }
-
-                if num_rays > 0:
-                    x_arr = np.array(ray_x_positions)
-                    y_arr = np.array(ray_y_positions)
-
-                    # Compute centroid
-                    centroid_x = np.mean(x_arr)
-                    centroid_y = np.mean(y_arr)
-                    field_result["centroid_x"] = float(centroid_x)
-                    field_result["centroid_y"] = float(centroid_y)
-
-                    # Reference point for radius calculation
-                    if reference == "centroid":
-                        ref_x, ref_y = centroid_x, centroid_y
-                    else:
-                        # Chief ray reference - use actual chief ray position (px=0, py=0)
-                        # Fall back to centroid if chief ray wasn't captured (e.g., vignetted)
-                        if chief_ray_x is not None and chief_ray_y is not None:
-                            ref_x, ref_y = chief_ray_x, chief_ray_y
-                        else:
-                            logger.debug(f"Field {fi}: Chief ray not captured, using centroid as fallback")
-                            ref_x, ref_y = centroid_x, centroid_y
-
-                    # Calculate radii from reference point
-                    distances = np.sqrt((x_arr - ref_x)**2 + (y_arr - ref_y)**2)
-                    field_result["rms_radius"] = float(np.sqrt(np.mean(distances**2)))
-                    field_result["geo_radius"] = float(np.max(distances))
-
-                spot_data.append(field_result)
-        finally:
-            manual_elapsed_ms = (time.perf_counter() - manual_start) * 1000
-            log_timing(logger, "_compute_spot_data_manual", manual_elapsed_ms)
-
-        return spot_data
-
-    def _create_spot_diagram_array(
-        self,
-        spot_data: list[dict[str, Any]],
-        ray_density: int,
-    ) -> Optional[np.ndarray]:
-        """
-        Create a numpy array visualization of the spot diagram.
-
-        Returns a grayscale image with spots plotted.
-        This is a simple fallback - Mac side can render better with matplotlib.
-        """
-        # This is a minimal implementation - just return None
-        # and let Mac side render from spot_data
-        # A full implementation would trace rays and plot them
-        return None
-
-    def _calculate_airy_radius(self) -> Optional[float]:
-        """
-        Calculate the Airy disk radius for the system.
-
-        Airy radius = 1.22 * wavelength * f_number
-
-        Returns:
-            Airy disk radius in lens units (typically mm), or None if calculation fails
-        """
-        try:
-            # Get wavelength (primary wavelength in micrometers)
-            # Use _extract_value for UnitField objects in ZosPy 2.x
-            wavelength_um = _extract_value(
-                self.oss.SystemData.Wavelengths.GetWavelength(1).Wavelength, 0.5876
-            )
-
-            # Get f-number
-            fno = self._get_fno()
-
-            if fno and wavelength_um and wavelength_um > 0:
-                # Convert wavelength from micrometers to millimeters (lens units typically mm)
-                wavelength_mm = wavelength_um / 1000.0
-                airy_radius = 1.22 * wavelength_mm * fno
-                return float(airy_radius)
-
-        except Exception as e:
-            logger.debug(f"Could not calculate Airy radius: {e}")
-
-        return None
 
     def _get_fno(self) -> Optional[float]:
         """
@@ -2241,7 +1904,8 @@ class ZosPyHandler:
 
         # Calculate merit function
         try:
-            total_merit = float(mfe.CalculateMeritFunction())
+            # Use _extract_value() to handle ZosPy 2.x UnitField objects
+            total_merit = _extract_value(mfe.CalculateMeritFunction())
         except Exception as e:
             logger.error(f"MFE CalculateMeritFunction failed: {e}")
             return {
