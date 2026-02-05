@@ -581,6 +581,20 @@ logger.info(f"System state: mode={mode}, fields={num_fields}, wls={num_wavelengt
 
 ## Changelog
 
+### 2026-02-05: Fix Wavefront ZernikeStandardCoefficients UnitField Error
+
+**Bug:** `ZernikeStandardCoefficients failed: float() argument must be a string or a real number, not 'UnitField'`
+
+**Root cause:** Lines 1489-1507 in `get_wavefront()` used `float()` directly on ZosPy 2.x `UnitField` objects instead of `_extract_value()`.
+
+**Fix:** Replaced all `float(zdata.xxx)` calls with `_extract_value(zdata.xxx)` in `get_wavefront()`:
+- `peak_to_valley_to_chief` / `peak_to_valley_to_centroid`
+- `rms_to_chief` / `rms_to_centroid`
+- `strehl_ratio`
+- `rms` / `peak_to_valley` (fallback attributes)
+
+**Lesson:** Always use `_extract_value()` for any ZosPy result attribute that might have units. See "Critical Rules for ZosPy" section 5.
+
 ### 2026-02-05: Merit Function Evaluation Endpoint
 
 **Change:** Added `POST /evaluate-merit-function` endpoint and `evaluate_merit_function()` handler method.

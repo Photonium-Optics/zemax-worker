@@ -1485,26 +1485,27 @@ class ZosPyHandler:
                     zdata = zernike_result.data
 
                     # Get P-V wavefront error (in waves)
+                    # Use _extract_value() to handle ZosPy 2.x UnitField objects
                     if hasattr(zdata, 'peak_to_valley_to_chief'):
-                        pv_waves = float(zdata.peak_to_valley_to_chief)
+                        pv_waves = _extract_value(zdata.peak_to_valley_to_chief)
                     elif hasattr(zdata, 'peak_to_valley_to_centroid'):
-                        pv_waves = float(zdata.peak_to_valley_to_centroid)
+                        pv_waves = _extract_value(zdata.peak_to_valley_to_centroid)
 
                     # Get RMS and Strehl from integration data
                     if hasattr(zdata, 'from_integration_of_the_rays'):
                         integration = zdata.from_integration_of_the_rays
                         if hasattr(integration, 'rms_to_chief'):
-                            rms_waves = float(integration.rms_to_chief)
+                            rms_waves = _extract_value(integration.rms_to_chief)
                         elif hasattr(integration, 'rms_to_centroid'):
-                            rms_waves = float(integration.rms_to_centroid)
+                            rms_waves = _extract_value(integration.rms_to_centroid)
                         if hasattr(integration, 'strehl_ratio'):
-                            strehl_ratio = float(integration.strehl_ratio)
+                            strehl_ratio = _extract_value(integration.strehl_ratio)
 
                     # Fallback: try direct attributes
                     if rms_waves is None and hasattr(zdata, 'rms'):
-                        rms_waves = float(zdata.rms)
+                        rms_waves = _extract_value(zdata.rms)
                     if pv_waves is None and hasattr(zdata, 'peak_to_valley'):
-                        pv_waves = float(zdata.peak_to_valley)
+                        pv_waves = _extract_value(zdata.peak_to_valley)
 
             except Exception as e:
                 logger.warning(f"ZernikeStandardCoefficients failed: {e}, trying WavefrontMap only")
