@@ -1467,6 +1467,15 @@ if hasattr(oss, 'SystemData'):
 
 ## Changelog
 
+### 2026-02-05 - Fix Missing asynccontextmanager Import
+
+**main.py:**
+- **FIXED** `NameError: name 'asynccontextmanager' is not defined` on startup
+- During timing instrumentation cleanup, `asynccontextmanager` import was accidentally removed
+- The `lifespan` function (line 169) uses `@asynccontextmanager` decorator for FastAPI app lifecycle
+- Re-added `from contextlib import asynccontextmanager` to imports
+- **Root cause**: Code review task removed "unused" import without checking all decorator usages
+
 ### 2026-02-05 - Critical Bug Fixes (Seidel Parsing - Multiple Tables, TOT Row, UnitField)
 
 **zospy_handler.py - Seidel Text Parser:**
