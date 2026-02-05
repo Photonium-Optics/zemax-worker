@@ -691,8 +691,8 @@ async def evaluate_merit_function(
     """
     def _build_merit_response(result: dict) -> MeritFunctionResponse:
         raw_rows = result.get("evaluated_rows", [])
-        evaluated = [EvaluatedOperandRow(**r) for r in raw_rows] or None
-        row_errors = result.get("row_errors", []) or None
+        evaluated = [EvaluatedOperandRow(**r) for r in raw_rows] if raw_rows else None
+        row_errors = result.get("row_errors", []) if result.get("row_errors") else None
         return MeritFunctionResponse(
             success=result.get("success", False),
             error=result.get("error") if not result.get("success", False) else None,

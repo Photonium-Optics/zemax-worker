@@ -698,6 +698,26 @@ return await _run_endpoint("/name", ResponseClass, request, lambda: handler())
 
 **Lesson:** Always use `_extract_value()` for any ZosPy result attribute that might have units. See "Critical Rules for ZosPy" section 5.
 
+### 2026-02-05: Fix "'NoneType' object is not iterable" in Merit Function Response
+
+**Bug:** Clicking "Evaluate" in the merit function editor caused `'NoneType' object is not iterable`.
+
+**Root cause:** In `main.py` `_build_merit_response()`, the expression:
+```python
+row_errors = result.get("row_errors", []) or None
+```
+...converts empty list `[]` to `None` because empty lists are falsy. The analysis service then tried to iterate over `None`:
+```python
+for re in result.get("row_errors", []):  # result["row_errors"] is None, not missing!
+```
+
+**Fix:** Changed to explicit empty-check:
+```python
+row_errors = result.get("row_errors", []) if result.get("row_errors") else None
+```
+
+This preserves `None` when the key is missing or the value is `None`, but preserves `[]` when the value is an empty list.
+
 ### 2026-02-05: Merit Function Evaluation Endpoint
 
 **Change:** Added `POST /evaluate-merit-function` endpoint and `evaluate_merit_function()` handler method.
