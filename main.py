@@ -730,43 +730,48 @@ async def get_wavefront(
     This is a "dumb executor" endpoint - returns raw data only.
     Wavefront map image rendering happens on Mac side using matplotlib.
     """
-    async with _zospy_lock:
-        if _ensure_connected() is None:
-            return WavefrontResponse(success=False, error=NOT_CONNECTED_ERROR)
+    with timed_operation(logger, "/wavefront"):
+        lock_start = time.perf_counter()
+        async with _zospy_lock:
+            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
+            log_timing(logger, "lock_wait", lock_wait_ms)
 
-        try:
-            # Load system from request
-            _load_system_from_request(request)
+            if _ensure_connected() is None:
+                return WavefrontResponse(success=False, error=NOT_CONNECTED_ERROR)
 
-            # Get wavefront data (system already loaded)
-            result = zospy_handler.get_wavefront(
-                field_index=request.field_index,
-                wavelength_index=request.wavelength_index,
-                sampling=request.sampling,
-            )
+            try:
+                # Load system from request
+                _load_system_from_request(request)
 
-            if not result.get("success", False):
-                return WavefrontResponse(
-                    success=False,
-                    error=result.get("error", "Wavefront analysis failed"),
+                # Get wavefront data (system already loaded)
+                result = zospy_handler.get_wavefront(
+                    field_index=request.field_index,
+                    wavelength_index=request.wavelength_index,
+                    sampling=request.sampling,
                 )
 
-            return WavefrontResponse(
-                success=True,
-                rms_waves=result.get("rms_waves"),
-                pv_waves=result.get("pv_waves"),
-                strehl_ratio=result.get("strehl_ratio"),
-                wavelength_um=result.get("wavelength_um"),
-                field_x=result.get("field_x"),
-                field_y=result.get("field_y"),
-                image=result.get("image"),
-                image_format=result.get("image_format"),
-                array_shape=result.get("array_shape"),
-                array_dtype=result.get("array_dtype"),
-            )
-        except Exception as e:
-            _handle_zospy_error("Wavefront", e)
-            return WavefrontResponse(success=False, error=str(e))
+                if not result.get("success", False):
+                    return WavefrontResponse(
+                        success=False,
+                        error=result.get("error", "Wavefront analysis failed"),
+                    )
+
+                return WavefrontResponse(
+                    success=True,
+                    rms_waves=result.get("rms_waves"),
+                    pv_waves=result.get("pv_waves"),
+                    strehl_ratio=result.get("strehl_ratio"),
+                    wavelength_um=result.get("wavelength_um"),
+                    field_x=result.get("field_x"),
+                    field_y=result.get("field_y"),
+                    image=result.get("image"),
+                    image_format=result.get("image_format"),
+                    array_shape=result.get("array_shape"),
+                    array_dtype=result.get("array_dtype"),
+                )
+            except Exception as e:
+                _handle_zospy_error("Wavefront", e)
+                return WavefrontResponse(success=False, error=str(e))
 
 
 @app.post("/spot-diagram", response_model=SpotDiagramResponse)
@@ -780,43 +785,48 @@ async def get_spot_diagram(
     This is a "dumb executor" endpoint - returns raw data only.
     Spot diagram image rendering happens on Mac side if PNG export fails.
     """
-    async with _zospy_lock:
-        if _ensure_connected() is None:
-            return SpotDiagramResponse(success=False, error=NOT_CONNECTED_ERROR)
+    with timed_operation(logger, "/spot-diagram"):
+        lock_start = time.perf_counter()
+        async with _zospy_lock:
+            lock_wait_ms = (time.perf_counter() - lock_start) * 1000
+            log_timing(logger, "lock_wait", lock_wait_ms)
 
-        try:
-            # Load system from request
-            _load_system_from_request(request)
+            if _ensure_connected() is None:
+                return SpotDiagramResponse(success=False, error=NOT_CONNECTED_ERROR)
 
-            # Get spot diagram data (system already loaded)
-            result = zospy_handler.get_spot_diagram(
-                ray_density=request.ray_density,
-                reference=request.reference,
-            )
+            try:
+                # Load system from request
+                _load_system_from_request(request)
 
-            if not result.get("success", False):
-                return SpotDiagramResponse(
-                    success=False,
-                    error=result.get("error", "Spot diagram analysis failed"),
+                # Get spot diagram data (system already loaded)
+                result = zospy_handler.get_spot_diagram(
+                    ray_density=request.ray_density,
+                    reference=request.reference,
                 )
 
-            # Convert spot_data dicts to SpotFieldData models
-            spot_data = None
-            if result.get("spot_data"):
-                spot_data = [SpotFieldData(**sd) for sd in result["spot_data"]]
+                if not result.get("success", False):
+                    return SpotDiagramResponse(
+                        success=False,
+                        error=result.get("error", "Spot diagram analysis failed"),
+                    )
 
-            return SpotDiagramResponse(
-                success=True,
-                image=result.get("image"),
-                image_format=result.get("image_format"),
-                array_shape=result.get("array_shape"),
-                array_dtype=result.get("array_dtype"),
-                spot_data=spot_data,
-                airy_radius=result.get("airy_radius"),
-            )
-        except Exception as e:
-            _handle_zospy_error("Spot diagram", e)
-            return SpotDiagramResponse(success=False, error=str(e))
+                # Convert spot_data dicts to SpotFieldData models
+                spot_data = None
+                if result.get("spot_data"):
+                    spot_data = [SpotFieldData(**sd) for sd in result["spot_data"]]
+
+                return SpotDiagramResponse(
+                    success=True,
+                    image=result.get("image"),
+                    image_format=result.get("image_format"),
+                    array_shape=result.get("array_shape"),
+                    array_dtype=result.get("array_dtype"),
+                    spot_data=spot_data,
+                    airy_radius=result.get("airy_radius"),
+                )
+            except Exception as e:
+                _handle_zospy_error("Spot diagram", e)
+                return SpotDiagramResponse(success=False, error=str(e))
 
 
 if __name__ == "__main__":

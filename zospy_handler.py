@@ -14,9 +14,12 @@ import base64
 import logging
 import os
 import tempfile
+import time
 from typing import Any, Optional
 
 import numpy as np
+
+from utils.timing import log_timing
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -208,7 +211,10 @@ class ZosPyHandler:
 
         # Load the file directly using ZosPy's load method
         # This replaces all manual surface building with native file loading
+        start = time.perf_counter()
         self.oss.load(file_path)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        log_timing(logger, "oss.load", elapsed_ms)
 
         # Get system info after loading
         num_surfaces = self.oss.LDE.NumberOfSurfaces - 1  # Exclude object surface
@@ -334,7 +340,10 @@ class ZosPyHandler:
                     )
 
                     # Run with image_output_file to save to disk
+                    cs_start = time.perf_counter()
                     result = cross_section.run(self.oss, image_output_file=temp_path)
+                    cs_elapsed_ms = (time.perf_counter() - cs_start) * 1000
+                    log_timing(logger, "CrossSection.run", cs_elapsed_ms)
                     logger.debug(f"CrossSection.run completed, result.data type = {type(result.data) if hasattr(result, 'data') else 'N/A'}")
 
                     # Check if file was created
@@ -575,6 +584,7 @@ class ZosPyHandler:
         # Collect raw ray results
         raw_rays = []
 
+        ray_trace_start = time.perf_counter()
         for fi in range(1, num_fields + 1):
             field = fields.GetField(fi)
             field_x, field_y = field.X, field.Y
@@ -647,6 +657,9 @@ class ZosPyHandler:
                         ray_result["failure_mode"] = "EXCEPTION"
 
                     raw_rays.append(ray_result)
+
+        ray_trace_elapsed_ms = (time.perf_counter() - ray_trace_start) * 1000
+        log_timing(logger, "ray_trace_all", ray_trace_elapsed_ms)
 
         return {
             "paraxial": {
@@ -805,7 +818,10 @@ class ZosPyHandler:
                 idm.SeidelCoefficients,
                 settings_first=True
             )
+            seidel_start = time.perf_counter()
             analysis.ApplyAndWaitForCompletion()
+            seidel_elapsed_ms = (time.perf_counter() - seidel_start) * 1000
+            log_timing(logger, "SeidelCoefficients.ApplyAndWaitForCompletion", seidel_elapsed_ms)
 
             # Check for error messages in analysis results
             error_msg = self._check_analysis_errors(analysis)
@@ -1303,7 +1319,10 @@ class ZosPyHandler:
                     reference_opd_to_vertex=False,
                     surface="Image",
                 )
+                zernike_start = time.perf_counter()
                 zernike_result = zernike_analysis.run(self.oss)
+                zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
+                log_timing(logger, "ZernikeStandardCoefficients.run", zernike_elapsed_ms)
 
                 if hasattr(zernike_result, 'data') and zernike_result.data is not None:
                     zdata = zernike_result.data
@@ -1339,6 +1358,7 @@ class ZosPyHandler:
             array_dtype = None
 
             try:
+                wfm_start = time.perf_counter()
                 wavefront_map = zp.analyses.wavefront.WavefrontMap(
                     sampling=sampling,
                     wavelength=wavelength_index,
@@ -1352,6 +1372,8 @@ class ZosPyHandler:
                     remove_tilt=False,
                     use_exit_pupil=True,
                 ).run(self.oss, oncomplete="Release")
+                wfm_elapsed_ms = (time.perf_counter() - wfm_start) * 1000
+                log_timing(logger, "WavefrontMap.run", wfm_elapsed_ms)
 
                 if hasattr(wavefront_map, 'data') and wavefront_map.data is not None:
                     # Convert DataFrame or array to numpy
@@ -1471,7 +1493,10 @@ class ZosPyHandler:
 
             # Configure and run the analysis
             self._configure_spot_analysis(analysis.Settings, ray_density, reference_code)
+            spot_start = time.perf_counter()
             analysis.ApplyAndWaitForCompletion()
+            spot_elapsed_ms = (time.perf_counter() - spot_start) * 1000
+            log_timing(logger, "StandardSpot.ApplyAndWaitForCompletion", spot_elapsed_ms)
 
             # Try to export image to PNG
             image_b64, image_format = self._export_analysis_image(analysis, temp_path)
