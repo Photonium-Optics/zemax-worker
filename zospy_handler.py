@@ -1865,94 +1865,94 @@ class ZosPyHandler:
         try:
             for fi in range(1, num_fields + 1):
                 field = fields.GetField(fi)
-            # Use _extract_value for UnitField objects
-            field_x = _extract_value(field.X)
-            field_y = _extract_value(field.Y)
+                # Use _extract_value for UnitField objects
+                field_x = _extract_value(field.X)
+                field_y = _extract_value(field.Y)
 
-            ray_x_positions = []
-            ray_y_positions = []
-            chief_ray_x: Optional[float] = None
-            chief_ray_y: Optional[float] = None
+                ray_x_positions = []
+                ray_y_positions = []
+                chief_ray_x: Optional[float] = None
+                chief_ray_y: Optional[float] = None
 
-            # Trace rays across the pupil
-            for px in np.linspace(-1, 1, grid_size):
-                for py in np.linspace(-1, 1, grid_size):
-                    if px**2 + py**2 > 1:
-                        continue  # Skip rays outside circular pupil
+                # Trace rays across the pupil
+                for px in np.linspace(-1, 1, grid_size):
+                    for py in np.linspace(-1, 1, grid_size):
+                        if px**2 + py**2 > 1:
+                            continue  # Skip rays outside circular pupil
 
-                    try:
-                        ray_trace = zp.analyses.raysandspots.SingleRayTrace(
-                            hx=0.0,
-                            hy=0.0,
-                            px=float(px),
-                            py=float(py),
-                            wavelength=1,
-                            field=fi,
-                        )
-                        result = ray_trace.run(self.oss)
+                        try:
+                            ray_trace = zp.analyses.raysandspots.SingleRayTrace(
+                                hx=0.0,
+                                hy=0.0,
+                                px=float(px),
+                                py=float(py),
+                                wavelength=1,
+                                field=fi,
+                            )
+                            result = ray_trace.run(self.oss)
 
-                        if hasattr(result, 'data') and result.data is not None:
-                            ray_data = result.data
-                            if hasattr(ray_data, 'real_ray_trace_data'):
-                                df = ray_data.real_ray_trace_data
-                                if hasattr(df, 'iloc') and len(df) > 0:
-                                    # Get last row (image surface)
-                                    last_row = df.iloc[-1]
-                                    # ZosPy 2.1.4 uses 'X-coordinate', 'Y-coordinate' column names
-                                    # No error_code column in ZosPy 2.x - assume ray reached if we have data
-                                    # Use _get_column_value helper for safe access
-                                    x_val = _get_column_value(last_row, ['X-coordinate', 'X', 'x'])
-                                    y_val = _get_column_value(last_row, ['Y-coordinate', 'Y', 'y'])
-                                    if x_val is not None and y_val is not None:
+                            if hasattr(result, 'data') and result.data is not None:
+                                ray_data = result.data
+                                if hasattr(ray_data, 'real_ray_trace_data'):
+                                    df = ray_data.real_ray_trace_data
+                                    if hasattr(df, 'iloc') and len(df) > 0:
+                                        # Get last row (image surface)
+                                        last_row = df.iloc[-1]
+                                        # ZosPy 2.1.4 uses 'X-coordinate', 'Y-coordinate' column names
+                                        # No error_code column in ZosPy 2.x - assume ray reached if we have data
+                                        # Use _get_column_value helper for safe access
+                                        x_val = _get_column_value(last_row, ['X-coordinate', 'X', 'x'])
+                                        y_val = _get_column_value(last_row, ['Y-coordinate', 'Y', 'y'])
+                                        if x_val is not None and y_val is not None:
                                             ray_x_positions.append(float(x_val))
                                             ray_y_positions.append(float(y_val))
                                             # Capture chief ray position (ray at pupil center px=0, py=0)
                                             if abs(px) < 0.01 and abs(py) < 0.01:
                                                 chief_ray_x = float(x_val)
                                                 chief_ray_y = float(y_val)
-                    except Exception as e:
-                        logger.debug(f"Ray trace failed at ({px:.2f}, {py:.2f}): {e}")
-                        continue
+                        except Exception as e:
+                            logger.debug(f"Ray trace failed at ({px:.2f}, {py:.2f}): {e}")
+                            continue
 
-            # Calculate spot metrics
-            num_rays = len(ray_x_positions)
-            field_result = {
-                "field_index": fi - 1,
-                "field_x": field_x,
-                "field_y": field_y,
-                "rms_radius": None,
-                "geo_radius": None,
-                "centroid_x": None,
-                "centroid_y": None,
-                "num_rays": num_rays,
-            }
+                # Calculate spot metrics
+                num_rays = len(ray_x_positions)
+                field_result = {
+                    "field_index": fi - 1,
+                    "field_x": field_x,
+                    "field_y": field_y,
+                    "rms_radius": None,
+                    "geo_radius": None,
+                    "centroid_x": None,
+                    "centroid_y": None,
+                    "num_rays": num_rays,
+                }
 
-            if num_rays > 0:
-                x_arr = np.array(ray_x_positions)
-                y_arr = np.array(ray_y_positions)
+                if num_rays > 0:
+                    x_arr = np.array(ray_x_positions)
+                    y_arr = np.array(ray_y_positions)
 
-                # Compute centroid
-                centroid_x = np.mean(x_arr)
-                centroid_y = np.mean(y_arr)
-                field_result["centroid_x"] = float(centroid_x)
-                field_result["centroid_y"] = float(centroid_y)
+                    # Compute centroid
+                    centroid_x = np.mean(x_arr)
+                    centroid_y = np.mean(y_arr)
+                    field_result["centroid_x"] = float(centroid_x)
+                    field_result["centroid_y"] = float(centroid_y)
 
-                # Reference point for radius calculation
-                if reference == "centroid":
-                    ref_x, ref_y = centroid_x, centroid_y
-                else:
-                    # Chief ray reference - use actual chief ray position (px=0, py=0)
-                    # Fall back to centroid if chief ray wasn't captured (e.g., vignetted)
-                    if chief_ray_x is not None and chief_ray_y is not None:
-                        ref_x, ref_y = chief_ray_x, chief_ray_y
-                    else:
-                        logger.debug(f"Field {fi}: Chief ray not captured, using centroid as fallback")
+                    # Reference point for radius calculation
+                    if reference == "centroid":
                         ref_x, ref_y = centroid_x, centroid_y
+                    else:
+                        # Chief ray reference - use actual chief ray position (px=0, py=0)
+                        # Fall back to centroid if chief ray wasn't captured (e.g., vignetted)
+                        if chief_ray_x is not None and chief_ray_y is not None:
+                            ref_x, ref_y = chief_ray_x, chief_ray_y
+                        else:
+                            logger.debug(f"Field {fi}: Chief ray not captured, using centroid as fallback")
+                            ref_x, ref_y = centroid_x, centroid_y
 
-                # Calculate radii from reference point
-                distances = np.sqrt((x_arr - ref_x)**2 + (y_arr - ref_y)**2)
-                field_result["rms_radius"] = float(np.sqrt(np.mean(distances**2)))
-                field_result["geo_radius"] = float(np.max(distances))
+                    # Calculate radii from reference point
+                    distances = np.sqrt((x_arr - ref_x)**2 + (y_arr - ref_y)**2)
+                    field_result["rms_radius"] = float(np.sqrt(np.mean(distances**2)))
+                    field_result["geo_radius"] = float(np.max(distances))
 
                 spot_data.append(field_result)
         finally:
