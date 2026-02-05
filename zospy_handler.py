@@ -6,8 +6,8 @@ This module contains all the actual ZosPy/OpticStudio calls.
 
 Note: This code runs on Windows only, where OpticStudio is installed.
 
-IMPORTANT: This worker MUST run with a single uvicorn worker (--workers 1)
-because ZosPy/COM requires single-threaded apartment (STA) semantics.
+Each uvicorn worker process gets its own OpticStudio connection (via ZOS singleton).
+Multiple workers are supported — the constraint is license seats, not threading.
 """
 
 import base64
@@ -132,9 +132,6 @@ SPOT_DIAGRAM_TEMP_FILENAME = "zemax_spot_diagram.png"
 
 # OpticStudio version requirements
 MIN_IMAGE_EXPORT_VERSION = (24, 1, 0)
-
-# Seidel coefficient keys (in order)
-SEIDEL_COEFFICIENT_KEYS = ["S1", "S2", "S3", "S4", "S5", "CLA", "CTR"]
 
 # Ray trace error codes
 RAY_ERROR_CODES = {
@@ -826,31 +823,18 @@ class ZosPyHandler:
 
     def get_seidel_native(self) -> dict[str, Any]:
         """
-        Get native Seidel coefficients using OpticStudio's SeidelCoefficients analysis.
+        Get native Seidel text output using OpticStudio's SeidelCoefficients analysis.
 
-        This is a "dumb executor" - returns raw per-surface data only.
-        Uses GetTextFile() to extract full Seidel data including:
-        - Per-surface S1-S5 coefficients
-        - Per-surface chromatic: CLA (axial), CTR (transverse)
-        - Header data: Petzval radius, wavelength, optical invariant
+        This is a "dumb executor" — runs the analysis, exports the text file,
+        and returns the raw UTF-16 text content. All parsing happens on the
+        Mac side (seidel_text_parser.py).
 
         Note: System must be pre-loaded via load_zmx_file().
 
         Returns:
             On success: {
                 "success": True,
-                "per_surface": [
-                    {"surface": 1, "S1": float, "S2": float, "S3": float,
-                     "S4": float, "S5": float, "CLA": float, "CTR": float},
-                    ...
-                ],
-                "totals": {"S1": float, "S2": float, "S3": float,
-                           "S4": float, "S5": float, "CLA": float, "CTR": float},
-                "header": {
-                    "petzval_radius": float,
-                    "wavelength_um": float,
-                    "optical_invariant": float,
-                },
+                "seidel_text": str (raw text from GetTextFile),
                 "num_surfaces": int,
             }
             On error: {"success": False, "error": "..."}
@@ -879,7 +863,7 @@ class ZosPyHandler:
             if error_msg:
                 return {"success": False, "error": error_msg}
 
-            # Export to text file and parse
+            # Export to text file
             analysis.Results.GetTextFile(temp_path)
 
             if not os.path.exists(temp_path):
@@ -889,31 +873,12 @@ class ZosPyHandler:
             if not text_content:
                 return {"success": False, "error": "Seidel text output is empty"}
 
-            # Parse the text content
-            parsed = self._parse_seidel_text(text_content)
-
-            per_surface = parsed.get("per_surface", [])
-            totals = parsed.get("totals", {})
-
-            # Validate that we actually got data - empty results indicate analysis failure
-            if not per_surface and not totals:
-                logger.warning("Seidel text file parsed but no coefficient data found")
-                logger.debug(f"Text content preview: {text_content[:500]}")
-                return {
-                    "success": False,
-                    "error": "Seidel analysis produced no coefficient data (system may be invalid or have no optical power)"
-                }
-
-            # Also check if totals are all zeros (another sign of failure)
-            if totals and all(abs(totals.get(key, 0.0)) < 1e-15 for key in SEIDEL_COEFFICIENT_KEYS[:5]):
-                logger.warning("Seidel totals are all zeros - likely invalid system")
+            num_surfaces = self.oss.LDE.NumberOfSurfaces - 1  # Exclude object surface
 
             return {
                 "success": True,
-                "per_surface": per_surface,
-                "totals": totals,
-                "header": parsed.get("header", {}),
-                "num_surfaces": len(per_surface),
+                "seidel_text": text_content,
+                "num_surfaces": num_surfaces,
             }
 
         except Exception as e:
@@ -976,238 +941,9 @@ class ZosPyHandler:
             except OSError as e:
                 logger.warning(f"Failed to remove temp file {temp_path}: {e}")
 
-    def _parse_seidel_text(self, text: str) -> dict[str, Any]:
-        """
-        Parse Seidel text output from OpticStudio's SeidelCoefficients analysis.
-
-        Expected format (from GetTextFile):
-            Listing of Aberration Coefficient Data
-            ...
-            Wavelength                      :               0.5876 µm
-            Petzval radius                  :            -623.2905
-            Optical Invariant               :               4.1551
-            ...
-            Seidel Aberration Coefficients:
-
-            Surf     SPHA  S1    COMA  S2    ASTI  S3    FCUR  S4    DIST  S5    CLA    CTR
-              1      0.114175   -0.008176   0.000586   0.120467   -0.008669   -0.034   0.002
-              2      0.000396   -0.005093   0.065502  -0.042772   -0.292349   -0.002   0.029
-            ...
-            Sum      0.xxxxx    ...
-
-        Args:
-            text: Raw text from GetTextFile()
-
-        Returns:
-            Dict with keys: header, per_surface, totals
-        """
-        lines = text.strip().split('\n')
-
-        header: dict[str, Any] = {}
-        per_surface: list[dict[str, Any]] = []
-        totals: dict[str, float] = {}
-        in_table = False
-        found_totals = False
-
-        for line in lines:
-            line_stripped = line.strip()
-            if not line_stripped:
-                continue
-
-            # Stop parsing after we find the totals row (TOT or Sum)
-            # This prevents parsing the "Seidel Aberration Coefficients in Waves" table
-            if found_totals:
-                break
-
-            # Parse header values (lines with colon before table)
-            if ':' in line_stripped and not in_table:
-                self._parse_header_line(line_stripped, header)
-
-            # Detect table header row (contains SPHA or both S1 and S2)
-            if 'SPHA' in line_stripped or ('S1' in line_stripped and 'S2' in line_stripped):
-                in_table = True
-                continue
-
-            # Parse data rows
-            if in_table:
-                found_totals = self._parse_seidel_data_row(line_stripped, per_surface, totals)
-
-        return {
-            "header": header,
-            "per_surface": per_surface,
-            "totals": totals,
-        }
-
-    def _parse_header_line(self, line: str, header: dict[str, Any]) -> None:
-        """
-        Parse a header line from Seidel text output.
-
-        Args:
-            line: Line containing key: value format
-            header: Dict to update with parsed value
-        """
-        parts = line.split(':', 1)
-        if len(parts) != 2:
-            return
-
-        key = parts[0].strip().lower().replace(' ', '_')
-        value = parts[1].strip()
-
-        # Try to extract numeric value (handle units like "0.5876 µm")
-        try:
-            numeric_part = value.split()[0] if value else ''
-            header[key] = float(numeric_part)
-        except (ValueError, IndexError):
-            header[key] = value
-
-    def _parse_seidel_data_row(
-        self,
-        line: str,
-        per_surface: list[dict[str, Any]],
-        totals: dict[str, float],
-    ) -> bool:
-        """
-        Parse a data row from Seidel coefficient table.
-
-        Args:
-            line: Line from the Seidel table
-            per_surface: List to append surface data to
-            totals: Dict to update with totals row
-
-        Returns:
-            True if this was the totals row (TOT/Sum), False otherwise
-        """
-        parts = line.split()
-        if not parts:
-            return False
-
-        first_part = parts[0].upper()
-        values = self._extract_floats(parts[1:])
-
-        if first_part.isdigit() or first_part == 'STO':
-            # Surface data row - handle both numeric surface numbers and "STO" (aperture stop)
-            # STO is typically the aperture stop surface; we use surface number 0 as a marker
-            surface_num = int(parts[0]) if first_part.isdigit() else 0
-            surface_data = self._build_seidel_coefficients(surface_num, values)
-            per_surface.append(surface_data)
-            return False
-        elif first_part == 'IMA':
-            # Image surface - skip it (usually all zeros)
-            return False
-        elif first_part in ('TOT', 'SUM'):
-            # Totals row - parse and signal that we're done with this table
-            totals.update(self._build_seidel_totals(values))
-            return True
-
-        return False
-
-    def _extract_floats(self, parts: list[str]) -> list[float]:
-        """
-        Extract float values from string parts, skipping non-numeric values.
-
-        Args:
-            parts: List of string parts to parse
-
-        Returns:
-            List of successfully parsed float values
-        """
-        values: list[float] = []
-        for p in parts:
-            try:
-                values.append(float(p))
-            except ValueError:
-                continue
-        return values
-
-    def _build_seidel_coefficients(self, surface_num: int, values: list[float]) -> dict[str, Any]:
-        """
-        Build a per-surface Seidel coefficient dict.
-
-        OpticStudio Seidel text output has paired columns:
-        - 12 values: SPHA, S1, COMA, S2, ASTI, S3, FCUR, S4, DIST, S5, CLA, CTR
-          Paired values are duplicates, so extract indices 1, 3, 5, 7, 9, 10, 11
-        - 10 values: SPHA, S1, COMA, S2, ASTI, S3, FCUR, S4, DIST, S5 (no chromatic)
-          Extract indices 1, 3, 5, 7, 9
-        - 7 values: S1, S2, S3, S4, S5, CLA, CTR (already unpaired)
-          Use directly
-
-        Args:
-            surface_num: Surface number (1-indexed)
-            values: List of coefficient values from the text row
-
-        Returns:
-            Dict with surface number and coefficient keys
-        """
-        surface_data: dict[str, Any] = {"surface": surface_num}
-        num_values = len(values)
-
-        if num_values >= 12:
-            # Paired format with chromatic: SPHA, S1, COMA, S2, ASTI, S3, FCUR, S4, DIST, S5, CLA, CTR
-            # S1=values[1], S2=values[3], S3=values[5], S4=values[7], S5=values[9], CLA=values[10], CTR=values[11]
-            extracted = [values[1], values[3], values[5], values[7], values[9], values[10], values[11]]
-            logger.debug(f"Surface {surface_num}: 12+ values, extracted paired format: {extracted[:5]}")
-        elif num_values >= 10:
-            # Paired format without chromatic: SPHA, S1, COMA, S2, ASTI, S3, FCUR, S4, DIST, S5
-            # S1=values[1], S2=values[3], S3=values[5], S4=values[7], S5=values[9]
-            extracted = [values[1], values[3], values[5], values[7], values[9], 0.0, 0.0]
-            logger.debug(f"Surface {surface_num}: 10-11 values, extracted paired format: {extracted[:5]}")
-        elif num_values >= 7:
-            # Already unpaired format: S1, S2, S3, S4, S5, CLA, CTR
-            extracted = values[:7]
-            logger.debug(f"Surface {surface_num}: 7-9 values, using direct format: {extracted[:5]}")
-        elif num_values >= 5:
-            # Minimal format: S1, S2, S3, S4, S5
-            extracted = values[:5] + [0.0, 0.0]
-            logger.debug(f"Surface {surface_num}: 5-6 values, using minimal format: {extracted[:5]}")
-        else:
-            # Insufficient data
-            logger.warning(f"Surface {surface_num}: Only {num_values} values, padding with zeros")
-            extracted = values + [0.0] * (7 - num_values)
-
-        for i, key in enumerate(SEIDEL_COEFFICIENT_KEYS):
-            surface_data[key] = extracted[i] if i < len(extracted) else 0.0
-
-        return surface_data
-
-    def _build_seidel_totals(self, values: list[float]) -> dict[str, float]:
-        """
-        Build a Seidel totals dict.
-
-        Uses same extraction logic as _build_seidel_coefficients to handle
-        paired column format from OpticStudio.
-
-        Args:
-            values: List of total values from the Sum row
-
-        Returns:
-            Dict with coefficient keys and total values
-        """
-        num_values = len(values)
-
-        if num_values >= 12:
-            # Paired format with chromatic
-            extracted = [values[1], values[3], values[5], values[7], values[9], values[10], values[11]]
-            logger.debug(f"Totals: 12+ values, extracted paired format: {extracted[:5]}")
-        elif num_values >= 10:
-            # Paired format without chromatic
-            extracted = [values[1], values[3], values[5], values[7], values[9], 0.0, 0.0]
-            logger.debug(f"Totals: 10-11 values, extracted paired format: {extracted[:5]}")
-        elif num_values >= 7:
-            # Already unpaired format
-            extracted = values[:7]
-            logger.debug(f"Totals: 7-9 values, using direct format: {extracted[:5]}")
-        elif num_values >= 5:
-            # Minimal format
-            extracted = values[:5] + [0.0, 0.0]
-            logger.debug(f"Totals: 5-6 values, using minimal format: {extracted[:5]}")
-        else:
-            logger.warning(f"Totals: Only {num_values} values, padding with zeros")
-            extracted = values + [0.0] * (7 - num_values)
-
-        totals: dict[str, float] = {}
-        for i, key in enumerate(SEIDEL_COEFFICIENT_KEYS):
-            totals[key] = extracted[i] if i < len(extracted) else 0.0
-        return totals
+    # NOTE: Seidel text parsing has been moved to the Mac side
+    # (zemax-analysis-service/seidel_text_parser.py).
+    # The worker now returns raw text from get_seidel_native().
 
     def trace_rays(
         self,

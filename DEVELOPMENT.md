@@ -72,6 +72,7 @@ All endpoints require `zmx_content` (base64-encoded .zmx file) in the request bo
 **What lives on Mac (zemax-analysis-service):**
 - LLM JSON to ZMX conversion (via Node.js backend)
 - Zernike to Seidel conversion (`seidel_converter.py`)
+- Seidel text parsing (`seidel_text_parser.py`) — moved from worker
 - Response aggregation and hotspot detection
 - Business logic (margins, clamping, thresholds)
 - Matplotlib rendering (for wavefront numpy arrays)
@@ -101,7 +102,7 @@ zemax-worker/
 | `POST /calc-semi-diameters` | Surface aperture calculation | `zmx_content` |
 | `POST /ray-trace-diagnostic` | Ray failure analysis (raw data) | `zmx_content`, `num_rays` |
 | `POST /seidel` | Zernike coefficients (raw) | `zmx_content` |
-| `POST /seidel-native` | Native Seidel coefficients (per-surface + chromatic) | `zmx_content` |
+| `POST /seidel-native` | Native Seidel raw text (parsing on Mac side) | `zmx_content` |
 | `POST /trace-rays` | Ray positions at surfaces | `zmx_content`, `num_rays` |
 | `POST /wavefront` | Wavefront error map + metrics | `zmx_content`, `field_index`, `wavelength_index` |
 | `POST /spot-diagram` | Spot diagram + spot radii | `zmx_content`, `ray_density` |
@@ -411,21 +412,32 @@ def get_my_analysis(self, my_param=5):
 
 ### Step 3: Add Endpoint in `main.py`
 
+Use the `_run_endpoint` helper, which handles timed logging, lock acquisition, connection check, system loading, error handling, and response building:
+
 ```python
 @app.post("/my-analysis", response_model=MyAnalysisResponse)
 async def get_my_analysis(request: MyAnalysisRequest, _=Depends(verify_api_key)):
-    async with _zospy_lock:
-        if _ensure_connected() is None:
-            return MyAnalysisResponse(success=False, error=NOT_CONNECTED_ERROR)
-        try:
-            _load_system_from_request(request)
-            result = zospy_handler.get_my_analysis(my_param=request.my_param)
-            if not result.get("success", False):
-                return MyAnalysisResponse(success=False, error=result.get("error"))
-            return MyAnalysisResponse(success=True, my_result=result.get("my_result"))
-        except Exception as e:
-            _handle_zospy_error("My analysis", e)
-            return MyAnalysisResponse(success=False, error=str(e))
+    return await _run_endpoint(
+        "/my-analysis", MyAnalysisResponse, request,
+        lambda: zospy_handler.get_my_analysis(my_param=request.my_param),
+    )
+```
+
+For endpoints that need custom response mapping (e.g. converting dicts to Pydantic models), pass a `build_response` function:
+
+```python
+@app.post("/my-analysis", response_model=MyAnalysisResponse)
+async def get_my_analysis(request: MyAnalysisRequest, _=Depends(verify_api_key)):
+    def _build_response(result: dict) -> MyAnalysisResponse:
+        if not result.get("success", False):
+            return MyAnalysisResponse(success=False, error=result.get("error"))
+        return MyAnalysisResponse(success=True, items=[MyItem(**i) for i in result["items"]])
+
+    return await _run_endpoint(
+        "/my-analysis", MyAnalysisResponse, request,
+        lambda: zospy_handler.get_my_analysis(my_param=request.my_param),
+        build_response=_build_response,
+    )
 ```
 
 ### Step 4: Add Client Method in zemax-analysis-service
@@ -589,6 +601,40 @@ logger.info(f"System state: mode={mode}, fields={num_fields}, wls={num_wavelengt
 ---
 
 ## Changelog
+
+### 2026-02-05: Move Seidel Text Parsing to Mac Side
+
+**Change:** Moved ~230 lines of Seidel text parsing from `zospy_handler.py` to `zemax-analysis-service/seidel_text_parser.py`.
+
+**Why:** The parsing logic is pure Python string manipulation with no OpticStudio/ZosPy dependency. It belongs on the Mac side per the "dumb executor" pattern.
+
+**What changed:**
+- `zospy_handler.py`: `get_seidel_native()` now returns raw UTF-16 text (`seidel_text` field) instead of parsed data
+- `main.py`: `NativeSeidelResponse` simplified — just `success`, `seidel_text`, `num_surfaces`, `error`
+- Removed from worker: `_parse_seidel_text()`, `_parse_header_line()`, `_parse_seidel_data_row()`, `_extract_floats()`, `_build_seidel_coefficients()`, `_build_seidel_totals()`, `SEIDEL_COEFFICIENT_KEYS`
+- Created on Mac: `seidel_text_parser.py` with unified `_extract_paired_coefficients()` (merged the old duplicate `_build_seidel_coefficients`/`_build_seidel_totals`)
+
+**API contract change:** `/seidel-native` response now contains `seidel_text` (raw string) instead of `per_surface`/`totals`/`header` objects. Mac-side `routers/analysis.py` updated to parse the text.
+
+### 2026-02-05: DRY Up Endpoint Boilerplate
+
+**Change:** Extracted `_run_endpoint()` helper in `main.py` to eliminate repeated boilerplate across all POST endpoints.
+
+**Before (every endpoint):**
+```python
+with timed_operation(...):
+    async with timed_lock_acquire(...):
+        if _ensure_connected() is None: return error
+        try: load system, call handler, build response
+        except: handle error, return error
+```
+
+**After:**
+```python
+return await _run_endpoint("/name", ResponseClass, request, lambda: handler())
+```
+
+**Impact:** Reduced `main.py` from ~856 to ~738 lines. All POST endpoints except `/load-system` and `/health` now use the helper. The `build_response` parameter handles custom result-to-response mapping (used by spot-diagram and evaluate-merit-function).
 
 ### 2026-02-05: Corrected Multi-Worker Documentation
 

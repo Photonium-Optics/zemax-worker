@@ -33,7 +33,7 @@ import logging
 import os
 import tempfile
 from contextlib import asynccontextmanager
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -133,6 +133,57 @@ async def verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Ke
     if ZEMAX_API_KEY is not None:
         if x_api_key != ZEMAX_API_KEY:
             raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+async def _run_endpoint(
+    endpoint_name: str,
+    response_cls: type[BaseModel],
+    request: BaseModel,
+    handler: Callable[[], dict[str, Any]],
+    build_response: Optional[Callable[[dict[str, Any]], BaseModel]] = None,
+) -> BaseModel:
+    """
+    Run a standard endpoint with the common boilerplate:
+    timed_operation → lock → ensure_connected → load_system → handler → response.
+
+    Args:
+        endpoint_name: Name for logging/timing (e.g. "/cross-section")
+        response_cls: Pydantic response model class (must have success and error fields)
+        request: Request with zmx_content field
+        handler: Callable that takes no args and returns a dict from zospy_handler.
+                 The system is already loaded when this is called.
+        build_response: Optional callable(result) -> response_cls for custom mapping.
+                        If None, result dict keys are splatted directly into response_cls.
+
+    Returns:
+        Instance of response_cls with success/error or handler results.
+    """
+    with timed_operation(logger, endpoint_name):
+        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
+            if _ensure_connected() is None:
+                return response_cls(success=False, error=NOT_CONNECTED_ERROR)
+
+            try:
+                _load_system_from_request(request)
+                result = handler()
+
+                if build_response:
+                    return build_response(result)
+
+                if not result.get("success", True):
+                    return response_cls(
+                        success=False,
+                        error=result.get("error", f"{endpoint_name} failed"),
+                    )
+
+                model_fields = set(response_cls.model_fields.keys())
+                return response_cls(success=True, **{
+                    k: v for k, v in result.items()
+                    if k not in ("success", "error") and k in model_fields
+                })
+            except Exception as e:
+                _handle_zospy_error(endpoint_name, e)
+                return response_cls(success=False, error=str(e))
 
 
 def _load_system_from_request(request: BaseModel) -> dict[str, Any]:
@@ -385,48 +436,16 @@ class SpotDiagramResponse(BaseModel):
     error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 
-class SeidelSurfaceData(BaseModel):
-    """Per-surface Seidel aberration coefficients from native OpticStudio analysis."""
-    surface: int = Field(description="Surface number (1-indexed)")
-    S1: float = Field(description="Spherical aberration (SPHA)")
-    S2: float = Field(description="Coma (COMA)")
-    S3: float = Field(description="Astigmatism (ASTI)")
-    S4: float = Field(description="Field curvature / Petzval (FCUR)")
-    S5: float = Field(description="Distortion (DIST)")
-    CLA: Optional[float] = Field(default=None, description="Axial chromatic aberration")
-    CTR: Optional[float] = Field(default=None, description="Transverse chromatic aberration")
-
-
-class SeidelTotals(BaseModel):
-    """Total (sum) Seidel aberration coefficients."""
-    S1: float = Field(description="Total spherical aberration")
-    S2: float = Field(description="Total coma")
-    S3: float = Field(description="Total astigmatism")
-    S4: float = Field(description="Total field curvature / Petzval")
-    S5: float = Field(description="Total distortion")
-    CLA: Optional[float] = Field(default=None, description="Total axial chromatic")
-    CTR: Optional[float] = Field(default=None, description="Total transverse chromatic")
-
-
-class SeidelHeaderData(BaseModel):
-    """Header metadata from Seidel analysis."""
-    wavelength_um: Optional[float] = Field(default=None, description="Primary wavelength in micrometers")
-    petzval_radius: Optional[float] = Field(default=None, description="Petzval radius")
-    optical_invariant: Optional[float] = Field(default=None, description="Optical invariant (Lagrange)")
-
-
 class NativeSeidelResponse(BaseModel):
     """
-    Native Seidel coefficients response from OpticStudio SeidelCoefficients analysis.
+    Native Seidel raw text response from OpticStudio SeidelCoefficients analysis.
 
-    This provides accurate per-surface S1-S5 and chromatic aberrations (CLA, CTR)
-    directly from OpticStudio, unlike the Zernike-based approximation.
+    Returns the raw UTF-16 text output from OpticStudio's GetTextFile().
+    Parsing happens on the Mac side (seidel_text_parser.py).
     """
     success: bool = Field(description="Whether the operation succeeded")
-    per_surface: Optional[list[SeidelSurfaceData]] = Field(default=None, description="Per-surface Seidel coefficients")
-    totals: Optional[SeidelTotals] = Field(default=None, description="Total (sum) Seidel coefficients")
-    header: Optional[SeidelHeaderData] = Field(default=None, description="Analysis header metadata")
-    num_surfaces: Optional[int] = Field(default=None, description="Number of surfaces with Seidel data")
+    seidel_text: Optional[str] = Field(default=None, description="Raw text from OpticStudio GetTextFile()")
+    num_surfaces: Optional[int] = Field(default=None, description="Number of optical surfaces")
     error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 
@@ -525,54 +544,19 @@ async def load_system(request: SystemRequest, _: None = Depends(verify_api_key))
 @app.post("/cross-section", response_model=CrossSectionResponse)
 async def get_cross_section(request: SystemRequest, _: None = Depends(verify_api_key)) -> CrossSectionResponse:
     """Generate cross-section diagram using ZosPy's CrossSection analysis."""
-    with timed_operation(logger, "/cross-section"):
-        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
-            if _ensure_connected() is None:
-                return CrossSectionResponse(success=False, error=NOT_CONNECTED_ERROR)
-
-            try:
-                # Load system from request
-                _load_system_from_request(request)
-
-                # Generate cross-section (system already loaded)
-                result = zospy_handler.get_cross_section()
-                return CrossSectionResponse(
-                    success=True,
-                    image=result.get("image"),
-                    image_format=result.get("image_format"),
-                    array_shape=result.get("array_shape"),
-                    array_dtype=result.get("array_dtype"),
-                    paraxial=result.get("paraxial"),
-                    surfaces=result.get("surfaces"),
-                    rays_total=result.get("rays_total"),
-                    rays_through=result.get("rays_through"),
-                )
-            except Exception as e:
-                _handle_zospy_error("Cross-section", e)
-                return CrossSectionResponse(success=False, error=str(e))
+    return await _run_endpoint(
+        "/cross-section", CrossSectionResponse, request,
+        lambda: zospy_handler.get_cross_section(),
+    )
 
 
 @app.post("/calc-semi-diameters", response_model=SemiDiametersResponse)
 async def calc_semi_diameters(request: SystemRequest, _: None = Depends(verify_api_key)) -> SemiDiametersResponse:
     """Calculate semi-diameters by tracing edge rays."""
-    with timed_operation(logger, "/calc-semi-diameters"):
-        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
-            if _ensure_connected() is None:
-                return SemiDiametersResponse(success=False, error=NOT_CONNECTED_ERROR)
-
-            try:
-                # Load system from request
-                _load_system_from_request(request)
-
-                # Calculate semi-diameters (system already loaded)
-                result = zospy_handler.calc_semi_diameters()
-                return SemiDiametersResponse(
-                    success=True,
-                    semi_diameters=result.get("semi_diameters", []),
-                )
-            except Exception as e:
-                _handle_zospy_error("Calc semi-diameters", e)
-                return SemiDiametersResponse(success=False, error=str(e))
+    return await _run_endpoint(
+        "/calc-semi-diameters", SemiDiametersResponse, request,
+        lambda: zospy_handler.calc_semi_diameters(),
+    )
 
 
 @app.post("/ray-trace-diagnostic", response_model=RayTraceDiagnosticResponse)
@@ -587,118 +571,35 @@ async def ray_trace_diagnostic(
     All aggregation, hotspot detection, and threshold calculations
     happen on the Mac side (zemax-analysis-service).
     """
-    with timed_operation(logger, "/ray-trace-diagnostic"):
-        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
-            if _ensure_connected() is None:
-                return RayTraceDiagnosticResponse(success=False, error=NOT_CONNECTED_ERROR)
-
-            try:
-                # Load system from request
-                _load_system_from_request(request)
-
-                # Run ray trace (system already loaded)
-                result = zospy_handler.ray_trace_diagnostic(
-                    num_rays=request.num_rays,
-                    distribution=request.distribution,
-                )
-                return RayTraceDiagnosticResponse(
-                    success=True,
-                    paraxial=result.get("paraxial"),
-                    num_surfaces=result.get("num_surfaces"),
-                    num_fields=result.get("num_fields"),
-                    raw_rays=result.get("raw_rays"),
-                    surface_semi_diameters=result.get("surface_semi_diameters"),
-                )
-            except Exception as e:
-                _handle_zospy_error("Ray trace diagnostic", e)
-                return RayTraceDiagnosticResponse(success=False, error=str(e))
+    return await _run_endpoint(
+        "/ray-trace-diagnostic", RayTraceDiagnosticResponse, request,
+        lambda: zospy_handler.ray_trace_diagnostic(
+            num_rays=request.num_rays,
+            distribution=request.distribution,
+        ),
+    )
 
 
 @app.post("/seidel", response_model=ZernikeResponse)
 async def get_zernike(request: SystemRequest, _: None = Depends(verify_api_key)) -> ZernikeResponse:
     """Get raw Zernike coefficients - conversion to Seidel happens on Mac side."""
-    with timed_operation(logger, "/seidel"):
-        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
-            if _ensure_connected() is None:
-                return ZernikeResponse(success=False, error=NOT_CONNECTED_ERROR)
-
-            try:
-                # Load system from request
-                _load_system_from_request(request)
-
-                # Get Zernike coefficients (system already loaded)
-                result = zospy_handler.get_seidel()
-
-                # Check if analysis succeeded
-                if not result.get("success", False):
-                    return ZernikeResponse(
-                        success=False,
-                        error=result.get("error", "Zernike analysis failed"),
-                    )
-
-                return ZernikeResponse(
-                    success=True,
-                    zernike_coefficients=result.get("zernike_coefficients"),
-                    wavelength_um=result.get("wavelength_um"),
-                    num_surfaces=result.get("num_surfaces", 0),
-                )
-            except Exception as e:
-                _handle_zospy_error("Zernike", e)
-                return ZernikeResponse(success=False, error=str(e))
+    return await _run_endpoint(
+        "/seidel", ZernikeResponse, request,
+        lambda: zospy_handler.get_seidel(),
+    )
 
 
 @app.post("/seidel-native", response_model=NativeSeidelResponse)
 async def get_seidel_native(request: SystemRequest, _: None = Depends(verify_api_key)) -> NativeSeidelResponse:
     """
-    Get native Seidel coefficients using OpticStudio's SeidelCoefficients analysis.
+    Get native Seidel text output from OpticStudio's SeidelCoefficients analysis.
 
-    This provides accurate per-surface S1-S5 and chromatic aberrations (CLA, CTR)
-    directly from OpticStudio, unlike the Zernike-based approximation in /seidel.
+    Returns raw text — parsing happens on the Mac side (seidel_text_parser.py).
     """
-    with timed_operation(logger, "/seidel-native"):
-        logger.info("seidel-native: Starting native Seidel analysis")
-        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
-            if _ensure_connected() is None:
-                return NativeSeidelResponse(success=False, error=NOT_CONNECTED_ERROR)
-
-            try:
-                # Load system from request
-                _load_system_from_request(request)
-
-                # Get native Seidel coefficients (system already loaded)
-                result = zospy_handler.get_seidel_native()
-
-                if not result.get("success", False):
-                    return NativeSeidelResponse(
-                        success=False,
-                        error=result.get("error", "Native Seidel analysis failed"),
-                    )
-
-                # Convert per_surface dicts to SeidelSurfaceData models
-                per_surface = None
-                if result.get("per_surface"):
-                    per_surface = [SeidelSurfaceData(**sd) for sd in result["per_surface"]]
-
-                # Convert totals dict to SeidelTotals model
-                totals = None
-                if result.get("totals"):
-                    totals = SeidelTotals(**result["totals"])
-
-                # Convert header dict to SeidelHeaderData model
-                header = None
-                if result.get("header"):
-                    header = SeidelHeaderData(**result["header"])
-
-                return NativeSeidelResponse(
-                    success=True,
-                    per_surface=per_surface,
-                    totals=totals,
-                    header=header,
-                    num_surfaces=result.get("num_surfaces"),
-                )
-            except Exception as e:
-                _handle_zospy_error("Native Seidel", e)
-                return NativeSeidelResponse(success=False, error=str(e))
+    return await _run_endpoint(
+        "/seidel-native", NativeSeidelResponse, request,
+        lambda: zospy_handler.get_seidel_native(),
+    )
 
 
 @app.post("/trace-rays", response_model=TraceRaysResponse)
@@ -708,27 +609,10 @@ async def trace_rays(
     _: None = Depends(verify_api_key),
 ) -> TraceRaysResponse:
     """Trace rays through the system and return positions at each surface."""
-    with timed_operation(logger, "/trace-rays"):
-        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
-            if _ensure_connected() is None:
-                return TraceRaysResponse(success=False, error=NOT_CONNECTED_ERROR)
-
-            try:
-                # Load system from request
-                _load_system_from_request(request)
-
-                # Trace rays (system already loaded)
-                result = zospy_handler.trace_rays(num_rays=num_rays)
-                return TraceRaysResponse(
-                    success=True,
-                    num_surfaces=result.get("num_surfaces"),
-                    num_fields=result.get("num_fields"),
-                    num_wavelengths=result.get("num_wavelengths"),
-                    data=result.get("data"),
-                )
-            except Exception as e:
-                _handle_zospy_error("Trace rays", e)
-                return TraceRaysResponse(success=False, error=str(e))
+    return await _run_endpoint(
+        "/trace-rays", TraceRaysResponse, request,
+        lambda: zospy_handler.trace_rays(num_rays=num_rays),
+    )
 
 
 @app.post("/wavefront", response_model=WavefrontResponse)
@@ -742,44 +626,14 @@ async def get_wavefront(
     This is a "dumb executor" endpoint - returns raw data only.
     Wavefront map image rendering happens on Mac side using matplotlib.
     """
-    with timed_operation(logger, "/wavefront"):
-        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
-            if _ensure_connected() is None:
-                return WavefrontResponse(success=False, error=NOT_CONNECTED_ERROR)
-
-            try:
-                # Load system from request
-                _load_system_from_request(request)
-
-                # Get wavefront data (system already loaded)
-                result = zospy_handler.get_wavefront(
-                    field_index=request.field_index,
-                    wavelength_index=request.wavelength_index,
-                    sampling=request.sampling,
-                )
-
-                if not result.get("success", False):
-                    return WavefrontResponse(
-                        success=False,
-                        error=result.get("error", "Wavefront analysis failed"),
-                    )
-
-                return WavefrontResponse(
-                    success=True,
-                    rms_waves=result.get("rms_waves"),
-                    pv_waves=result.get("pv_waves"),
-                    strehl_ratio=result.get("strehl_ratio"),
-                    wavelength_um=result.get("wavelength_um"),
-                    field_x=result.get("field_x"),
-                    field_y=result.get("field_y"),
-                    image=result.get("image"),
-                    image_format=result.get("image_format"),
-                    array_shape=result.get("array_shape"),
-                    array_dtype=result.get("array_dtype"),
-                )
-            except Exception as e:
-                _handle_zospy_error("Wavefront", e)
-                return WavefrontResponse(success=False, error=str(e))
+    return await _run_endpoint(
+        "/wavefront", WavefrontResponse, request,
+        lambda: zospy_handler.get_wavefront(
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
+            sampling=request.sampling,
+        ),
+    )
 
 
 @app.post("/spot-diagram", response_model=SpotDiagramResponse)
@@ -793,44 +647,33 @@ async def get_spot_diagram(
     This is a "dumb executor" endpoint - returns raw data only.
     Spot diagram image rendering happens on Mac side if PNG export fails.
     """
-    with timed_operation(logger, "/spot-diagram"):
-        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
-            if _ensure_connected() is None:
-                return SpotDiagramResponse(success=False, error=NOT_CONNECTED_ERROR)
+    def _build_spot_response(result: dict) -> SpotDiagramResponse:
+        if not result.get("success", False):
+            return SpotDiagramResponse(
+                success=False,
+                error=result.get("error", "Spot diagram analysis failed"),
+            )
+        spot_data = None
+        if result.get("spot_data"):
+            spot_data = [SpotFieldData(**sd) for sd in result["spot_data"]]
+        return SpotDiagramResponse(
+            success=True,
+            image=result.get("image"),
+            image_format=result.get("image_format"),
+            array_shape=result.get("array_shape"),
+            array_dtype=result.get("array_dtype"),
+            spot_data=spot_data,
+            airy_radius=result.get("airy_radius"),
+        )
 
-            try:
-                # Load system from request
-                _load_system_from_request(request)
-
-                # Get spot diagram data (system already loaded)
-                result = zospy_handler.get_spot_diagram(
-                    ray_density=request.ray_density,
-                    reference=request.reference,
-                )
-
-                if not result.get("success", False):
-                    return SpotDiagramResponse(
-                        success=False,
-                        error=result.get("error", "Spot diagram analysis failed"),
-                    )
-
-                # Convert spot_data dicts to SpotFieldData models
-                spot_data = None
-                if result.get("spot_data"):
-                    spot_data = [SpotFieldData(**sd) for sd in result["spot_data"]]
-
-                return SpotDiagramResponse(
-                    success=True,
-                    image=result.get("image"),
-                    image_format=result.get("image_format"),
-                    array_shape=result.get("array_shape"),
-                    array_dtype=result.get("array_dtype"),
-                    spot_data=spot_data,
-                    airy_radius=result.get("airy_radius"),
-                )
-            except Exception as e:
-                _handle_zospy_error("Spot diagram", e)
-                return SpotDiagramResponse(success=False, error=str(e))
+    return await _run_endpoint(
+        "/spot-diagram", SpotDiagramResponse, request,
+        lambda: zospy_handler.get_spot_diagram(
+            ray_density=request.ray_density,
+            reference=request.reference,
+        ),
+        build_response=_build_spot_response,
+    )
 
 
 @app.post("/evaluate-merit-function", response_model=MeritFunctionResponse)
@@ -844,49 +687,35 @@ async def evaluate_merit_function(
     Loads the system from zmx_content, populates the Merit Function Editor
     with the provided operand rows, and returns computed values and contributions.
     """
-    with timed_operation(logger, "/evaluate-merit-function"):
-        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
-            if _ensure_connected() is None:
-                return MeritFunctionResponse(success=False, error=NOT_CONNECTED_ERROR)
+    def _build_merit_response(result: dict) -> MeritFunctionResponse:
+        raw_rows = result.get("evaluated_rows", [])
+        evaluated = [EvaluatedOperandRow(**r) for r in raw_rows] or None
+        row_errors = result.get("row_errors", []) or None
+        return MeritFunctionResponse(
+            success=result.get("success", False),
+            error=result.get("error") if not result.get("success", False) else None,
+            total_merit=result.get("total_merit"),
+            evaluated_rows=evaluated,
+            row_errors=row_errors,
+        )
 
-            try:
-                _load_system_from_request(request)
+    def _call_handler():
+        operand_dicts = [
+            {
+                "operand_code": row.operand_code,
+                "params": row.params,
+                "target": row.target,
+                "weight": row.weight,
+            }
+            for row in request.operand_rows
+        ]
+        return zospy_handler.evaluate_merit_function(operand_dicts)
 
-                # Convert Pydantic models to dicts for the handler
-                operand_dicts = [
-                    {
-                        "operand_code": row.operand_code,
-                        "params": row.params,
-                        "target": row.target,
-                        "weight": row.weight,
-                    }
-                    for row in request.operand_rows
-                ]
-
-                result = zospy_handler.evaluate_merit_function(operand_dicts)
-
-                raw_rows = result.get("evaluated_rows", [])
-                evaluated = [EvaluatedOperandRow(**r) for r in raw_rows] or None
-                raw_errors = result.get("row_errors", [])
-                row_errors = raw_errors or None
-
-                if not result.get("success", False):
-                    return MeritFunctionResponse(
-                        success=False,
-                        error=result.get("error", "Merit function evaluation failed"),
-                        evaluated_rows=evaluated,
-                        row_errors=row_errors,
-                    )
-
-                return MeritFunctionResponse(
-                    success=True,
-                    total_merit=result.get("total_merit"),
-                    evaluated_rows=evaluated,
-                    row_errors=row_errors,
-                )
-            except Exception as e:
-                _handle_zospy_error("Evaluate merit function", e)
-                return MeritFunctionResponse(success=False, error=str(e))
+    return await _run_endpoint(
+        "/evaluate-merit-function", MeritFunctionResponse, request,
+        _call_handler,
+        build_response=_build_merit_response,
+    )
 
 
 if __name__ == "__main__":
