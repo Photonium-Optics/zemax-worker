@@ -2112,6 +2112,185 @@ class ZosPyHandler:
         return None
 
 
+    def evaluate_merit_function(self, operand_rows: list[dict]) -> dict[str, Any]:
+        """
+        Evaluate a merit function by constructing operands in the MFE and computing.
+
+        Args:
+            operand_rows: List of dicts with keys:
+                - operand_code: str (e.g. "EFFL")
+                - params: list of up to 6 values (None for unused slots)
+                - target: float
+                - weight: float
+
+        Returns:
+            Dict with:
+                - success: bool
+                - total_merit: float or None
+                - evaluated_rows: list of per-row results
+                - row_errors: list of per-row error messages
+        """
+        zp = self._zp
+        mfe = self.oss.MFE
+
+        # Clear existing MFE
+        mfe.DeleteAllRows()
+
+        evaluated_rows = []
+        row_errors = []
+        valid_operand_indices = []  # (mfe_row_number, original_row_index)
+
+        # MFE column constants for parameter cells
+        try:
+            mfe_cols = zp.constants.Editors.MFE.MeritColumn
+        except AttributeError:
+            return {
+                "success": False,
+                "error": "Cannot access MFE column constants",
+                "total_merit": None,
+                "evaluated_rows": [],
+                "row_errors": [{"row_index": 0, "error": "Cannot access MFE column constants"}],
+            }
+
+        mfe_row_number = 0  # Tracks actual MFE row position (1-based)
+
+        for row_index, row in enumerate(operand_rows):
+            code = row.get("operand_code", "")
+            params = row.get("params", [])
+            target = float(row.get("target", 0))
+            weight = float(row.get("weight", 1))
+
+            # Resolve operand type enum
+            try:
+                op_type = getattr(zp.constants.Editors.MFE.MeritOperandType, code)
+            except AttributeError:
+                row_errors.append({
+                    "row_index": row_index,
+                    "error": f"Unknown operand code: {code}",
+                })
+                evaluated_rows.append({
+                    "row_index": row_index,
+                    "operand_code": code,
+                    "value": None,
+                    "target": target,
+                    "weight": weight,
+                    "contribution": None,
+                    "error": f"Unknown operand code: {code}",
+                })
+                continue
+
+            mfe_row_number += 1
+
+            # After DeleteAllRows, MFE retains 1 empty row.
+            # First operand uses GetOperandAt(1), subsequent use InsertNewOperandAt.
+            if mfe_row_number == 1:
+                op = mfe.GetOperandAt(1)
+            else:
+                op = mfe.InsertNewOperandAt(mfe_row_number)
+
+            try:
+                op.ChangeType(op_type)
+                op.Target = float(target)
+                op.Weight = float(weight)
+
+                # Set parameter cells
+                # Slots 0-1 (Int1, Int2) -> IntegerValue
+                # Slots 2-5 (Hx, Hy, Px, Py) -> DoubleValue
+                param_columns = [
+                    mfe_cols.Param1, mfe_cols.Param2,
+                    mfe_cols.Param3, mfe_cols.Param4,
+                    mfe_cols.Param5, mfe_cols.Param6,
+                ]
+                for i, col in enumerate(param_columns):
+                    if i < len(params) and params[i] is not None:
+                        cell = op.GetOperandCell(col)
+                        if i < 2:
+                            cell.IntegerValue = int(float(params[i]))
+                        else:
+                            cell.DoubleValue = float(params[i])
+
+                valid_operand_indices.append((mfe_row_number, row_index))
+
+            except Exception as e:
+                logger.warning(f"MFE row {mfe_row_number} ({code}): error setting params: {e}")
+                row_errors.append({
+                    "row_index": row_index,
+                    "error": f"Error configuring {code}: {e}",
+                })
+                evaluated_rows.append({
+                    "row_index": row_index,
+                    "operand_code": code,
+                    "value": None,
+                    "target": target,
+                    "weight": weight,
+                    "contribution": None,
+                    "error": f"Error configuring {code}: {e}",
+                })
+                continue
+
+        if not valid_operand_indices:
+            error_summary = f"All {len(operand_rows)} operand row(s) failed validation"
+            return {
+                "success": False,
+                "error": error_summary,
+                "total_merit": None,
+                "evaluated_rows": evaluated_rows,
+                "row_errors": row_errors,
+            }
+
+        # Calculate merit function
+        try:
+            total_merit = float(mfe.CalculateMeritFunction())
+        except Exception as e:
+            logger.error(f"MFE CalculateMeritFunction failed: {e}")
+            return {
+                "success": False,
+                "error": f"CalculateMeritFunction failed: {e}",
+                "total_merit": None,
+                "evaluated_rows": evaluated_rows,
+                "row_errors": row_errors + [{"row_index": -1, "error": f"CalculateMeritFunction failed: {e}"}],
+            }
+
+        # Read back results for each valid row
+        for mfe_row_num, orig_index in valid_operand_indices:
+            row = operand_rows[orig_index]
+            try:
+                op = mfe.GetOperandAt(mfe_row_num)
+                value = _extract_value(op.Value, None)
+                contribution = _extract_value(op.Contribution, None)
+
+                evaluated_rows.append({
+                    "row_index": orig_index,
+                    "operand_code": row.get("operand_code", ""),
+                    "value": value,
+                    "target": float(row.get("target", 0)),
+                    "weight": float(row.get("weight", 1)),
+                    "contribution": contribution,
+                    "error": None,
+                })
+            except Exception as e:
+                logger.warning(f"Error reading MFE row {mfe_row_num}: {e}")
+                evaluated_rows.append({
+                    "row_index": orig_index,
+                    "operand_code": row.get("operand_code", ""),
+                    "value": None,
+                    "target": float(row.get("target", 0)),
+                    "weight": float(row.get("weight", 1)),
+                    "contribution": None,
+                    "error": f"Error reading result: {e}",
+                })
+
+        # Sort evaluated_rows by row_index for consistent output
+        evaluated_rows.sort(key=lambda r: r["row_index"])
+
+        return {
+            "success": True,
+            "total_merit": total_merit,
+            "evaluated_rows": evaluated_rows,
+            "row_errors": row_errors,
+        }
+
+
 class ZosPyError(Exception):
     """Exception raised when ZosPy operations fail."""
     pass

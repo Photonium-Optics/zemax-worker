@@ -90,6 +90,7 @@ zemax-worker/
 | `POST /trace-rays` | Ray positions at surfaces | `zmx_content`, `num_rays` |
 | `POST /wavefront` | Wavefront error map + metrics | `zmx_content`, `field_index`, `wavelength_index` |
 | `POST /spot-diagram` | Spot diagram + spot radii | `zmx_content`, `ray_density` |
+| `POST /evaluate-merit-function` | Evaluate merit function operands | `zmx_content`, `operand_rows` |
 
 All endpoints return `{"success": true, ...}` or `{"success": false, "error": "..."}`.
 
@@ -446,6 +447,37 @@ op1.Target = 50.0
 op1.Weight = 1
 ```
 
+### Merit Function Evaluation (evaluate_merit_function)
+
+```python
+mfe = oss.MFE
+mfe.DeleteAllRows()
+
+# After DeleteAllRows, MFE retains 1 empty row
+# First operand: GetOperandAt(1), subsequent: InsertNewOperandAt(n)
+op1 = mfe.GetOperandAt(1)
+op1.ChangeType(zp.constants.Editors.MFE.MeritOperandType.EFFL)
+op1.Target = 100.0
+op1.Weight = 1.0
+
+# Set parameter cells (Int1/Int2 = IntegerValue, Hx-Py = DoubleValue)
+mfe_cols = zp.constants.Editors.MFE.MeritColumn
+cell = op1.GetOperandCell(mfe_cols.Param1)
+cell.IntegerValue = 0  # Surface number
+
+# Calculate and read back
+total_merit = float(mfe.CalculateMeritFunction())
+value = _extract_value(op1.Value)
+contribution = _extract_value(op1.Contribution)
+```
+
+**Key quirks:**
+- `DeleteAllRows()` leaves 1 empty row — use `GetOperandAt(1)` for first, `InsertNewOperandAt(n)` for rest
+- Params 1-2 (Int1, Int2) use `cell.IntegerValue = int(val)`
+- Params 3-6 (Hx, Hy, Px, Py) use `cell.DoubleValue = float(val)`
+- Operand type resolution: `getattr(zp.constants.Editors.MFE.MeritOperandType, "EFFL")`
+- Unknown operand codes raise `AttributeError` — catch per-row and continue
+
 ### Running Local Optimization
 
 ```python
@@ -548,6 +580,20 @@ logger.info(f"System state: mode={mode}, fields={num_fields}, wls={num_wavelengt
 ---
 
 ## Changelog
+
+### 2026-02-05: Merit Function Evaluation Endpoint
+
+**Change:** Added `POST /evaluate-merit-function` endpoint and `evaluate_merit_function()` handler method.
+
+**What it does:**
+- Accepts ZMX content + list of operand rows (code, params, target, weight)
+- Loads system, constructs MFE operands, calls `CalculateMeritFunction()`
+- Returns per-row `value` and `contribution`, plus `total_merit`
+- Per-row error handling: invalid operand codes are skipped, valid rows still evaluate
+
+**Files modified:**
+- `zospy_handler.py` — Added `evaluate_merit_function()` method
+- `main.py` — Added Pydantic models (`MeritFunctionRequest`, `MeritFunctionResponse`, etc.) and endpoint
 
 ### 2026-02-05: Lazy Connection on Startup
 

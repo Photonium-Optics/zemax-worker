@@ -421,6 +421,40 @@ class NativeSeidelResponse(BaseModel):
     error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 
+class MeritFunctionOperandRow(BaseModel):
+    """A single merit function operand row."""
+    operand_code: str = Field(description="Zemax operand code (e.g. EFFL, MTFA)")
+    params: list[Optional[float]] = Field(default_factory=list, max_length=6, description="Up to 6 parameter values [Int1, Int2, Hx, Hy, Px, Py]")
+    target: float = Field(default=0, description="Target value")
+    weight: float = Field(default=1, description="Weight")
+
+
+class MeritFunctionRequest(BaseModel):
+    """Request to evaluate a merit function."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    operand_rows: list[MeritFunctionOperandRow] = Field(max_length=200, description="Merit function operand rows")
+
+
+class EvaluatedOperandRow(BaseModel):
+    """Result for a single evaluated operand row."""
+    row_index: int = Field(description="0-based index in the original request")
+    operand_code: str = Field(description="Zemax operand code")
+    value: Optional[float] = Field(default=None, description="Computed value")
+    target: float = Field(description="Target value")
+    weight: float = Field(description="Weight")
+    contribution: Optional[float] = Field(default=None, description="Contribution to total merit")
+    error: Optional[str] = Field(default=None, description="Per-row error message")
+
+
+class MeritFunctionResponse(BaseModel):
+    """Response from merit function evaluation."""
+    success: bool = Field(description="Whether the evaluation succeeded")
+    total_merit: Optional[float] = Field(default=None, description="Total merit function value")
+    evaluated_rows: Optional[list[EvaluatedOperandRow]] = Field(default=None, description="Per-row results")
+    row_errors: Optional[list[dict[str, Any]]] = Field(default=None, description="Per-row errors for invalid/failed operands")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
 # =============================================================================
 # Endpoints
 # =============================================================================
@@ -788,6 +822,62 @@ async def get_spot_diagram(
             except Exception as e:
                 _handle_zospy_error("Spot diagram", e)
                 return SpotDiagramResponse(success=False, error=str(e))
+
+
+@app.post("/evaluate-merit-function", response_model=MeritFunctionResponse)
+async def evaluate_merit_function(
+    request: MeritFunctionRequest,
+    _: None = Depends(verify_api_key),
+) -> MeritFunctionResponse:
+    """
+    Evaluate a merit function: construct operands in the MFE and compute.
+
+    Loads the system from zmx_content, populates the Merit Function Editor
+    with the provided operand rows, and returns computed values and contributions.
+    """
+    with timed_operation(logger, "/evaluate-merit-function"):
+        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
+            if _ensure_connected() is None:
+                return MeritFunctionResponse(success=False, error=NOT_CONNECTED_ERROR)
+
+            try:
+                _load_system_from_request(request)
+
+                # Convert Pydantic models to dicts for the handler
+                operand_dicts = [
+                    {
+                        "operand_code": row.operand_code,
+                        "params": row.params,
+                        "target": row.target,
+                        "weight": row.weight,
+                    }
+                    for row in request.operand_rows
+                ]
+
+                result = zospy_handler.evaluate_merit_function(operand_dicts)
+
+                raw_rows = result.get("evaluated_rows", [])
+                evaluated = [EvaluatedOperandRow(**r) for r in raw_rows] or None
+                raw_errors = result.get("row_errors", [])
+                row_errors = raw_errors or None
+
+                if not result.get("success", False):
+                    return MeritFunctionResponse(
+                        success=False,
+                        error=result.get("error", "Merit function evaluation failed"),
+                        evaluated_rows=evaluated,
+                        row_errors=row_errors,
+                    )
+
+                return MeritFunctionResponse(
+                    success=True,
+                    total_merit=result.get("total_merit"),
+                    evaluated_rows=evaluated,
+                    row_errors=row_errors,
+                )
+            except Exception as e:
+                _handle_zospy_error("Evaluate merit function", e)
+                return MeritFunctionResponse(success=False, error=str(e))
 
 
 if __name__ == "__main__":
