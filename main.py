@@ -176,6 +176,8 @@ async def _run_endpoint(
                         error=result.get("error", f"{endpoint_name} failed"),
                     )
 
+                # Filter to known model fields; exclude "success"/"error" to avoid
+                # duplicate keyword args (we set success=True explicitly above).
                 model_fields = set(response_cls.model_fields.keys())
                 return response_cls(success=True, **{
                     k: v for k, v in result.items()
@@ -700,15 +702,7 @@ async def evaluate_merit_function(
         )
 
     def _call_handler():
-        operand_dicts = [
-            {
-                "operand_code": row.operand_code,
-                "params": row.params,
-                "target": row.target,
-                "weight": row.weight,
-            }
-            for row in request.operand_rows
-        ]
+        operand_dicts = [row.model_dump() for row in request.operand_rows]
         return zospy_handler.evaluate_merit_function(operand_dicts)
 
     return await _run_endpoint(
