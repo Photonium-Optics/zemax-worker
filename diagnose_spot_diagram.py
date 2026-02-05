@@ -222,9 +222,9 @@ def main():
             oss.new()
             lde = oss.LDE
 
-            # Set up aperture and field
-            oss.SystemData.Aperture.ApertureType = 1  # EPD
-            oss.SystemData.Aperture.ApertureValue = 10.0
+            # Set up aperture and field (use enum constants for Python.NET 3.0 compatibility)
+            oss.SystemData.Aperture.ApertureType = zp.constants.SystemData.ZemaxApertureType.EntrancePupilDiameter
+            oss.SystemData.Aperture.ApertureValue = float(10.0)
 
             # Add a field
             oss.SystemData.Fields.AddField(0, 5, 1.0)
@@ -232,13 +232,13 @@ def main():
             # Add surfaces for a simple lens
             # Surface 1: Front of lens
             lde.InsertNewSurfaceAt(1)
-            lde.GetSurfaceAt(1).Radius = 50.0
-            lde.GetSurfaceAt(1).Thickness = 5.0
+            lde.GetSurfaceAt(1).Radius = float(50.0)
+            lde.GetSurfaceAt(1).Thickness = float(5.0)
             lde.GetSurfaceAt(1).Material = "N-BK7"
 
             # Surface 2: Back of lens
-            lde.GetSurfaceAt(2).Radius = -50.0
-            lde.GetSurfaceAt(2).Thickness = 95.0
+            lde.GetSurfaceAt(2).Radius = float(-50.0)
+            lde.GetSurfaceAt(2).Thickness = float(95.0)
 
             print("   ✓ Test system created (simple singlet)")
         except Exception as e:

@@ -219,18 +219,19 @@ def main():
             oss.new()
             lde = oss.LDE
 
-            oss.SystemData.Aperture.ApertureType = 1  # EPD
-            oss.SystemData.Aperture.ApertureValue = 10.0
+            # Use enum constants for Python.NET 3.0 compatibility
+            oss.SystemData.Aperture.ApertureType = zp.constants.SystemData.ZemaxApertureType.EntrancePupilDiameter
+            oss.SystemData.Aperture.ApertureValue = float(10.0)
 
             oss.SystemData.Fields.AddField(0, 5, 1.0)
 
             lde.InsertNewSurfaceAt(1)
-            lde.GetSurfaceAt(1).Radius = 50.0
-            lde.GetSurfaceAt(1).Thickness = 5.0
+            lde.GetSurfaceAt(1).Radius = float(50.0)
+            lde.GetSurfaceAt(1).Thickness = float(5.0)
             lde.GetSurfaceAt(1).Material = "N-BK7"
 
-            lde.GetSurfaceAt(2).Radius = -50.0
-            lde.GetSurfaceAt(2).Thickness = 95.0
+            lde.GetSurfaceAt(2).Radius = float(-50.0)
+            lde.GetSurfaceAt(2).Thickness = float(95.0)
 
             print("   ✓ Test system created")
         except Exception as e:
