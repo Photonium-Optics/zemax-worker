@@ -61,8 +61,9 @@ DEFAULT_HOST = "0.0.0.0"
 ZEMAX_API_KEY = os.getenv("ZEMAX_API_KEY", None)
 
 # Number of uvicorn worker processes serving this URL.
-# Reads WEB_CONCURRENCY (standard env var that uvicorn also reads for --workers default).
-# Operator should set this to match the actual --workers N value.
+# IMPORTANT: Always start with `python main.py` (not `uvicorn` directly) to ensure
+# this value matches the actual --workers flag passed to uvicorn.
+# The analysis service reads this from /health to size its task queue.
 WORKER_COUNT = int(os.getenv("WEB_CONCURRENCY", "1"))
 
 # =============================================================================
@@ -241,6 +242,7 @@ async def lifespan(app: FastAPI):
     # Startup: Connection is lazy - happens on first request via _ensure_connected()
     # This allows the server to start instantly without waiting for OpticStudio/ZosPy
     logger.info("Starting Zemax Worker (lazy connection mode - connects on first request)")
+    logger.info(f"Reporting worker_count={WORKER_COUNT} (from WEB_CONCURRENCY env var)")
 
     yield
 
