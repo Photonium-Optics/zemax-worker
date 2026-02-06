@@ -767,7 +767,8 @@ if __name__ == "__main__":
     dev_mode = os.getenv("DEV_MODE", "false").lower() == "true"
     # Number of workers - each gets its own OpticStudio connection (uses 1 license seat each)
     # Default to 1, but can increase up to your license limit (Premium=8, Professional=4, Perpetual=2)
-    num_workers = int(os.getenv("WORKERS", "1"))
+    # Uses WEB_CONCURRENCY (same env var that /health reports and uvicorn recognizes)
+    num_workers = WORKER_COUNT
 
     uvicorn.run(
         "main:app",
