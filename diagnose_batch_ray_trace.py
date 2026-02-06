@@ -155,7 +155,7 @@ def main():
     zmx_path = sys.argv[1] if len(sys.argv) > 1 else None
 
     zos = zp.ZOS()
-    oss = zos.connect(mode="extension")
+    oss = zos.connect(mode="standalone")
     print(f"Connected to OpticStudio")
 
     if zmx_path:

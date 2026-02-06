@@ -124,7 +124,17 @@ async def get_my_analysis(request: MyRequest, _=Depends(verify_api_key)):
 
 ## Critical Rules for ZosPy
 
-### 1. COM Type Conversion
+### 1. Always Use Standalone Mode
+**NEVER use `mode="extension"` — always use `mode="standalone"`:**
+```python
+# WRONG: requires interactive OpticStudio UI with API license
+oss = zos.connect(mode="extension")
+
+# RIGHT: headless, works with any license
+oss = zos.connect(mode="standalone")
+```
+
+### 2. COM Type Conversion
 **All numerics to ZosPy MUST be Python `float()`, not numpy types:**
 ```python
 # WRONG: numpy.float64 causes COM errors
@@ -134,7 +144,7 @@ ray_trace = SingleRayTrace(px=px)  # px from np.linspace
 ray_trace = SingleRayTrace(px=float(px))
 ```
 
-### 2. ZosPy 2.x UnitField Objects
+### 3. ZosPy 2.x UnitField Objects
 ZosPy 2.x returns `UnitField` objects (not plain floats) for values with units. Always use `_extract_value()`:
 ```python
 def _extract_value(obj, default=0.0):
@@ -148,12 +158,12 @@ def _extract_value(obj, default=0.0):
 
 Apply to: `ApertureValue`, `field.X/Y`, `surface.Radius/Thickness/SemiDiameter/Conic`, `Wavelength`, EFL, any analysis metric (RMS, P-V, Strehl, Airy radius, spot radii, MFE values).
 
-### 3. Index Conventions
+### 4. Index Conventions
 - **Fields, wavelengths, Zernike terms:** 1-based (`GetField(1)`, `GetWavelength(1)`)
 - **LDE surfaces:** 0-based (surface 0 = object, skip it: `for i in range(1, oss.LDE.NumberOfSurfaces)`)
 - **API responses:** 0-based for consistency with LLM JSON schema
 
-### 4. Wavelength Selection
+### 5. Wavelength Selection
 ```python
 # WRONG: method doesn't exist
 wl_data.SelectWavelength(index)
@@ -161,16 +171,16 @@ wl_data.SelectWavelength(index)
 wl_data.GetWavelength(index).MakePrimary()
 ```
 
-### 5. DataFrame Column Names (ZosPy 2.1.4)
+### 6. DataFrame Column Names (ZosPy 2.1.4)
 `SingleRayTrace` uses hyphenated columns: `'X-coordinate'`, `'Y-coordinate'`, etc. No `error_code` column exists.
 
-### 6. UTF-16 Text Files
+### 7. UTF-16 Text Files
 OpticStudio exports UTF-16, not UTF-8:
 ```python
 with open(temp_path, 'r', encoding='utf-16') as f: text = f.read()
 ```
 
-### 7. Attribute Checks
+### 8. Attribute Checks
 Properties vary by version. Always use `hasattr()`:
 ```python
 if hasattr(data, 'front_focal_length'):
