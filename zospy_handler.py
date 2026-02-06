@@ -1368,6 +1368,12 @@ class ZosPyHandler:
                 if px**2 + py**2 <= 1.0:  # Inside circular pupil
                     pupil_coords.append((float(px), float(py)))
 
+        # Calculate max field Y for normalization (avoid division by zero)
+        max_field_y = 0.0
+        for fi in range(1, num_fields + 1):
+            max_field_y = max(max_field_y, abs(_extract_value(fields.GetField(fi).Y)))
+
+        ray_trace = None
         try:
             # Use batch ray trace for efficiency
             ray_trace = self.oss.Tools.OpenBatchRayTrace()
@@ -1385,7 +1391,6 @@ class ZosPyHandler:
 
             if norm_unpol is None:
                 logger.warning("Could not create NormUnpol ray trace")
-                ray_trace.Close()
                 return spot_rays
 
             # Add rays for all field/wavelength/pupil combinations
@@ -1393,16 +1398,16 @@ class ZosPyHandler:
                 for wi in range(1, num_wavelengths + 1):
                     for px, py in pupil_coords:
                         # AddRay: Hx, Hy, Px, Py, wavelength
-                        # Using field index for Hy (normalized field), Hx=0
+                        # Normalize field Y by max field Y across all fields
                         field = fields.GetField(fi)
-                        hy_norm = _extract_value(field.Y) / max(1e-10, _extract_value(fields.GetField(num_fields).Y)) if num_fields > 0 else 0
+                        field_y_val = _extract_value(field.Y)
+                        hy_norm = field_y_val / max_field_y if max_field_y > 1e-10 else 0.0
                         norm_unpol.AddRay(0, hy_norm, px, py, wi)
 
             # Run the ray trace
             ray_trace.RunAndWaitForCompletion()
 
             # Read results and organize by field/wavelength
-            ray_index = 0
             for fi in range(1, num_fields + 1):
                 field = fields.GetField(fi)
                 field_x = _extract_value(field.X)
@@ -1423,14 +1428,17 @@ class ZosPyHandler:
                         )
                         if success and err_code == 0:
                             field_rays["rays"].append({"x": float(x), "y": float(y)})
-                        ray_index += 1
 
                     spot_rays.append(field_rays)
 
-            ray_trace.Close()
-
         except Exception as e:
             logger.warning(f"Batch ray trace for spot diagram failed: {e}", exc_info=True)
+        finally:
+            if ray_trace is not None:
+                try:
+                    ray_trace.Close()
+                except Exception:
+                    pass  # Ignore cleanup errors
 
         return spot_rays
 
