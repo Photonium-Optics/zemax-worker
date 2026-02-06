@@ -211,18 +211,35 @@ with open(temp_path, 'r', encoding='utf-16') as f:
 analysis.Close()  # Always close!
 ```
 
-### Spot Diagram via new_analysis
+### Spot Diagram — Why No Image Export
+
+**ZOSAPI's `StandardSpot` does NOT support image export.** Unlike `CrossSection` which uses a layout tool with `SaveImageAsFile` + `OutputFileName`, `StandardSpot` is a regular analysis created via `new_analysis()`. The raw ZOSAPI analysis object has no `ExportGraphicAs` method.
+
+**Available data from `StandardSpot.Results`:**
+- SpotData: RMS radius, GEO radius, centroid X/Y via `GetRMSSpotSizeFor()`, `GetGeoSpotSizeFor()`
+- Airy radius via `AiryRadius` property
+- **NOT available:** Raw ray X,Y positions
+
+**Solution: Batch ray tracing for raw ray data**
 ```python
-analysis = zp.analyses.new_analysis(
-    self.oss, zp.constants.Analysis.AnalysisIDM.StandardSpot,
-    settings_first=True,
+ray_trace = oss.Tools.OpenBatchRayTrace()
+norm_unpol = ray_trace.CreateNormUnpol(
+    max_rays,
+    zp.constants.Tools.RayTrace.RaysType.Real,
+    oss.LDE.NumberOfSurfaces - 1,  # Image surface
 )
-settings = analysis.Settings
-if hasattr(settings, 'RayDensity'):
-    settings.RayDensity = ray_density
-analysis.ApplyAndWaitForCompletion()
-analysis.Close()  # Always close!
+# Add rays: Hx, Hy (field), Px, Py (pupil), wavelength
+for px, py in pupil_coords:
+    norm_unpol.AddRay(0, hy_norm, px, py, wavelength_index)
+ray_trace.RunAndWaitForCompletion()
+# Read results
+success, ray_num, err_code, vig_code, x, y, z, l, m, n, l2, m2, intensity = (
+    norm_unpol.ReadNextResult()
+)
+ray_trace.Close()
 ```
+
+**Mac-side rendering:** The worker returns `spot_rays` (list of X,Y positions per field/wavelength). zemax-analysis-service renders the plot using matplotlib.
 
 ### Merit Function Evaluation
 ```python
@@ -266,6 +283,7 @@ The text file from `GetTextFile()` contains two tables — parser must stop afte
 | `distribution="hexapolar"` | Uses square grid (logs warning) |
 | Startup hang at "ZOSAPI imported to clr" | ZosPy import loads .NET CLR DLLs; mitigated by lazy import in `zospy_handler.py` |
 | Doubled "ZOSAPI imported to clr" log | Normal with `uvicorn main:app` — re-import in worker process, no-op |
+| StandardSpot no image export | ZOSAPI limitation — use batch ray trace for raw data, render on Mac side |
 
 ### Ray Trace Error Codes
 | Code | Meaning |
@@ -305,6 +323,7 @@ curl http://localhost:8787/health
 ## Changelog
 
 ### 2026-02-05
+- **Fix spot diagram image export** — ZOSAPI's `StandardSpot` analysis does NOT support image export (no `ExportGraphicAs` method). Unlike `CrossSection` which uses a layout tool with `SaveImageAsFile`, `StandardSpot` is a regular analysis without image export. Solution: use batch ray tracing (`IBatchRayTrace`) to get raw ray X,Y positions, return them in `spot_rays` field for Mac-side matplotlib rendering. The `spot_data` field still contains metrics (RMS, GEO radius) from `StandardSpot.Results`.
 - **Move Seidel text parsing to Mac side** — `get_seidel_native()` now returns raw UTF-16 text; parsing in `zemax-analysis-service/seidel_text_parser.py`
 - **DRY up endpoint boilerplate** — Extracted `_run_endpoint()` helper; reduced `main.py` from ~856 to ~738 lines
 - **Multiple workers verified** — Each uvicorn worker process gets its own ZOS singleton; constraint is license seats, not threading

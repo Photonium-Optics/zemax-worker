@@ -1208,7 +1208,12 @@ class ZosPyHandler:
         reference: str = "chief_ray",
     ) -> dict[str, Any]:
         """
-        Generate spot diagram using ZosPy's StandardSpot analysis.
+        Generate spot diagram data using ZosPy's StandardSpot analysis for metrics
+        and batch ray tracing for raw ray positions.
+
+        ZOSAPI's StandardSpot analysis does NOT support direct image export (unlike
+        CrossSection which uses a layout tool). Image rendering happens on the Mac
+        side using the raw ray data returned here.
 
         This is a "dumb executor" — returns raw data or error. No fallbacks.
 
@@ -1221,15 +1226,15 @@ class ZosPyHandler:
         Returns:
             On success: {
                 "success": True,
-                "image": str (base64 PNG),
-                "image_format": "png",
-                "spot_data": [...],
+                "image": None (not supported by ZOSAPI for StandardSpot),
+                "image_format": None,
+                "spot_data": [...] (per-field metrics: RMS, GEO radius, centroid),
+                "spot_rays": [...] (raw ray X,Y positions for Mac-side rendering),
                 "airy_radius": float,
             }
             On error: {"success": False, "error": "..."}
         """
         analysis = None
-        temp_path = os.path.join(tempfile.gettempdir(), SPOT_DIAGRAM_TEMP_FILENAME)
 
         # Get field info
         fields = self.oss.SystemData.Fields
@@ -1242,7 +1247,7 @@ class ZosPyHandler:
         reference_code = 0 if reference == "chief_ray" else 1
 
         try:
-            # Use ZosPy's new_analysis to access StandardSpot directly
+            # Use ZosPy's new_analysis to access StandardSpot for metrics
             analysis = self._zp.analyses.new_analysis(
                 self.oss,
                 self._zp.constants.Analysis.AnalysisIDM.StandardSpot,
@@ -1258,30 +1263,43 @@ class ZosPyHandler:
                 spot_elapsed_ms = (time.perf_counter() - spot_start) * 1000
                 log_timing(logger, "StandardSpot.ApplyAndWaitForCompletion", spot_elapsed_ms)
 
-            # Try to export image to PNG
-            image_b64, image_format = self._export_analysis_image(analysis, temp_path)
-
-            # Extract spot data and airy radius from results
+            # Extract spot metrics (RMS, GEO radius, centroid) from analysis results
             spot_data: list[dict[str, Any]] = []
             airy_radius: Optional[float] = None
             if analysis.Results is not None:
                 airy_radius = self._extract_airy_radius(analysis.Results)
                 spot_data = self._extract_spot_data_from_results(analysis.Results, fields, num_fields)
 
+            # Close analysis before batch ray trace
+            self._cleanup_analysis(analysis, None)
+            analysis = None
+
+            # Get raw ray X,Y positions using batch ray tracing
+            # This is required because ZOSAPI doesn't expose raw ray data from StandardSpot
+            ray_trace_start = time.perf_counter()
+            try:
+                spot_rays = self._get_spot_ray_data(ray_density)
+            finally:
+                ray_trace_elapsed_ms = (time.perf_counter() - ray_trace_start) * 1000
+                log_timing(logger, "BatchRayTrace for spot diagram", ray_trace_elapsed_ms)
+
+            # Note: image is None because ZOSAPI StandardSpot doesn't support image export
+            # Mac side will render the spot diagram from spot_rays data
             return {
                 "success": True,
-                "image": image_b64,
-                "image_format": image_format,
+                "image": None,
+                "image_format": None,
                 "array_shape": None,
                 "array_dtype": None,
                 "spot_data": spot_data,
+                "spot_rays": spot_rays,
                 "airy_radius": airy_radius,
             }
 
         except Exception as e:
             return {"success": False, "error": f"StandardSpot analysis failed: {e}"}
         finally:
-            self._cleanup_analysis(analysis, temp_path)
+            self._cleanup_analysis(analysis, None)
 
     def _configure_spot_analysis(self, settings: Any, ray_density: int, reference_code: int) -> None:
         """
@@ -1317,52 +1335,104 @@ class ZosPyHandler:
             except Exception:
                 pass
 
-    def _export_analysis_image(
-        self,
-        analysis: Any,
-        temp_path: str,
-    ) -> tuple[Optional[str], Optional[str]]:
+    def _get_spot_ray_data(self, ray_density: int) -> list[dict[str, Any]]:
         """
-        Export an analysis to PNG image.
+        Get raw ray X,Y positions at image plane using batch ray tracing.
+
+        ZOSAPI's StandardSpot analysis does not expose raw ray positions through
+        its Results interface. The only way to get ray X,Y data for rendering
+        spot diagrams is via batch ray tracing (IBatchRayTrace).
 
         Args:
-            analysis: OpticStudio analysis object
-            temp_path: Path for temporary PNG file
+            ray_density: Rays per axis (e.g., 5 means ~5x5 grid per field)
 
         Returns:
-            Tuple of (base64_image, image_format) or (None, None) if export fails
+            List of dicts per field, each containing:
+                - field_index: int (0-based)
+                - field_x, field_y: float (field coordinates)
+                - wavelength_index: int (0-based)
+                - rays: list of {"x": float, "y": float} at image plane
         """
+        spot_rays: list[dict[str, Any]] = []
+
+        fields = self.oss.SystemData.Fields
+        wavelengths = self.oss.SystemData.Wavelengths
+        num_fields = fields.NumberOfFields
+        num_wavelengths = wavelengths.NumberOfWavelengths
+
+        # Generate pupil coordinates for ray grid
+        # ray_density^2 rays in a circular pupil pattern
+        pupil_coords = []
+        for px in np.linspace(-1, 1, ray_density):
+            for py in np.linspace(-1, 1, ray_density):
+                if px**2 + py**2 <= 1.0:  # Inside circular pupil
+                    pupil_coords.append((float(px), float(py)))
+
         try:
-            has_export_graphic = hasattr(analysis, 'ExportGraphicAs')
-            has_export_data = hasattr(analysis, 'Results') and hasattr(analysis.Results, 'ExportData')
-            logger.info(f"_export_analysis_image: ExportGraphicAs={has_export_graphic}, ExportData={has_export_data}, temp_path={temp_path}")
+            # Use batch ray trace for efficiency
+            ray_trace = self.oss.Tools.OpenBatchRayTrace()
+            if ray_trace is None:
+                logger.warning("Could not open BatchRayTrace tool")
+                return spot_rays
 
-            if has_export_graphic:
-                analysis.ExportGraphicAs(temp_path)
-                logger.info("Called ExportGraphicAs")
-            elif has_export_data:
-                analysis.Results.ExportData(temp_path)
-                logger.info("Called ExportData")
-            else:
-                logger.warning("No export method available on analysis object")
-                return None, None
+            # Get the normalized unpolarized ray trace interface
+            max_rays = num_fields * num_wavelengths * len(pupil_coords)
+            norm_unpol = ray_trace.CreateNormUnpol(
+                max_rays,
+                self._zp.constants.Tools.RayTrace.RaysType.Real,
+                self.oss.LDE.NumberOfSurfaces - 1,  # Image surface
+            )
 
-            exists = os.path.exists(temp_path)
-            size = os.path.getsize(temp_path) if exists else 0
-            logger.info(f"After export: exists={exists}, size={size}")
+            if norm_unpol is None:
+                logger.warning("Could not create NormUnpol ray trace")
+                ray_trace.Close()
+                return spot_rays
 
-            if exists and size > 0:
-                with open(temp_path, 'rb') as f:
-                    image_b64 = base64.b64encode(f.read()).decode('utf-8')
-                logger.info(f"Exported analysis PNG, size={len(image_b64)}")
-                return image_b64, "png"
-            else:
-                logger.warning(f"Export file missing or empty: exists={exists}, size={size}")
+            # Add rays for all field/wavelength/pupil combinations
+            for fi in range(1, num_fields + 1):
+                for wi in range(1, num_wavelengths + 1):
+                    for px, py in pupil_coords:
+                        # AddRay: Hx, Hy, Px, Py, wavelength
+                        # Using field index for Hy (normalized field), Hx=0
+                        field = fields.GetField(fi)
+                        hy_norm = _extract_value(field.Y) / max(1e-10, _extract_value(fields.GetField(num_fields).Y)) if num_fields > 0 else 0
+                        norm_unpol.AddRay(0, hy_norm, px, py, wi)
+
+            # Run the ray trace
+            ray_trace.RunAndWaitForCompletion()
+
+            # Read results and organize by field/wavelength
+            ray_index = 0
+            for fi in range(1, num_fields + 1):
+                field = fields.GetField(fi)
+                field_x = _extract_value(field.X)
+                field_y = _extract_value(field.Y)
+
+                for wi in range(1, num_wavelengths + 1):
+                    field_rays = {
+                        "field_index": fi - 1,
+                        "field_x": field_x,
+                        "field_y": field_y,
+                        "wavelength_index": wi - 1,
+                        "rays": [],
+                    }
+
+                    for _ in pupil_coords:
+                        success, ray_num, err_code, vig_code, x, y, z, l, m, n, l2, m2, intensity = (
+                            norm_unpol.ReadNextResult()
+                        )
+                        if success and err_code == 0:
+                            field_rays["rays"].append({"x": float(x), "y": float(y)})
+                        ray_index += 1
+
+                    spot_rays.append(field_rays)
+
+            ray_trace.Close()
 
         except Exception as e:
-            logger.warning(f"Analysis PNG export failed: {e}", exc_info=True)
+            logger.warning(f"Batch ray trace for spot diagram failed: {e}", exc_info=True)
 
-        return None, None
+        return spot_rays
 
     def _extract_airy_radius(self, results: Any) -> Optional[float]:
         """

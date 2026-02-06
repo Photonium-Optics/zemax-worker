@@ -421,19 +421,35 @@ class SpotFieldData(BaseModel):
     num_rays: Optional[int] = Field(default=None, description="Number of rays traced for this field")
 
 
+class SpotRayPoint(BaseModel):
+    """A single ray hit point on the image plane."""
+    x: float = Field(description="X coordinate on image plane")
+    y: float = Field(description="Y coordinate on image plane")
+
+
+class SpotRayData(BaseModel):
+    """Raw ray data for a single field/wavelength combination."""
+    field_index: int = Field(description="0-based field index")
+    field_x: float = Field(description="Field X coordinate")
+    field_y: float = Field(description="Field Y coordinate")
+    wavelength_index: int = Field(description="0-based wavelength index")
+    rays: list[SpotRayPoint] = Field(default_factory=list, description="Ray hit points on image plane")
+
+
 class SpotDiagramResponse(BaseModel):
     """
     Spot diagram analysis response.
 
-    Returns spot diagram image and per-field spot data (RMS, GEO radius, centroid).
-    This is a "dumb executor" response - Mac side handles rendering if needed.
+    Returns spot metrics (RMS, GEO radius) and raw ray data for Mac-side rendering.
+    ZOSAPI's StandardSpot does NOT support image export - use spot_rays for rendering.
     """
     success: bool = Field(description="Whether the operation succeeded")
-    image: Optional[str] = Field(default=None, description="Base64-encoded PNG or numpy array bytes")
-    image_format: Optional[str] = Field(default=None, description="Image format: 'png' or 'numpy_array'")
-    array_shape: Optional[list[int]] = Field(default=None, description="Shape for numpy array reconstruction")
-    array_dtype: Optional[str] = Field(default=None, description="Dtype for numpy array reconstruction")
-    spot_data: Optional[list[SpotFieldData]] = Field(default=None, description="Per-field spot data")
+    image: Optional[str] = Field(default=None, description="Always None - ZOSAPI StandardSpot doesn't support image export")
+    image_format: Optional[str] = Field(default=None, description="Always None")
+    array_shape: Optional[list[int]] = Field(default=None, description="Always None")
+    array_dtype: Optional[str] = Field(default=None, description="Always None")
+    spot_data: Optional[list[SpotFieldData]] = Field(default=None, description="Per-field spot metrics (RMS, GEO radius, centroid)")
+    spot_rays: Optional[list[SpotRayData]] = Field(default=None, description="Raw ray X,Y positions for Mac-side rendering")
     airy_radius: Optional[float] = Field(default=None, description="Airy disk radius in lens units")
     error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
@@ -644,10 +660,14 @@ async def get_spot_diagram(
     _: None = Depends(verify_api_key),
 ) -> SpotDiagramResponse:
     """
-    Generate spot diagram using ZosPy's StandardSpot analysis.
+    Generate spot diagram using ZosPy's StandardSpot analysis for metrics
+    and batch ray tracing for raw ray positions.
 
-    This is a "dumb executor" endpoint - returns raw data only.
-    Spot diagram image rendering happens on Mac side if PNG export fails.
+    ZOSAPI's StandardSpot does NOT support image export. The response includes:
+    - spot_data: Per-field metrics (RMS, GEO radius, centroid) from StandardSpot
+    - spot_rays: Raw ray X,Y positions from batch ray tracing for Mac-side rendering
+
+    This is a "dumb executor" endpoint - Mac side renders the spot diagram from spot_rays.
     """
     def _build_spot_response(result: dict) -> SpotDiagramResponse:
         if not result.get("success", False):
@@ -658,6 +678,21 @@ async def get_spot_diagram(
         spot_data = None
         if result.get("spot_data"):
             spot_data = [SpotFieldData(**sd) for sd in result["spot_data"]]
+
+        # Convert spot_rays dict to SpotRayData models
+        spot_rays = None
+        if result.get("spot_rays"):
+            spot_rays = []
+            for ray_data in result["spot_rays"]:
+                rays = [SpotRayPoint(x=r["x"], y=r["y"]) for r in ray_data.get("rays", [])]
+                spot_rays.append(SpotRayData(
+                    field_index=ray_data["field_index"],
+                    field_x=ray_data["field_x"],
+                    field_y=ray_data["field_y"],
+                    wavelength_index=ray_data["wavelength_index"],
+                    rays=rays,
+                ))
+
         return SpotDiagramResponse(
             success=True,
             image=result.get("image"),
@@ -665,6 +700,7 @@ async def get_spot_diagram(
             array_shape=result.get("array_shape"),
             array_dtype=result.get("array_dtype"),
             spot_data=spot_data,
+            spot_rays=spot_rays,
             airy_radius=result.get("airy_radius"),
         )
 
