@@ -302,6 +302,7 @@ class HealthResponse(BaseModel):
     version: Optional[str] = Field(default=None, description="OpticStudio version")
     zospy_version: Optional[str] = Field(default=None, description="ZosPy version")
     worker_count: int = Field(description="Number of uvicorn worker processes serving this URL")
+    connection_error: Optional[str] = Field(default=None, description="Error detail when opticstudio_connected is False")
 
 
 class CrossSectionResponse(BaseModel):
@@ -543,6 +544,7 @@ async def health_check() -> HealthResponse:
             version=None,
             zospy_version=None,
             worker_count=WORKER_COUNT,
+            connection_error="Health check timed out (worker busy)",
         )
 
     try:
@@ -553,6 +555,7 @@ async def health_check() -> HealthResponse:
                 version=None,
                 zospy_version=None,
                 worker_count=WORKER_COUNT,
+                connection_error=_last_connection_error,
             )
 
         try:
@@ -572,6 +575,7 @@ async def health_check() -> HealthResponse:
                 version=None,
                 zospy_version=None,
                 worker_count=WORKER_COUNT,
+                connection_error=str(e),
             )
     finally:
         _zospy_lock.release()
