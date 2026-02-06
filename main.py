@@ -534,8 +534,10 @@ async def health_check() -> HealthResponse:
     Acquires _zospy_lock with a 2-second timeout to avoid reading
     zospy_handler during reconnection or other mutations.
     """
+    lock_acquired = False
     try:
         await asyncio.wait_for(_zospy_lock.acquire(), timeout=2.0)
+        lock_acquired = True
     except asyncio.TimeoutError:
         # Lock held by a long operation — worker is busy but healthy
         return HealthResponse(
@@ -546,6 +548,11 @@ async def health_check() -> HealthResponse:
             worker_count=WORKER_COUNT,
             connection_error="Health check timed out (worker busy)",
         )
+    except asyncio.CancelledError:
+        # wait_for may have acquired the lock before cancellation propagated
+        if _zospy_lock.locked():
+            _zospy_lock.release()
+        raise
 
     try:
         if zospy_handler is None:
@@ -578,7 +585,8 @@ async def health_check() -> HealthResponse:
                 connection_error=str(e),
             )
     finally:
-        _zospy_lock.release()
+        if lock_acquired:
+            _zospy_lock.release()
 
 
 @app.post("/load-system", response_model=LoadSystemResponse)
