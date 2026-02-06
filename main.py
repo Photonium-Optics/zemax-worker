@@ -21,8 +21,8 @@ License limits (per Ansys):
 - Perpetual (legacy 19.4+): 2 instances
 
 Examples:
-  WEB_CONCURRENCY=1 uvicorn main:app --host 0.0.0.0 --port 8787  # Single worker
-  WEB_CONCURRENCY=3 uvicorn main:app --host 0.0.0.0 --port 8787  # 3 parallel workers (uses 3 license seats)
+  python main.py --workers 5                     # Recommended: auto-sets WEB_CONCURRENCY
+  WEB_CONCURRENCY=5 python -m uvicorn main:app   # Alternative: set env var explicitly
 
 The Mac-side zemax-analysis-service auto-detects the worker count from /health.
 """
@@ -60,11 +60,9 @@ DEFAULT_HOST = "0.0.0.0"
 # API key for authentication (optional but recommended)
 ZEMAX_API_KEY = os.getenv("ZEMAX_API_KEY", None)
 
-# Number of uvicorn worker processes serving this URL.
-# The analysis service reads this from /health to size its task queue.
-# IMPORTANT: Either start with `python main.py` (auto-propagates to children)
-# or set WEB_CONCURRENCY=N before running `uvicorn ... --workers N` directly.
-# If unset, each worker reports worker_count=1 and concurrency is under-provisioned.
+# Number of uvicorn workers behind this URL. Read from WEB_CONCURRENCY (set by
+# __main__ or the operator). The analysis service reads this via /health to size
+# its task queue. Defaults to 1 if unset.
 WORKER_COUNT = int(os.getenv("WEB_CONCURRENCY", "1"))
 
 # =============================================================================
@@ -792,18 +790,26 @@ async def evaluate_merit_function(
 
 
 if __name__ == "__main__":
+    import argparse
+
     import uvicorn
+
+    parser = argparse.ArgumentParser(description="Zemax Worker")
+    parser.add_argument(
+        "--workers", type=int, default=None,
+        help="Number of uvicorn worker processes (overrides WEB_CONCURRENCY)",
+    )
+    args, _unknown = parser.parse_known_args()
 
     port = int(os.getenv("PORT", str(DEFAULT_PORT)))
     host = os.getenv("HOST", DEFAULT_HOST)
     dev_mode = os.getenv("DEV_MODE", "false").lower() == "true"
-    # Number of workers - each gets its own OpticStudio connection (uses 1 license seat each)
-    # Default to 1, but can increase up to your license limit (Premium=8, Professional=4, Perpetual=2)
-    # Uses WEB_CONCURRENCY (same env var that /health reports and uvicorn recognizes)
-    num_workers = WORKER_COUNT
 
-    # Propagate to child processes so each worker reports the correct total
-    # in /health (needed when the analysis service auto-detects concurrency).
+    # Resolve worker count: CLI flag > WEB_CONCURRENCY env var > default 1
+    num_workers = args.workers or int(os.getenv("WEB_CONCURRENCY", "1"))
+
+    # Set WEB_CONCURRENCY so child processes report the correct worker_count
+    # in /health. This is the canonical way uvicorn children discover the total.
     os.environ["WEB_CONCURRENCY"] = str(num_workers)
 
     uvicorn.run(
@@ -811,6 +817,6 @@ if __name__ == "__main__":
         host=host,
         port=port,
         workers=num_workers,
-        reload=dev_mode,  # Only enable reload in development
+        reload=dev_mode,
         log_level="info",
     )
