@@ -250,8 +250,7 @@ async def lifespan(app: FastAPI):
     if WORKER_COUNT == 1 and not os.getenv("WEB_CONCURRENCY"):
         logger.warning(
             "WEB_CONCURRENCY not set — reporting worker_count=1. "
-            "If running with --workers N, set WEB_CONCURRENCY=N so the "
-            "analysis service detects the correct concurrency."
+            "Use 'python main.py --workers N' to set this automatically."
         )
 
     yield
@@ -799,14 +798,14 @@ if __name__ == "__main__":
         "--workers", type=int, default=None,
         help="Number of uvicorn worker processes (overrides WEB_CONCURRENCY)",
     )
-    args, _unknown = parser.parse_known_args()
+    args = parser.parse_args()
 
     port = int(os.getenv("PORT", str(DEFAULT_PORT)))
     host = os.getenv("HOST", DEFAULT_HOST)
     dev_mode = os.getenv("DEV_MODE", "false").lower() == "true"
 
     # Resolve worker count: CLI flag > WEB_CONCURRENCY env var > default 1
-    num_workers = args.workers or int(os.getenv("WEB_CONCURRENCY", "1"))
+    num_workers = args.workers if args.workers is not None else int(os.getenv("WEB_CONCURRENCY", "1"))
 
     # Set WEB_CONCURRENCY so child processes report the correct worker_count
     # in /health. This is the canonical way uvicorn children discover the total.
