@@ -1576,6 +1576,392 @@ class ZosPyHandler:
             logger.debug(f"Could not get spot data for field {field_index}: {e}")
 
 
+    def get_mtf(
+        self,
+        field_index: int = 0,
+        wavelength_index: int = 1,
+        sampling: str = "64x64",
+        maximum_frequency: float = 0.0,
+    ) -> dict[str, Any]:
+        """
+        Get MTF (Modulation Transfer Function) data using ZosPy's FFT MTF analysis.
+
+        This is a "dumb executor" — returns raw frequency/modulation data.
+        Image rendering happens on the Mac side.
+
+        Args:
+            field_index: Field index (0 = all fields, 1+ = specific field, 1-indexed)
+            wavelength_index: Wavelength index (1-indexed)
+            sampling: Pupil sampling grid (e.g., '64x64', '128x128')
+            maximum_frequency: Maximum spatial frequency (cycles/mm). 0 = auto.
+
+        Returns:
+            On success: {
+                "success": True,
+                "frequency": [...],
+                "fields": [{"field_index": int, "field_x": float, "field_y": float,
+                            "tangential": [...], "sagittal": [...]}],
+                "diffraction_limit": [...],
+                "cutoff_frequency": float,
+                "wavelength_um": float,
+            }
+            On error: {"success": False, "error": "..."}
+        """
+        try:
+            fields = self.oss.SystemData.Fields
+            num_fields = fields.NumberOfFields
+            wavelengths = self.oss.SystemData.Wavelengths
+
+            if wavelength_index > wavelengths.NumberOfWavelengths:
+                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
+
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+
+            # Determine which fields to analyze
+            if field_index == 0:
+                field_indices = list(range(1, num_fields + 1))
+            else:
+                if field_index > num_fields:
+                    return {"success": False, "error": f"Field index {field_index} out of range (max: {num_fields})"}
+                field_indices = [field_index]
+
+            # Get F/# for diffraction limit calculation
+            fno = self._get_fno()
+            if fno is None or fno <= 0:
+                fno = 5.0  # Fallback
+
+            # Calculate cutoff frequency: fc = 1 / (wavelength_mm * fno)
+            wavelength_mm = wavelength_um / 1000.0
+            cutoff_frequency = 1.0 / (wavelength_mm * fno)
+
+            all_fields_data = []
+            frequency = None
+
+            for fi in field_indices:
+                field = fields.GetField(fi)
+                field_x = _extract_value(field.X)
+                field_y = _extract_value(field.Y)
+
+                try:
+                    # Use new_analysis with FFTMtf
+                    idm = self._zp.constants.Analysis.AnalysisIDM
+                    analysis = self._zp.analyses.new_analysis(
+                        self.oss,
+                        idm.FFTMtf,
+                        settings_first=True,
+                    )
+
+                    # Configure settings
+                    settings = analysis.Settings
+                    if hasattr(settings, 'Field'):
+                        try:
+                            settings.Field.SetFieldNumber(fi)
+                        except Exception:
+                            pass
+                    if hasattr(settings, 'Wavelength'):
+                        try:
+                            settings.Wavelength.SetWavelengthNumber(wavelength_index)
+                        except Exception:
+                            pass
+                    if hasattr(settings, 'SampleSize'):
+                        try:
+                            # Map sampling string to enum
+                            sample_map = {
+                                "32x32": 1, "64x64": 2, "128x128": 3,
+                                "256x256": 4, "512x512": 5, "1024x1024": 6,
+                            }
+                            settings.SampleSize = sample_map.get(sampling, 2)
+                        except Exception:
+                            pass
+                    if maximum_frequency > 0 and hasattr(settings, 'MaximumFrequency'):
+                        try:
+                            settings.MaximumFrequency = maximum_frequency
+                        except Exception:
+                            pass
+
+                    mtf_start = time.perf_counter()
+                    try:
+                        analysis.ApplyAndWaitForCompletion()
+                    finally:
+                        mtf_elapsed_ms = (time.perf_counter() - mtf_start) * 1000
+                        log_timing(logger, f"FFTMtf.run (field={fi})", mtf_elapsed_ms)
+
+                    # Extract data from results
+                    results = analysis.Results
+                    tangential = []
+                    sagittal = []
+                    freq_data = []
+
+                    if results is not None:
+                        # Try to get data series
+                        try:
+                            num_series = results.NumberOfDataSeries
+                            for si in range(num_series):
+                                series = results.GetDataSeries(si)
+                                if series is not None:
+                                    desc = str(series.Description).lower() if hasattr(series, 'Description') else ""
+                                    n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
+
+                                    series_x = []
+                                    series_y = []
+                                    for pi in range(n_points):
+                                        pt = series.GetDataPoint(pi)
+                                        if pt is not None:
+                                            x_val = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
+                                            y_val = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
+                                            series_x.append(x_val)
+                                            series_y.append(y_val)
+
+                                    if "tang" in desc or "t " in desc or si == 0:
+                                        tangential = series_y
+                                        if not freq_data:
+                                            freq_data = series_x
+                                    elif "sag" in desc or "s " in desc or si == 1:
+                                        sagittal = series_y
+                                        if not freq_data:
+                                            freq_data = series_x
+                        except Exception as e:
+                            logger.warning(f"MTF: Could not extract data series for field {fi}: {e}")
+
+                    analysis.Close()
+
+                    if frequency is None and freq_data:
+                        frequency = freq_data
+
+                    all_fields_data.append({
+                        "field_index": fi - 1,  # Convert to 0-indexed
+                        "field_x": field_x,
+                        "field_y": field_y,
+                        "tangential": tangential,
+                        "sagittal": sagittal,
+                    })
+
+                except Exception as e:
+                    logger.warning(f"MTF analysis failed for field {fi}: {e}")
+                    all_fields_data.append({
+                        "field_index": fi - 1,
+                        "field_x": field_x,
+                        "field_y": field_y,
+                        "tangential": [],
+                        "sagittal": [],
+                    })
+
+            # Generate frequency array if not obtained from analysis
+            if frequency is None or len(frequency) == 0:
+                max_freq = maximum_frequency if maximum_frequency > 0 else cutoff_frequency
+                frequency = list(np.linspace(0, max_freq, 64))
+
+            # Compute diffraction limit: MTF_dl(f) = (2/pi)[arccos(f/fc) - (f/fc)*sqrt(1-(f/fc)^2)]
+            diffraction_limit = []
+            for f in frequency:
+                fn = f / cutoff_frequency  # Normalized frequency
+                if fn >= 1.0:
+                    diffraction_limit.append(0.0)
+                elif fn <= 0.0:
+                    diffraction_limit.append(1.0)
+                else:
+                    dl = (2.0 / np.pi) * (np.arccos(fn) - fn * np.sqrt(1.0 - fn * fn))
+                    diffraction_limit.append(float(dl))
+
+            return {
+                "success": True,
+                "frequency": [float(f) for f in frequency],
+                "fields": all_fields_data,
+                "diffraction_limit": diffraction_limit,
+                "cutoff_frequency": float(cutoff_frequency),
+                "wavelength_um": float(wavelength_um),
+            }
+
+        except Exception as e:
+            return {"success": False, "error": f"MTF analysis failed: {e}"}
+
+    def get_psf(
+        self,
+        field_index: int = 1,
+        wavelength_index: int = 1,
+        sampling: str = "64x64",
+    ) -> dict[str, Any]:
+        """
+        Get PSF (Point Spread Function) data using ZosPy's FFT PSF analysis.
+
+        This is a "dumb executor" — returns raw 2D intensity grid as base64 numpy.
+        Image rendering happens on the Mac side.
+
+        Args:
+            field_index: Field index (1-indexed)
+            wavelength_index: Wavelength index (1-indexed)
+            sampling: Pupil sampling grid (e.g., '64x64', '128x128')
+
+        Returns:
+            On success: {
+                "success": True,
+                "image": str (base64 numpy array),
+                "image_format": "numpy_array",
+                "array_shape": [h, w],
+                "array_dtype": str,
+                "strehl_ratio": float or None,
+                "psf_peak": float or None,
+                "wavelength_um": float,
+                "field_x": float,
+                "field_y": float,
+            }
+            On error: {"success": False, "error": "..."}
+        """
+        try:
+            # Validate field and wavelength indices
+            fields = self.oss.SystemData.Fields
+            if field_index > fields.NumberOfFields:
+                return {"success": False, "error": f"Field index {field_index} out of range (max: {fields.NumberOfFields})"}
+
+            wavelengths = self.oss.SystemData.Wavelengths
+            if wavelength_index > wavelengths.NumberOfWavelengths:
+                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
+
+            field = fields.GetField(field_index)
+            field_x = _extract_value(field.X)
+            field_y = _extract_value(field.Y)
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+
+            # Run FFT PSF analysis
+            idm = self._zp.constants.Analysis.AnalysisIDM
+            analysis = self._zp.analyses.new_analysis(
+                self.oss,
+                idm.FFTPSF,
+                settings_first=True,
+            )
+
+            # Configure settings
+            settings = analysis.Settings
+            if hasattr(settings, 'Field'):
+                try:
+                    settings.Field.SetFieldNumber(field_index)
+                except Exception:
+                    pass
+            if hasattr(settings, 'Wavelength'):
+                try:
+                    settings.Wavelength.SetWavelengthNumber(wavelength_index)
+                except Exception:
+                    pass
+            if hasattr(settings, 'SampleSize'):
+                try:
+                    sample_map = {
+                        "32x32": 1, "64x64": 2, "128x128": 3,
+                        "256x256": 4, "512x512": 5, "1024x1024": 6,
+                    }
+                    settings.SampleSize = sample_map.get(sampling, 2)
+                except Exception:
+                    pass
+
+            psf_start = time.perf_counter()
+            try:
+                analysis.ApplyAndWaitForCompletion()
+            finally:
+                psf_elapsed_ms = (time.perf_counter() - psf_start) * 1000
+                log_timing(logger, "FFTPSF.run", psf_elapsed_ms)
+
+            # Extract 2D PSF data
+            results = analysis.Results
+            image_b64 = None
+            array_shape = None
+            array_dtype = None
+            psf_peak = None
+
+            if results is not None:
+                try:
+                    # Try to get the data grid
+                    num_rows = results.NumberOfDataGrids
+                    if num_rows > 0:
+                        grid = results.GetDataGrid(0)
+                        if grid is not None:
+                            nx = grid.Nx if hasattr(grid, 'Nx') else 0
+                            ny = grid.Ny if hasattr(grid, 'Ny') else 0
+
+                            if nx > 0 and ny > 0:
+                                arr = np.zeros((ny, nx), dtype=np.float64)
+                                for yi in range(ny):
+                                    for xi in range(nx):
+                                        val = _extract_value(grid.Z(xi, yi))
+                                        arr[yi, xi] = val
+
+                                psf_peak = float(np.max(arr))
+                                image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                                array_shape = list(arr.shape)
+                                array_dtype = str(arr.dtype)
+                                logger.info(f"PSF data extracted: shape={arr.shape}, peak={psf_peak:.6f}")
+                except Exception as e:
+                    logger.warning(f"PSF: Could not extract data grid: {e}")
+
+            analysis.Close()
+
+            if image_b64 is None:
+                return {"success": False, "error": "FFT PSF analysis did not produce data"}
+
+            # Try to get Strehl ratio from Huygens PSF
+            strehl_ratio = None
+            try:
+                huygens = self._zp.analyses.new_analysis(
+                    self.oss,
+                    idm.HuygensPsf,
+                    settings_first=True,
+                )
+                h_settings = huygens.Settings
+                if hasattr(h_settings, 'Field'):
+                    try:
+                        h_settings.Field.SetFieldNumber(field_index)
+                    except Exception:
+                        pass
+                if hasattr(h_settings, 'Wavelength'):
+                    try:
+                        h_settings.Wavelength.SetWavelengthNumber(wavelength_index)
+                    except Exception:
+                        pass
+
+                huygens_start = time.perf_counter()
+                try:
+                    huygens.ApplyAndWaitForCompletion()
+                finally:
+                    huygens_elapsed_ms = (time.perf_counter() - huygens_start) * 1000
+                    log_timing(logger, "HuygensPSF.run (Strehl)", huygens_elapsed_ms)
+
+                h_results = huygens.Results
+                if h_results is not None:
+                    # Try to extract Strehl from header text
+                    try:
+                        header_text = h_results.HeaderData.Lines if hasattr(h_results, 'HeaderData') else ""
+                        if hasattr(header_text, '__iter__'):
+                            for line in header_text:
+                                line_str = str(line).lower()
+                                if "strehl" in line_str:
+                                    parts = line_str.split(":")
+                                    if len(parts) > 1:
+                                        val_str = parts[-1].strip()
+                                        try:
+                                            strehl_ratio = float(val_str)
+                                        except ValueError:
+                                            pass
+                                    break
+                    except Exception:
+                        pass
+                huygens.Close()
+            except Exception as e:
+                logger.debug(f"PSF: Huygens Strehl ratio extraction failed (non-critical): {e}")
+
+            return {
+                "success": True,
+                "image": image_b64,
+                "image_format": "numpy_array",
+                "array_shape": array_shape,
+                "array_dtype": array_dtype,
+                "strehl_ratio": strehl_ratio,
+                "psf_peak": psf_peak,
+                "wavelength_um": float(wavelength_um),
+                "field_x": field_x,
+                "field_y": field_y,
+            }
+
+        except Exception as e:
+            return {"success": False, "error": f"PSF analysis failed: {e}"}
+
     def _get_fno(self) -> Optional[float]:
         """
         Get the f-number of the optical system.

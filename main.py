@@ -486,6 +486,58 @@ class NativeSeidelResponse(BaseModel):
     error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 
+class MTFRequest(BaseModel):
+    """MTF analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    field_index: int = Field(default=0, ge=0, description="Field index (0 = all fields, 1+ = specific field, 1-indexed)")
+    wavelength_index: int = Field(default=1, ge=1, description="Wavelength index (1-indexed)")
+    sampling: str = Field(default="64x64", description="Pupil sampling grid")
+    maximum_frequency: float = Field(default=0.0, ge=0, description="Maximum spatial frequency (cycles/mm). 0 = auto.")
+
+
+class MTFFieldData(BaseModel):
+    """MTF data for a single field point."""
+    field_index: int = Field(description="0-indexed field number")
+    field_x: float = Field(description="Field X coordinate")
+    field_y: float = Field(description="Field Y coordinate")
+    tangential: list[float] = Field(default_factory=list, description="Tangential MTF values")
+    sagittal: list[float] = Field(default_factory=list, description="Sagittal MTF values")
+
+
+class MTFResponse(BaseModel):
+    """MTF analysis response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    frequency: Optional[list[float]] = Field(default=None, description="Spatial frequency array (cycles/mm)")
+    fields: Optional[list[MTFFieldData]] = Field(default=None, description="Per-field MTF data")
+    diffraction_limit: Optional[list[float]] = Field(default=None, description="Diffraction-limited MTF curve")
+    cutoff_frequency: Optional[float] = Field(default=None, description="Cutoff frequency (cycles/mm)")
+    wavelength_um: Optional[float] = Field(default=None, description="Wavelength in micrometers")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
+class PSFRequest(BaseModel):
+    """PSF analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    field_index: int = Field(default=1, ge=1, description="Field index (1-indexed)")
+    wavelength_index: int = Field(default=1, ge=1, description="Wavelength index (1-indexed)")
+    sampling: str = Field(default="64x64", description="Pupil sampling grid")
+
+
+class PSFResponse(BaseModel):
+    """PSF analysis response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    image: Optional[str] = Field(default=None, description="Base64-encoded numpy array bytes")
+    image_format: Optional[str] = Field(default=None, description="Image format: 'numpy_array'")
+    array_shape: Optional[list[int]] = Field(default=None, description="Shape for numpy array reconstruction")
+    array_dtype: Optional[str] = Field(default=None, description="Dtype for numpy array reconstruction")
+    strehl_ratio: Optional[float] = Field(default=None, description="Strehl ratio (0-1)")
+    psf_peak: Optional[float] = Field(default=None, description="Peak PSF intensity")
+    wavelength_um: Optional[float] = Field(default=None, description="Wavelength in micrometers")
+    field_x: Optional[float] = Field(default=None, description="Field X coordinate")
+    field_y: Optional[float] = Field(default=None, description="Field Y coordinate")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
 class MeritFunctionOperandRow(BaseModel):
     """A single merit function operand row."""
     operand_code: str = Field(description="Zemax operand code (e.g. EFFL, MTFA)")
@@ -797,6 +849,47 @@ async def evaluate_merit_function(
         "/evaluate-merit-function", MeritFunctionResponse, request,
         _call_handler,
         build_response=_build_merit_response,
+    )
+
+
+@app.post("/mtf", response_model=MTFResponse)
+async def get_mtf(
+    request: MTFRequest,
+    _: None = Depends(verify_api_key),
+) -> MTFResponse:
+    """
+    Get MTF (Modulation Transfer Function) data using FFT MTF analysis.
+
+    Returns raw frequency/modulation data. Image rendering happens on Mac side.
+    """
+    return await _run_endpoint(
+        "/mtf", MTFResponse, request,
+        lambda: zospy_handler.get_mtf(
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
+            sampling=request.sampling,
+            maximum_frequency=request.maximum_frequency,
+        ),
+    )
+
+
+@app.post("/psf", response_model=PSFResponse)
+async def get_psf(
+    request: PSFRequest,
+    _: None = Depends(verify_api_key),
+) -> PSFResponse:
+    """
+    Get PSF (Point Spread Function) data using FFT PSF analysis.
+
+    Returns raw 2D intensity grid as numpy array. Image rendering happens on Mac side.
+    """
+    return await _run_endpoint(
+        "/psf", PSFResponse, request,
+        lambda: zospy_handler.get_psf(
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
+            sampling=request.sampling,
+        ),
     )
 
 
