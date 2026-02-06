@@ -61,9 +61,10 @@ DEFAULT_HOST = "0.0.0.0"
 ZEMAX_API_KEY = os.getenv("ZEMAX_API_KEY", None)
 
 # Number of uvicorn worker processes serving this URL.
-# IMPORTANT: Always start with `python main.py` (not `uvicorn` directly) to ensure
-# this value matches the actual --workers flag passed to uvicorn.
 # The analysis service reads this from /health to size its task queue.
+# IMPORTANT: Either start with `python main.py` (auto-propagates to children)
+# or set WEB_CONCURRENCY=N before running `uvicorn ... --workers N` directly.
+# If unset, each worker reports worker_count=1 and concurrency is under-provisioned.
 WORKER_COUNT = int(os.getenv("WEB_CONCURRENCY", "1"))
 
 # =============================================================================
@@ -72,6 +73,7 @@ WORKER_COUNT = int(os.getenv("WEB_CONCURRENCY", "1"))
 
 # Initialize ZosPy handler (manages OpticStudio connection)
 zospy_handler: Optional[ZosPyHandler] = None
+_last_connection_error: Optional[str] = None
 
 # Async lock - serializes ZosPy operations within this process
 # Each uvicorn worker process has its own lock and OpticStudio connection
@@ -80,12 +82,15 @@ _zospy_lock = asyncio.Lock()
 
 def _init_zospy() -> Optional[ZosPyHandler]:
     """Initialize ZosPy connection with error handling."""
+    global _last_connection_error
     try:
         handler = ZosPyHandler()
         logger.info("ZosPy connection established.")
+        _last_connection_error = None
         return handler
     except Exception as e:
         logger.error(f"Failed to initialize ZosPy: {e}")
+        _last_connection_error = str(e)
         return None
 
 
@@ -167,7 +172,8 @@ async def _run_endpoint(
     with timed_operation(logger, endpoint_name):
         async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
             if _ensure_connected() is None:
-                return response_cls(success=False, error=NOT_CONNECTED_ERROR)
+                error_msg = f"{NOT_CONNECTED_ERROR}: {_last_connection_error}" if _last_connection_error else NOT_CONNECTED_ERROR
+                return response_cls(success=False, error=error_msg)
 
             try:
                 _load_system_from_request(request)
@@ -243,6 +249,12 @@ async def lifespan(app: FastAPI):
     # This allows the server to start instantly without waiting for OpticStudio/ZosPy
     logger.info("Starting Zemax Worker (lazy connection mode - connects on first request)")
     logger.info(f"Reporting worker_count={WORKER_COUNT} (from WEB_CONCURRENCY env var)")
+    if WORKER_COUNT == 1 and not os.getenv("WEB_CONCURRENCY"):
+        logger.warning(
+            "WEB_CONCURRENCY not set — reporting worker_count=1. "
+            "If running with --workers N, set WEB_CONCURRENCY=N so the "
+            "analysis service detects the correct concurrency."
+        )
 
     yield
 
@@ -521,10 +533,15 @@ async def health_check() -> HealthResponse:
     Health check endpoint.
 
     Returns the status of the worker and OpticStudio connection.
+    Acquires _zospy_lock with a 2-second timeout to avoid reading
+    zospy_handler during reconnection or other mutations.
     """
-    if zospy_handler is None:
+    try:
+        await asyncio.wait_for(_zospy_lock.acquire(), timeout=2.0)
+    except asyncio.TimeoutError:
+        # Lock held by a long operation — worker is busy but healthy
         return HealthResponse(
-            success=True,  # Worker is running
+            success=True,
             opticstudio_connected=False,
             version=None,
             zospy_version=None,
@@ -532,23 +549,35 @@ async def health_check() -> HealthResponse:
         )
 
     try:
-        status = zospy_handler.get_status()
-        return HealthResponse(
-            success=True,
-            opticstudio_connected=status.get("connected", False),
-            version=status.get("opticstudio_version"),
-            zospy_version=status.get("zospy_version"),
-            worker_count=WORKER_COUNT,
-        )
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return HealthResponse(
-            success=True,
-            opticstudio_connected=False,
-            version=None,
-            zospy_version=None,
-            worker_count=WORKER_COUNT,
-        )
+        if zospy_handler is None:
+            return HealthResponse(
+                success=True,  # Worker is running
+                opticstudio_connected=False,
+                version=None,
+                zospy_version=None,
+                worker_count=WORKER_COUNT,
+            )
+
+        try:
+            status = zospy_handler.get_status()
+            return HealthResponse(
+                success=True,
+                opticstudio_connected=status.get("connected", False),
+                version=status.get("opticstudio_version"),
+                zospy_version=status.get("zospy_version"),
+                worker_count=WORKER_COUNT,
+            )
+        except Exception as e:
+            logger.error(f"Health check failed: {e}")
+            return HealthResponse(
+                success=True,
+                opticstudio_connected=False,
+                version=None,
+                zospy_version=None,
+                worker_count=WORKER_COUNT,
+            )
+    finally:
+        _zospy_lock.release()
 
 
 @app.post("/load-system", response_model=LoadSystemResponse)
@@ -557,7 +586,8 @@ async def load_system(request: SystemRequest, _: None = Depends(verify_api_key))
     with timed_operation(logger, "/load-system"):
         async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
             if _ensure_connected() is None:
-                return LoadSystemResponse(success=False, error=NOT_CONNECTED_ERROR)
+                error_msg = f"{NOT_CONNECTED_ERROR}: {_last_connection_error}" if _last_connection_error else NOT_CONNECTED_ERROR
+                return LoadSystemResponse(success=False, error=error_msg)
 
             try:
                 result = _load_system_from_request(request)
@@ -771,6 +801,10 @@ if __name__ == "__main__":
     # Default to 1, but can increase up to your license limit (Premium=8, Professional=4, Perpetual=2)
     # Uses WEB_CONCURRENCY (same env var that /health reports and uvicorn recognizes)
     num_workers = WORKER_COUNT
+
+    # Propagate to child processes so each worker reports the correct total
+    # in /health (needed when the analysis service auto-detects concurrency).
+    os.environ["WEB_CONCURRENCY"] = str(num_workers)
 
     uvicorn.run(
         "main:app",
