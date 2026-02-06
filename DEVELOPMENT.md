@@ -16,8 +16,8 @@ This worker follows the **"dumb executor" pattern**:
 ```bash
 cd zemax-worker
 pip install -r requirements.txt
-python main.py          # Single worker
-# OR: uvicorn main:app --host 0.0.0.0 --port 8787 --workers 3
+python main.py                                                     # Single worker
+# OR: WEB_CONCURRENCY=3 uvicorn main:app --host 0.0.0.0 --port 8787  # 3 parallel workers
 ```
 
 **Interactive API Docs:** http://localhost:8787/docs
@@ -30,7 +30,7 @@ python main.py          # Single worker
 | Premium (subscription) | 8 |
 | Perpetual (legacy 19.4+) | 2 |
 
-On macOS, set `TASK_QUEUE_WORKERS=N` to match.
+Set `WEB_CONCURRENCY=N` to report the correct worker count in `/health`. The Mac-side zemax-analysis-service auto-detects concurrency from this value at startup.
 
 ## Architecture
 
