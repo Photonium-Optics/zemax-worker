@@ -228,9 +228,11 @@ norm_unpol = ray_trace.CreateNormUnpol(
     zp.constants.Tools.RayTrace.RaysType.Real,
     oss.LDE.NumberOfSurfaces - 1,  # Image surface
 )
-# Add rays: Hx, Hy (field), Px, Py (pupil), wavelength
+# AddRay signature: (WaveNumber, Hx, Hy, Px, Py, OPDMode)
+# WaveNumber is 1-based, Hx/Hy are normalized field coords, Px/Py are normalized pupil coords
+opd_none = zp.constants.Tools.RayTrace.OPDMode.None_
 for px, py in pupil_coords:
-    norm_unpol.AddRay(0, hy_norm, px, py, wavelength_index)
+    norm_unpol.AddRay(wavelength_index, float(hx_norm), float(hy_norm), float(px), float(py), opd_none)
 ray_trace.RunAndWaitForCompletion()
 # Read results
 success, ray_num, err_code, vig_code, x, y, z, l, m, n, l2, m2, intensity = (
@@ -328,6 +330,7 @@ curl http://localhost:8787/health
 - **DRY up endpoint boilerplate** — Extracted `_run_endpoint()` helper; reduced `main.py` from ~856 to ~738 lines
 - **Multiple workers verified** — Each uvicorn worker process gets its own ZOS singleton; constraint is license seats, not threading
 - **Remove manual fallbacks** — No more slow SingleRayTrace fallbacks for spot diagram/cross-section/wavefront
+- **Fix batch ray trace AddRay call** — `IRayTraceNormUnpolData.AddRay` requires 6 params: `(WaveNumber, Hx, Hy, Px, Py, OPDMode)`. Was passing only 5 with wrong parameter mapping (missing OPDMode, WaveNumber in wrong position). Also added Hx normalization (was hardcoded to 0).
 - **Fix UnitField errors** — Applied `_extract_value()` to all wavefront, spot diagram, and MFE metrics
 - **Fix merit function NoneType** — Empty `row_errors` list no longer converted to `None`
 - **Merit function endpoint** — Added `POST /evaluate-merit-function` with MFE operand construction

@@ -377,6 +377,7 @@ class WavefrontRequest(BaseModel):
     field_index: int = Field(default=1, ge=1, description="Field index (1-indexed)")
     wavelength_index: int = Field(default=1, ge=1, description="Wavelength index (1-indexed)")
     sampling: str = Field(default="64x64", description="Pupil sampling grid (e.g., '32x32', '64x64', '128x128')")
+    remove_tilt: bool = Field(default=False, description="Remove tilt from wavefront map")
 
 
 class WavefrontResponse(BaseModel):
@@ -650,6 +651,7 @@ async def get_wavefront(
             field_index=request.field_index,
             wavelength_index=request.wavelength_index,
             sampling=request.sampling,
+            remove_tilt=request.remove_tilt,
         ),
     )
 

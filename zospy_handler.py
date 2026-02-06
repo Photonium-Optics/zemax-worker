@@ -1050,6 +1050,7 @@ class ZosPyHandler:
         field_index: int = 1,
         wavelength_index: int = 1,
         sampling: str = "64x64",
+        remove_tilt: bool = False,
     ) -> dict[str, Any]:
         """
         Get wavefront error map and metrics using ZosPy's WavefrontMap
@@ -1162,7 +1163,7 @@ class ZosPyHandler:
                         scale=1,
                         polarization=None,
                         reference_to_primary=False,
-                        remove_tilt=False,
+                        remove_tilt=remove_tilt,
                         use_exit_pupil=True,
                     ).run(self.oss, oncomplete="Release")
                 finally:
@@ -1368,9 +1369,11 @@ class ZosPyHandler:
                 if px**2 + py**2 <= 1.0:  # Inside circular pupil
                     pupil_coords.append((float(px), float(py)))
 
-        # Calculate max field Y for normalization (avoid division by zero)
+        # Calculate max field extent for normalization (avoid division by zero)
+        max_field_x = 0.0
         max_field_y = 0.0
         for fi in range(1, num_fields + 1):
+            max_field_x = max(max_field_x, abs(_extract_value(fields.GetField(fi).X)))
             max_field_y = max(max_field_y, abs(_extract_value(fields.GetField(fi).Y)))
 
         ray_trace = None
@@ -1393,16 +1396,19 @@ class ZosPyHandler:
                 logger.warning("Could not create NormUnpol ray trace")
                 return spot_rays
 
+            # AddRay signature: (WaveNumber, Hx, Hy, Px, Py, OPDMode)
+            opd_none = self._zp.constants.Tools.RayTrace.OPDMode.None_
+
             # Add rays for all field/wavelength/pupil combinations
             for fi in range(1, num_fields + 1):
+                field = fields.GetField(fi)
+                field_x_val = _extract_value(field.X)
+                field_y_val = _extract_value(field.Y)
+                hx_norm = float(field_x_val / max_field_x) if max_field_x > 1e-10 else 0.0
+                hy_norm = float(field_y_val / max_field_y) if max_field_y > 1e-10 else 0.0
                 for wi in range(1, num_wavelengths + 1):
                     for px, py in pupil_coords:
-                        # AddRay: Hx, Hy, Px, Py, wavelength
-                        # Normalize field Y by max field Y across all fields
-                        field = fields.GetField(fi)
-                        field_y_val = _extract_value(field.Y)
-                        hy_norm = field_y_val / max_field_y if max_field_y > 1e-10 else 0.0
-                        norm_unpol.AddRay(0, hy_norm, px, py, wi)
+                        norm_unpol.AddRay(wi, hx_norm, hy_norm, float(px), float(py), opd_none)
 
             # Run the ray trace
             ray_trace.RunAndWaitForCompletion()
