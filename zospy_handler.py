@@ -1446,6 +1446,8 @@ class ZosPyHandler:
                 except Exception:
                     pass  # Ignore cleanup errors
 
+        total_rays = sum(len(e.get("rays", [])) for e in spot_rays)
+        logger.info(f"Batch ray trace: {len(spot_rays)} field entries, {total_rays} total rays")
         return spot_rays
 
     def _extract_airy_radius(self, results: Any) -> Optional[float]:

@@ -21,10 +21,10 @@ License limits (per Ansys):
 - Perpetual (legacy 19.4+): 2 instances
 
 Examples:
-  uvicorn main:app --host 0.0.0.0 --port 8787 --workers 1  # Single worker
-  uvicorn main:app --host 0.0.0.0 --port 8787 --workers 3  # 3 parallel workers (uses 3 license seats)
+  WEB_CONCURRENCY=1 uvicorn main:app --host 0.0.0.0 --port 8787  # Single worker
+  WEB_CONCURRENCY=3 uvicorn main:app --host 0.0.0.0 --port 8787  # 3 parallel workers (uses 3 license seats)
 
-On macOS, set TASK_QUEUE_WORKERS to match the number of workers here.
+The Mac-side zemax-analysis-service auto-detects the worker count from /health.
 """
 
 import asyncio
@@ -59,6 +59,11 @@ DEFAULT_HOST = "0.0.0.0"
 
 # API key for authentication (optional but recommended)
 ZEMAX_API_KEY = os.getenv("ZEMAX_API_KEY", None)
+
+# Number of uvicorn worker processes serving this URL.
+# Reads WEB_CONCURRENCY (standard env var that uvicorn also reads for --workers default).
+# Operator should set this to match the actual --workers N value.
+WORKER_COUNT = int(os.getenv("WEB_CONCURRENCY", "1"))
 
 # =============================================================================
 # Global State
@@ -285,6 +290,7 @@ class HealthResponse(BaseModel):
     opticstudio_connected: bool = Field(description="Whether OpticStudio is connected")
     version: Optional[str] = Field(default=None, description="OpticStudio version")
     zospy_version: Optional[str] = Field(default=None, description="ZosPy version")
+    worker_count: int = Field(description="Number of uvicorn worker processes serving this URL")
 
 
 class CrossSectionResponse(BaseModel):
@@ -520,6 +526,7 @@ async def health_check() -> HealthResponse:
             opticstudio_connected=False,
             version=None,
             zospy_version=None,
+            worker_count=WORKER_COUNT,
         )
 
     try:
@@ -529,6 +536,7 @@ async def health_check() -> HealthResponse:
             opticstudio_connected=status.get("connected", False),
             version=status.get("opticstudio_version"),
             zospy_version=status.get("zospy_version"),
+            worker_count=WORKER_COUNT,
         )
     except Exception as e:
         logger.error(f"Health check failed: {e}")
@@ -537,6 +545,7 @@ async def health_check() -> HealthResponse:
             opticstudio_connected=False,
             version=None,
             zospy_version=None,
+            worker_count=WORKER_COUNT,
         )
 
 

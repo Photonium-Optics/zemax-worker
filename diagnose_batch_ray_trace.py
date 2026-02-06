@@ -51,7 +51,14 @@ def run_diagnostic(oss):
 
     for wi in range(1, num_wavelengths + 1):
         w = wavelengths.GetWavelength(wi)
-        print(f"  Wavelength {wi}: {_extract_value(w.Value)} um")
+        try:
+            wl_val = _extract_value(w.Wavelength)
+        except AttributeError:
+            try:
+                wl_val = _extract_value(w.Value)
+            except AttributeError:
+                wl_val = f"<unknown attrs: {[a for a in dir(w) if not a.startswith('_')]}>"
+        print(f"  Wavelength {wi}: {wl_val} um")
 
     # Max field for normalization
     max_field_x = 0.0
