@@ -235,9 +235,8 @@ for px, py in pupil_coords:
     norm_unpol.AddRay(wavelength_index, float(hx_norm), float(hy_norm), float(px), float(py), opd_none)
 ray_trace.RunAndWaitForCompletion()
 # Read results
-success, ray_num, err_code, vig_code, x, y, z, l, m, n, l2, m2, intensity = (
-    norm_unpol.ReadNextResult()
-)
+result = norm_unpol.ReadNextResult()  # Returns 15 values
+success, err_code, x, y = result[0], result[2], result[4], result[5]
 ray_trace.Close()
 ```
 
@@ -330,6 +329,7 @@ curl http://localhost:8787/health
 - **DRY up endpoint boilerplate** — Extracted `_run_endpoint()` helper; reduced `main.py` from ~856 to ~738 lines
 - **Multiple workers verified** — Each uvicorn worker process gets its own ZOS singleton; constraint is license seats, not threading
 - **Remove manual fallbacks** — No more slow SingleRayTrace fallbacks for spot diagram/cross-section/wavefront
+- **Fix ReadNextResult unpacking** — `ReadNextResult()` returns 15 values, not 13. Use tuple indexing instead of positional unpacking for resilience.
 - **Fix batch ray trace AddRay call** — `IRayTraceNormUnpolData.AddRay` requires 6 params: `(WaveNumber, Hx, Hy, Px, Py, OPDMode)`. Was passing only 5 with wrong parameter mapping (missing OPDMode, WaveNumber in wrong position). Also added Hx normalization (was hardcoded to 0).
 - **Fix UnitField errors** — Applied `_extract_value()` to all wavefront, spot diagram, and MFE metrics
 - **Fix merit function NoneType** — Empty `row_errors` list no longer converted to `None`

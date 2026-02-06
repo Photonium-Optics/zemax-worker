@@ -1429,11 +1429,11 @@ class ZosPyHandler:
                     }
 
                     for _ in pupil_coords:
-                        success, ray_num, err_code, vig_code, x, y, z, l, m, n, l2, m2, intensity = (
-                            norm_unpol.ReadNextResult()
-                        )
+                        result = norm_unpol.ReadNextResult()
+                        # ReadNextResult returns 15 values; we only need success(0), err_code(2), x(4), y(5)
+                        success, err_code = result[0], result[2]
                         if success and err_code == 0:
-                            field_rays["rays"].append({"x": float(x), "y": float(y)})
+                            field_rays["rays"].append({"x": float(result[4]), "y": float(result[5])})
 
                     spot_rays.append(field_rays)
 
