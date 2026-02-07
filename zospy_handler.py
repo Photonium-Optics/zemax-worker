@@ -1491,32 +1491,50 @@ class ZosPyHandler:
 
     def _extract_airy_radius(self, results: Any) -> Optional[float]:
         """
-        Extract Airy disk radius from analysis results.
+        Extract or compute Airy disk radius.
+
+        ZOSAPI's StandardSpot IAR_ results object does NOT expose AiryRadius
+        directly. We compute it: r_airy = 1.22 * wavelength * f_number.
+        Result is in the same units as the system (typically mm).
 
         Args:
-            results: OpticStudio analysis results object
+            results: OpticStudio analysis results object (checked first for
+                     direct property, then falls back to computation)
 
         Returns:
             Airy radius in lens units, or None if not available
         """
+        # Try direct property first (future ZOSAPI versions may add it)
         try:
-            # Log what attributes the results object actually has
-            result_attrs = [a for a in dir(results) if not a.startswith('_')]
-            logger.info(f"[SPOT-DEBUG] _extract_airy_radius: results type={type(results).__name__}, attrs={result_attrs}")
-
-            # Use _extract_value() to handle ZosPy 2.x UnitField objects
             if hasattr(results, 'AiryRadius'):
                 val = _extract_value(results.AiryRadius)
-                logger.info(f"[SPOT-DEBUG] AiryRadius found: raw={results.AiryRadius}, extracted={val}")
+                logger.info(f"[SPOT-DEBUG] AiryRadius from results: {val}")
                 return val
-            elif hasattr(results, 'GetAiryDiskRadius'):
+            if hasattr(results, 'GetAiryDiskRadius'):
                 val = _extract_value(results.GetAiryDiskRadius())
-                logger.info(f"[SPOT-DEBUG] GetAiryDiskRadius found: extracted={val}")
+                logger.info(f"[SPOT-DEBUG] GetAiryDiskRadius from results: {val}")
                 return val
-            else:
-                logger.warning("[SPOT-DEBUG] Neither AiryRadius nor GetAiryDiskRadius found on results object")
         except Exception as e:
-            logger.warning(f"[SPOT-DEBUG] Could not extract Airy radius: {type(e).__name__}: {e}")
+            logger.debug(f"[SPOT-DEBUG] Direct airy radius extraction failed: {e}")
+
+        # Compute from F/# and primary wavelength: r_airy = 1.22 * lambda * F/#
+        try:
+            fno = self._get_fno()
+            wavelengths = self.oss.SystemData.Wavelengths
+            primary_wl_um = _extract_value(
+                wavelengths.GetWavelength(wavelengths.PrimaryWavelengthNumber).Wavelength,
+                0.5876,
+            )
+            # Convert wavelength from um to mm (system lens units)
+            primary_wl_mm = primary_wl_um * 0.001
+            if fno and fno > 0:
+                airy_radius = 1.22 * primary_wl_mm * fno
+                logger.info(f"[SPOT-DEBUG] Computed airy_radius: 1.22 * {primary_wl_mm:.6f}mm * F/{fno:.2f} = {airy_radius:.6f} mm")
+                return airy_radius
+            else:
+                logger.warning(f"[SPOT-DEBUG] Cannot compute airy radius: fno={fno}")
+        except Exception as e:
+            logger.warning(f"[SPOT-DEBUG] Could not compute Airy radius: {type(e).__name__}: {e}")
         return None
 
     def _extract_spot_data_from_results(
@@ -1590,65 +1608,52 @@ class ZosPyHandler:
         """
         Populate spot data dict from analysis results.
 
+        The ZOSAPI StandardSpot results expose an IAR_SpotDataResultMatrix via
+        results.SpotData with methods like GetRMSSpotSizeFor(field, wavelength).
+        Field and wavelength indices are 1-based in the ZOSAPI.
+
         Args:
             results: OpticStudio analysis results object
             field_index: 0-indexed field number
             field_data: Dict to populate with spot metrics
         """
         try:
-            # Log available attributes on first field only to avoid spam
+            if not hasattr(results, 'SpotData'):
+                if field_index == 0:
+                    logger.warning("[SPOT-DEBUG] results has no SpotData attribute")
+                return
+
+            spot_data = results.SpotData
             if field_index == 0:
-                result_attrs = [a for a in dir(results) if not a.startswith('_')]
-                logger.info(f"[SPOT-DEBUG] _populate_spot_data: results type={type(results).__name__}, attrs={result_attrs}")
+                spot_attrs = [a for a in dir(spot_data) if not a.startswith('_')]
+                logger.info(f"[SPOT-DEBUG] SpotData type={type(spot_data).__name__}, attrs={spot_attrs}")
 
-            # Use _extract_value() to handle ZosPy 2.x UnitField objects
-            if hasattr(results, 'GetDataSeries'):
-                series = results.GetDataSeries(field_index)
-                if series:
-                    series_attrs = [a for a in dir(series) if not a.startswith('_')]
-                    if field_index == 0:
-                        logger.info(f"[SPOT-DEBUG] DataSeries type={type(series).__name__}, attrs={series_attrs}")
-                    if hasattr(series, 'RMS'):
-                        field_data["rms_radius"] = _extract_value(series.RMS)
-                    if hasattr(series, 'GEO'):
-                        field_data["geo_radius"] = _extract_value(series.GEO)
-                else:
-                    logger.info(f"[SPOT-DEBUG] GetDataSeries({field_index}) returned None")
-            else:
-                if field_index == 0:
-                    logger.info("[SPOT-DEBUG] results has no GetDataSeries attribute")
+            num_wavelengths = int(_extract_value(spot_data.NumberOfWavelengths, 1))
 
-            if hasattr(results, 'SpotData'):
-                spot_info = results.SpotData
-                if field_index == 0:
-                    spot_info_attrs = [a for a in dir(spot_info) if not a.startswith('_')]
-                    logger.info(f"[SPOT-DEBUG] SpotData type={type(spot_info).__name__}, attrs={spot_info_attrs}")
-                if hasattr(spot_info, 'GetSpotDataAtField'):
-                    fd = spot_info.GetSpotDataAtField(field_index + 1)
-                    if fd:
-                        if field_index == 0:
-                            fd_attrs = [a for a in dir(fd) if not a.startswith('_')]
-                            logger.info(f"[SPOT-DEBUG] SpotDataAtField type={type(fd).__name__}, attrs={fd_attrs}")
-                        if hasattr(fd, 'RMSSpotRadius'):
-                            field_data["rms_radius"] = _extract_value(fd.RMSSpotRadius)
-                        if hasattr(fd, 'GEOSpotRadius'):
-                            field_data["geo_radius"] = _extract_value(fd.GEOSpotRadius)
-                        if hasattr(fd, 'CentroidX'):
-                            field_data["centroid_x"] = _extract_value(fd.CentroidX)
-                        if hasattr(fd, 'CentroidY'):
-                            field_data["centroid_y"] = _extract_value(fd.CentroidY)
-                        if hasattr(fd, 'NumberOfRays'):
-                            field_data["num_rays"] = int(_extract_value(fd.NumberOfRays))
-                    else:
-                        logger.info(f"[SPOT-DEBUG] GetSpotDataAtField({field_index + 1}) returned None")
-            else:
-                if field_index == 0:
-                    logger.info("[SPOT-DEBUG] results has no SpotData attribute")
+            # ZOSAPI SpotData methods are 1-indexed for both field and wavelength.
+            # Use wavelength 1 (primary). For polychromatic spot diagrams the
+            # analysis is configured with UseAllWavelengths, so we query each
+            # wavelength and take the primary (index 1).
+            fi_1 = field_index + 1  # Convert to 1-based
+            wi = 1  # Primary wavelength (1-based)
 
-            logger.info(f"[SPOT-DEBUG] field[{field_index}] final: rms={field_data.get('rms_radius')}, geo={field_data.get('geo_radius')}, centroid=({field_data.get('centroid_x')}, {field_data.get('centroid_y')})")
+            if hasattr(spot_data, 'GetRMSSpotSizeFor'):
+                field_data["rms_radius"] = _extract_value(spot_data.GetRMSSpotSizeFor(fi_1, wi))
+            if hasattr(spot_data, 'GetGeoSpotSizeFor'):
+                field_data["geo_radius"] = _extract_value(spot_data.GetGeoSpotSizeFor(fi_1, wi))
+            if hasattr(spot_data, 'GetReferenceCoordinate_X_For'):
+                field_data["centroid_x"] = _extract_value(spot_data.GetReferenceCoordinate_X_For(fi_1, wi))
+            if hasattr(spot_data, 'GetReferenceCoordinate_Y_For'):
+                field_data["centroid_y"] = _extract_value(spot_data.GetReferenceCoordinate_Y_For(fi_1, wi))
+
+            logger.info(
+                f"[SPOT-DEBUG] field[{field_index}] final: "
+                f"rms={field_data.get('rms_radius')}, geo={field_data.get('geo_radius')}, "
+                f"centroid=({field_data.get('centroid_x')}, {field_data.get('centroid_y')})"
+            )
 
         except Exception as e:
-            logger.warning(f"[SPOT-DEBUG] Could not get spot data for field {field_index}: {type(e).__name__}: {e}")
+            logger.warning(f"[SPOT-DEBUG] Could not get spot data for field {field_index}: {type(e).__name__}: {e}", exc_info=True)
 
 
     def get_mtf(
