@@ -124,6 +124,12 @@ DEFAULT_SAMPLING = "64x64"
 DEFAULT_MAX_ZERNIKE_TERM = 37
 DEFAULT_NUM_CROSS_SECTION_RAYS = 11
 
+# Mapping from sampling grid strings to OpticStudio SampleSize enum values
+SAMPLING_ENUM_MAP = {
+    "32x32": 1, "64x64": 2, "128x128": 3,
+    "256x256": 4, "512x512": 5, "1024x1024": 6,
+}
+
 # Image export settings
 CROSS_SECTION_IMAGE_SIZE = (1200, 800)
 CROSS_SECTION_TEMP_FILENAME = "zemax_cross_section.png"
@@ -1654,26 +1660,12 @@ class ZosPyHandler:
 
                     # Configure settings
                     settings = analysis.Settings
-                    if hasattr(settings, 'Field'):
-                        try:
-                            settings.Field.SetFieldNumber(fi)
-                        except Exception:
-                            pass
-                    if hasattr(settings, 'Wavelength'):
-                        try:
-                            settings.Wavelength.SetWavelengthNumber(wavelength_index)
-                        except Exception:
-                            pass
-                    if hasattr(settings, 'SampleSize'):
-                        try:
-                            # Map sampling string to enum
-                            sample_map = {
-                                "32x32": 1, "64x64": 2, "128x128": 3,
-                                "256x256": 4, "512x512": 5, "1024x1024": 6,
-                            }
-                            settings.SampleSize = sample_map.get(sampling, 2)
-                        except Exception:
-                            pass
+                    self._configure_analysis_settings(
+                        settings,
+                        field_index=fi,
+                        wavelength_index=wavelength_index,
+                        sampling=sampling,
+                    )
                     if maximum_frequency > 0 and hasattr(settings, 'MaximumFrequency'):
                         try:
                             settings.MaximumFrequency = maximum_frequency
@@ -1757,20 +1749,18 @@ class ZosPyHandler:
                 frequency = list(np.linspace(0, max_freq, 64))
 
             # Compute diffraction limit: MTF_dl(f) = (2/pi)[arccos(f/fc) - (f/fc)*sqrt(1-(f/fc)^2)]
-            diffraction_limit = []
-            for f in frequency:
-                fn = f / cutoff_frequency  # Normalized frequency
-                if fn >= 1.0:
-                    diffraction_limit.append(0.0)
-                elif fn <= 0.0:
-                    diffraction_limit.append(1.0)
-                else:
-                    dl = (2.0 / np.pi) * (np.arccos(fn) - fn * np.sqrt(1.0 - fn * fn))
-                    diffraction_limit.append(float(dl))
+            freq_arr = np.array(frequency)
+            fn = np.clip(freq_arr / cutoff_frequency, 0.0, 1.0)
+            dl = np.where(
+                fn >= 1.0,
+                0.0,
+                (2.0 / np.pi) * (np.arccos(fn) - fn * np.sqrt(1.0 - fn * fn)),
+            )
+            diffraction_limit = dl.tolist()
 
             return {
                 "success": True,
-                "frequency": [float(f) for f in frequency],
+                "frequency": freq_arr.tolist(),
                 "fields": all_fields_data,
                 "diffraction_limit": diffraction_limit,
                 "cutoff_frequency": float(cutoff_frequency),
@@ -1838,25 +1828,12 @@ class ZosPyHandler:
             try:
                 # Configure settings
                 settings = analysis.Settings
-                if hasattr(settings, 'Field'):
-                    try:
-                        settings.Field.SetFieldNumber(field_index)
-                    except Exception:
-                        pass
-                if hasattr(settings, 'Wavelength'):
-                    try:
-                        settings.Wavelength.SetWavelengthNumber(wavelength_index)
-                    except Exception:
-                        pass
-                if hasattr(settings, 'SampleSize'):
-                    try:
-                        sample_map = {
-                            "32x32": 1, "64x64": 2, "128x128": 3,
-                            "256x256": 4, "512x512": 5, "1024x1024": 6,
-                        }
-                        settings.SampleSize = sample_map.get(sampling, 2)
-                    except Exception:
-                        pass
+                self._configure_analysis_settings(
+                    settings,
+                    field_index=field_index,
+                    wavelength_index=wavelength_index,
+                    sampling=sampling,
+                )
 
                 psf_start = time.perf_counter()
                 try:
@@ -1915,16 +1892,11 @@ class ZosPyHandler:
                     settings_first=True,
                 )
                 h_settings = huygens.Settings
-                if hasattr(h_settings, 'Field'):
-                    try:
-                        h_settings.Field.SetFieldNumber(field_index)
-                    except Exception:
-                        pass
-                if hasattr(h_settings, 'Wavelength'):
-                    try:
-                        h_settings.Wavelength.SetWavelengthNumber(wavelength_index)
-                    except Exception:
-                        pass
+                self._configure_analysis_settings(
+                    h_settings,
+                    field_index=field_index,
+                    wavelength_index=wavelength_index,
+                )
 
                 huygens_start = time.perf_counter()
                 try:
@@ -1976,6 +1948,34 @@ class ZosPyHandler:
 
         except Exception as e:
             return {"success": False, "error": f"PSF analysis failed: {e}"}
+
+    def _configure_analysis_settings(
+        self,
+        settings,
+        field_index: Optional[int] = None,
+        wavelength_index: Optional[int] = None,
+        sampling: Optional[str] = None,
+    ) -> None:
+        """Configure common analysis settings (Field, Wavelength, SampleSize).
+
+        Silently ignores missing attributes or setter failures, since different
+        analysis types expose different subsets of these settings.
+        """
+        if field_index is not None and hasattr(settings, 'Field'):
+            try:
+                settings.Field.SetFieldNumber(field_index)
+            except Exception:
+                pass
+        if wavelength_index is not None and hasattr(settings, 'Wavelength'):
+            try:
+                settings.Wavelength.SetWavelengthNumber(wavelength_index)
+            except Exception:
+                pass
+        if sampling is not None and hasattr(settings, 'SampleSize'):
+            try:
+                settings.SampleSize = SAMPLING_ENUM_MAP.get(sampling, 2)
+            except Exception:
+                pass
 
     def _get_fno(self) -> Optional[float]:
         """
