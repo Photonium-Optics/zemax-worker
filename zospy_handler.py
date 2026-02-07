@@ -386,6 +386,73 @@ class ZosPyHandler:
 
         return paraxial
 
+    def get_paraxial(self) -> dict[str, Any]:
+        """
+        Get comprehensive first-order optical properties in a single call.
+
+        Combines EFL, BFL, F/#, NA, EPD, total track, and FOV info from
+        SystemData analysis and LDE.
+
+        Returns:
+            Dict with success flag and paraxial properties.
+        """
+        try:
+            result: dict[str, Any] = {"success": True}
+
+            # Get EFL and BFL from SystemData analysis
+            try:
+                sys_data = self._zp.analyses.reports.SystemData().run(self.oss)
+                gld = sys_data.data.general_lens_data
+                result["efl"] = _extract_value(gld.effective_focal_length_air, None)
+                result["bfl"] = _extract_value(
+                    getattr(gld, "back_focal_length", None), None
+                )
+            except Exception as e:
+                logger.warning(f"get_paraxial: SystemData failed: {e}")
+                result["efl"] = self._get_efl()
+                result["bfl"] = None
+
+            # Get F/#
+            fno = self._get_fno()
+            result["fno"] = fno
+
+            # Compute NA from F/#: NA = 1 / (2 * F/#) for infinite conjugate
+            if fno is not None and fno > 0:
+                import math
+                result["na"] = 1.0 / (2.0 * fno)
+            else:
+                result["na"] = None
+
+            # Get EPD, total track, field info from LDE
+            lde_data = self._get_paraxial_from_lde()
+            result["epd"] = lde_data.get("epd")
+            result["total_track"] = lde_data.get("total_track")
+            result["max_field"] = lde_data.get("max_field")
+            result["field_type"] = lde_data.get("field_type")
+            result["field_unit"] = lde_data.get("field_unit")
+
+            # Compute image height from EFL and max field angle
+            efl = result.get("efl")
+            max_field = result.get("max_field")
+            if (
+                efl is not None
+                and max_field is not None
+                and max_field > 0
+                and lde_data.get("field_type") == "object_angle"
+            ):
+                import math
+                result["image_height"] = abs(efl) * math.tan(
+                    math.radians(max_field)
+                )
+            else:
+                result["image_height"] = None
+
+            return result
+
+        except Exception as e:
+            logger.error(f"get_paraxial failed: {e}")
+            return {"success": False, "error": str(e)}
+
     def get_cross_section(self) -> dict[str, Any]:
         """
         Generate cross-section diagram using ZosPy's CrossSection analysis.
@@ -2352,12 +2419,21 @@ class ZosPyHandler:
                 logger.warning(f"Failed to set {prop_name}: {e}")
 
         try:
-            # Set criterion and reference enums (fail hard on unknown values)
-            wizard_enums = zp.constants.Analysis.OptimizationWizard
+            # Resolve wizard enums namespace (ZOSAPI.Wizards)
+            # ZosPy maps this to zp.constants.Wizards
+            wizard_enums = getattr(zp.constants, 'Wizards', None)
+            if wizard_enums is None:
+                return _wizard_error(
+                    "Wizard enums not found at zp.constants.Wizards. "
+                    "Check ZosPy version compatibility."
+                )
+
+            # Set criterion (wizard.Criterion = ZOSAPI.Wizards.CriterionTypes.Spot)
             if not hasattr(wizard_enums.CriterionTypes, criterion):
                 return _wizard_error(f"Unknown criterion type: {criterion}")
-            wizard.Type = getattr(wizard_enums.CriterionTypes, criterion)
+            wizard.Criterion = getattr(wizard_enums.CriterionTypes, criterion)
 
+            # Set reference (wizard.Reference = ZOSAPI.Wizards.ReferenceTypes.Centroid)
             if not hasattr(wizard_enums.ReferenceTypes, reference):
                 return _wizard_error(f"Unknown reference type: {reference}")
             wizard.Reference = getattr(wizard_enums.ReferenceTypes, reference)
@@ -2389,13 +2465,15 @@ class ZosPyHandler:
                 wizard.AirMax = float(air_max)
                 wizard.AirEdgeThickness = float(air_edge_thickness)
 
-            # Type (RMS/PTV) -- separate from criterion
+            # Type (RMS/PTV) — wizard.Type = ZOSAPI.Wizards.OptimizationTypes.RMS
             if hasattr(wizard_enums, "OptimizationTypes"):
                 opt_type = getattr(wizard_enums.OptimizationTypes, type, None)
                 if opt_type is not None:
                     wizard.Type = opt_type
                 else:
                     logger.warning(f"OptimizationTypes.{type} not found, skipping Type assignment")
+            else:
+                logger.warning("OptimizationTypes enum not found in Wizards namespace")
 
             # Optimization Function params
             _set_wizard_prop("SpatialFrequency", float(spatial_frequency))

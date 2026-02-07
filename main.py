@@ -636,6 +636,22 @@ class OptimizationWizardResponse(BaseModel):
     error: Optional[str] = Field(default=None, description="Error message if failed")
 
 
+class ParaxialResponse(BaseModel):
+    """First-order (paraxial) optical properties response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    efl: Optional[float] = Field(default=None, description="Effective focal length (mm)")
+    bfl: Optional[float] = Field(default=None, description="Back focal length (mm)")
+    fno: Optional[float] = Field(default=None, description="F-number")
+    na: Optional[float] = Field(default=None, description="Numerical aperture")
+    epd: Optional[float] = Field(default=None, description="Entrance pupil diameter (mm)")
+    total_track: Optional[float] = Field(default=None, description="Total track length (mm)")
+    max_field: Optional[float] = Field(default=None, description="Maximum field value")
+    field_type: Optional[str] = Field(default=None, description="Field type (e.g. object_angle)")
+    field_unit: Optional[str] = Field(default=None, description="Field unit (e.g. deg)")
+    image_height: Optional[float] = Field(default=None, description="Paraxial image height (mm)")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
 # =============================================================================
 # Endpoints
 # =============================================================================
@@ -1019,6 +1035,15 @@ async def get_psf(
             wavelength_index=request.wavelength_index,
             sampling=request.sampling,
         ),
+    )
+
+
+@app.post("/paraxial", response_model=ParaxialResponse)
+async def get_paraxial(request: SystemRequest, _: None = Depends(verify_api_key)) -> ParaxialResponse:
+    """Get comprehensive first-order (paraxial) optical properties."""
+    return await _run_endpoint(
+        "/paraxial", ParaxialResponse, request,
+        lambda: zospy_handler.get_paraxial(),
     )
 
 
