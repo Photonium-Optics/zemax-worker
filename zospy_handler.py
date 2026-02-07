@@ -1502,7 +1502,7 @@ class ZosPyHandler:
         try:
             # Log what attributes the results object actually has
             result_attrs = [a for a in dir(results) if not a.startswith('_')]
-            logger.debug(f"[SPOT-DEBUG] _extract_airy_radius: results type={type(results).__name__}, attrs={result_attrs}")
+            logger.info(f"[SPOT-DEBUG] _extract_airy_radius: results type={type(results).__name__}, attrs={result_attrs}")
 
             # Use _extract_value() to handle ZosPy 2.x UnitField objects
             if hasattr(results, 'AiryRadius'):
@@ -1599,7 +1599,7 @@ class ZosPyHandler:
             # Log available attributes on first field only to avoid spam
             if field_index == 0:
                 result_attrs = [a for a in dir(results) if not a.startswith('_')]
-                logger.debug(f"[SPOT-DEBUG] _populate_spot_data: results type={type(results).__name__}, attrs={result_attrs}")
+                logger.info(f"[SPOT-DEBUG] _populate_spot_data: results type={type(results).__name__}, attrs={result_attrs}")
 
             # Use _extract_value() to handle ZosPy 2.x UnitField objects
             if hasattr(results, 'GetDataSeries'):
@@ -1607,28 +1607,28 @@ class ZosPyHandler:
                 if series:
                     series_attrs = [a for a in dir(series) if not a.startswith('_')]
                     if field_index == 0:
-                        logger.debug(f"[SPOT-DEBUG] DataSeries type={type(series).__name__}, attrs={series_attrs}")
+                        logger.info(f"[SPOT-DEBUG] DataSeries type={type(series).__name__}, attrs={series_attrs}")
                     if hasattr(series, 'RMS'):
                         field_data["rms_radius"] = _extract_value(series.RMS)
                     if hasattr(series, 'GEO'):
                         field_data["geo_radius"] = _extract_value(series.GEO)
                 else:
-                    logger.debug(f"[SPOT-DEBUG] GetDataSeries({field_index}) returned None")
+                    logger.info(f"[SPOT-DEBUG] GetDataSeries({field_index}) returned None")
             else:
                 if field_index == 0:
-                    logger.debug("[SPOT-DEBUG] results has no GetDataSeries attribute")
+                    logger.info("[SPOT-DEBUG] results has no GetDataSeries attribute")
 
             if hasattr(results, 'SpotData'):
                 spot_info = results.SpotData
                 if field_index == 0:
                     spot_info_attrs = [a for a in dir(spot_info) if not a.startswith('_')]
-                    logger.debug(f"[SPOT-DEBUG] SpotData type={type(spot_info).__name__}, attrs={spot_info_attrs}")
+                    logger.info(f"[SPOT-DEBUG] SpotData type={type(spot_info).__name__}, attrs={spot_info_attrs}")
                 if hasattr(spot_info, 'GetSpotDataAtField'):
                     fd = spot_info.GetSpotDataAtField(field_index + 1)
                     if fd:
                         if field_index == 0:
                             fd_attrs = [a for a in dir(fd) if not a.startswith('_')]
-                            logger.debug(f"[SPOT-DEBUG] SpotDataAtField type={type(fd).__name__}, attrs={fd_attrs}")
+                            logger.info(f"[SPOT-DEBUG] SpotDataAtField type={type(fd).__name__}, attrs={fd_attrs}")
                         if hasattr(fd, 'RMSSpotRadius'):
                             field_data["rms_radius"] = _extract_value(fd.RMSSpotRadius)
                         if hasattr(fd, 'GEOSpotRadius'):
@@ -1640,12 +1640,12 @@ class ZosPyHandler:
                         if hasattr(fd, 'NumberOfRays'):
                             field_data["num_rays"] = int(_extract_value(fd.NumberOfRays))
                     else:
-                        logger.debug(f"[SPOT-DEBUG] GetSpotDataAtField({field_index + 1}) returned None")
+                        logger.info(f"[SPOT-DEBUG] GetSpotDataAtField({field_index + 1}) returned None")
             else:
                 if field_index == 0:
-                    logger.debug("[SPOT-DEBUG] results has no SpotData attribute")
+                    logger.info("[SPOT-DEBUG] results has no SpotData attribute")
 
-            logger.debug(f"[SPOT-DEBUG] field[{field_index}] final: rms={field_data.get('rms_radius')}, geo={field_data.get('geo_radius')}, centroid=({field_data.get('centroid_x')}, {field_data.get('centroid_y')})")
+            logger.info(f"[SPOT-DEBUG] field[{field_index}] final: rms={field_data.get('rms_radius')}, geo={field_data.get('geo_radius')}, centroid=({field_data.get('centroid_x')}, {field_data.get('centroid_y')})")
 
         except Exception as e:
             logger.warning(f"[SPOT-DEBUG] Could not get spot data for field {field_index}: {type(e).__name__}: {e}")
