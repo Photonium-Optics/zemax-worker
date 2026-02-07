@@ -812,22 +812,20 @@ async def get_spot_diagram(
     This is a "dumb executor" endpoint - Mac side renders the spot diagram from spot_rays.
     """
     def _build_spot_response(result: dict) -> SpotDiagramResponse:
-        logger.info(f"[SPOT-DEBUG] Building response from handler result: success={result.get('success')}, keys={list(result.keys())}")
         if not result.get("success", False):
-            logger.warning(f"[SPOT-DEBUG] Handler returned failure: {result.get('error')}")
+            logger.warning(f"[SPOT] Handler failure: {result.get('error')}")
             return SpotDiagramResponse(
                 success=False,
                 error=result.get("error", "Spot diagram analysis failed"),
             )
+
         spot_data = None
         if result.get("spot_data"):
             spot_data = [SpotFieldData(**sd) for sd in result["spot_data"]]
-            logger.info(f"[SPOT-DEBUG] Parsed {len(spot_data)} spot_data entries")
-        else:
-            logger.warning("[SPOT-DEBUG] No spot_data in handler result")
 
-        # Convert spot_rays dict to SpotRayData models
+        # Convert spot_rays dicts to SpotRayData models
         spot_rays = None
+        total_rays = 0
         if result.get("spot_rays"):
             spot_rays = []
             for ray_data in result["spot_rays"]:
@@ -840,11 +838,14 @@ async def get_spot_diagram(
                     rays=rays,
                 ))
             total_rays = sum(len(sr.rays) for sr in spot_rays)
-            logger.info(f"[SPOT-DEBUG] Parsed {len(spot_rays)} spot_ray entries with {total_rays} total rays")
-        else:
-            logger.warning("[SPOT-DEBUG] No spot_rays in handler result")
 
-        resp = SpotDiagramResponse(
+        logger.info(
+            f"[SPOT] Response: spot_data={len(spot_data) if spot_data else 0}, "
+            f"spot_rays={len(spot_rays) if spot_rays else 0}, "
+            f"total_rays={total_rays}, airy_radius={result.get('airy_radius')}"
+        )
+
+        return SpotDiagramResponse(
             success=True,
             image=result.get("image"),
             image_format=result.get("image_format"),
@@ -854,15 +855,6 @@ async def get_spot_diagram(
             spot_rays=spot_rays,
             airy_radius=result.get("airy_radius"),
         )
-        # Log serialized response size to detect truncation/serialization issues
-        try:
-            resp_json = resp.model_dump()
-            resp_spot_rays_count = len(resp_json.get("spot_rays") or [])
-            resp_total_rays = sum(len(sr.get("rays", [])) for sr in (resp_json.get("spot_rays") or []))
-            logger.info(f"[SPOT-DEBUG] Response model: spot_rays={resp_spot_rays_count}, total_rays={resp_total_rays}, airy_radius={resp_json.get('airy_radius')}")
-        except Exception as e:
-            logger.error(f"[SPOT-DEBUG] Failed to serialize response for debug: {e}")
-        return resp
 
     return await _run_endpoint(
         "/spot-diagram", SpotDiagramResponse, request,

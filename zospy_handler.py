@@ -1254,7 +1254,7 @@ class ZosPyHandler:
         reference_code = 0 if reference == "chief_ray" else 1
 
         try:
-            logger.info(f"[SPOT-DEBUG] Starting spot diagram: ray_density={ray_density}, reference={reference} (code={reference_code}), num_fields={num_fields}")
+            logger.info(f"[SPOT] Starting: ray_density={ray_density}, reference={reference}, num_fields={num_fields}")
 
             # Use ZosPy's new_analysis to access StandardSpot for metrics
             analysis = self._zp.analyses.new_analysis(
@@ -1262,7 +1262,6 @@ class ZosPyHandler:
                 self._zp.constants.Analysis.AnalysisIDM.StandardSpot,
                 settings_first=True,
             )
-            logger.debug("[SPOT-DEBUG] StandardSpot analysis created successfully")
 
             # Configure and run the analysis
             self._configure_spot_analysis(analysis.Settings, ray_density, reference_code)
@@ -1279,18 +1278,16 @@ class ZosPyHandler:
             if analysis.Results is not None:
                 airy_radius = self._extract_airy_radius(analysis.Results)
                 spot_data = self._extract_spot_data_from_results(analysis.Results, fields, num_fields)
-                logger.info(f"[SPOT-DEBUG] StandardSpot results: airy_radius={airy_radius}, spot_data_count={len(spot_data)}")
-                for i, sd in enumerate(spot_data):
-                    logger.debug(f"[SPOT-DEBUG]   field[{i}]: rms={sd.get('rms_radius')}, geo={sd.get('geo_radius')}, centroid=({sd.get('centroid_x')}, {sd.get('centroid_y')}), num_rays={sd.get('num_rays')}")
+                logger.info(f"[SPOT] StandardSpot results: airy_radius={airy_radius}, fields={len(spot_data)}")
             else:
-                logger.warning("[SPOT-DEBUG] StandardSpot analysis.Results is None")
+                logger.warning("[SPOT] StandardSpot analysis.Results is None")
 
             # Close analysis before batch ray trace
             self._cleanup_analysis(analysis, None)
             analysis = None
 
             # Get raw ray X,Y positions using batch ray tracing
-            # This is required because ZOSAPI doesn't expose raw ray data from StandardSpot
+            # (ZOSAPI doesn't expose raw ray data from StandardSpot)
             ray_trace_start = time.perf_counter()
             try:
                 spot_rays = self._get_spot_ray_data(ray_density)
@@ -1299,12 +1296,16 @@ class ZosPyHandler:
                 log_timing(logger, "BatchRayTrace for spot diagram", ray_trace_elapsed_ms)
 
             total_ray_count = sum(len(e.get("rays", [])) for e in spot_rays)
-            logger.info(f"[SPOT-DEBUG] Returning: spot_data={len(spot_data)} fields, spot_rays={len(spot_rays)} entries, total_rays={total_ray_count}, airy_radius={airy_radius}")
             if total_ray_count == 0:
-                logger.warning("[SPOT-DEBUG] WARNING: No rays traced! Check pupil coords / field normalization")
+                logger.warning("[SPOT] No rays traced - check pupil coords / field normalization")
 
-            # Note: image is None because ZOSAPI StandardSpot doesn't support image export
-            # Mac side will render the spot diagram from spot_rays data
+            logger.info(
+                f"[SPOT] Returning: fields={len(spot_data)}, ray_entries={len(spot_rays)}, "
+                f"total_rays={total_ray_count}, airy_radius={airy_radius}"
+            )
+
+            # Image is None: ZOSAPI StandardSpot doesn't support image export.
+            # Mac side renders the spot diagram from spot_rays data.
             return {
                 "success": True,
                 "image": None,
@@ -1317,7 +1318,7 @@ class ZosPyHandler:
             }
 
         except Exception as e:
-            logger.error(f"[SPOT-DEBUG] StandardSpot analysis FAILED: {type(e).__name__}: {e}", exc_info=True)
+            logger.error(f"[SPOT] StandardSpot analysis FAILED: {type(e).__name__}: {e}", exc_info=True)
             return {"success": False, "error": f"StandardSpot analysis failed: {e}"}
         finally:
             self._cleanup_analysis(analysis, None)
@@ -1380,16 +1381,15 @@ class ZosPyHandler:
         wavelengths = self.oss.SystemData.Wavelengths
         num_fields = fields.NumberOfFields
         num_wavelengths = wavelengths.NumberOfWavelengths
-        logger.info(f"[SPOT-DEBUG] _get_spot_ray_data: ray_density={ray_density}, num_fields={num_fields}, num_wavelengths={num_wavelengths}")
+        logger.info(f"[SPOT] Ray trace: density={ray_density}, fields={num_fields}, wavelengths={num_wavelengths}")
 
-        # Generate pupil coordinates for ray grid
-        # ray_density^2 rays in a circular pupil pattern
+        # Generate pupil coordinates for ray grid (circular pupil pattern)
         pupil_coords = []
         for px in np.linspace(-1, 1, ray_density):
             for py in np.linspace(-1, 1, ray_density):
-                if px**2 + py**2 <= 1.0:  # Inside circular pupil
+                if px**2 + py**2 <= 1.0:
                     pupil_coords.append((float(px), float(py)))
-        logger.debug(f"[SPOT-DEBUG] Pupil grid: {len(pupil_coords)} rays in circular pattern from {ray_density}x{ray_density} grid")
+        logger.debug(f"[SPOT] Pupil grid: {len(pupil_coords)} rays from {ray_density}x{ray_density} grid")
 
         # Calculate max field extent for normalization (avoid division by zero)
         max_field_x = 0.0
@@ -1397,7 +1397,7 @@ class ZosPyHandler:
         for fi in range(1, num_fields + 1):
             max_field_x = max(max_field_x, abs(_extract_value(fields.GetField(fi).X)))
             max_field_y = max(max_field_y, abs(_extract_value(fields.GetField(fi).Y)))
-        logger.debug(f"[SPOT-DEBUG] Field extents: max_field_x={max_field_x}, max_field_y={max_field_y}")
+        logger.debug(f"[SPOT] Field extents: max_x={max_field_x}, max_y={max_field_y}")
 
         ray_trace = None
         try:
@@ -1430,16 +1430,15 @@ class ZosPyHandler:
                 field_y_val = _extract_value(field.Y)
                 hx_norm = float(field_x_val / max_field_x) if max_field_x > 1e-10 else 0.0
                 hy_norm = float(field_y_val / max_field_y) if max_field_y > 1e-10 else 0.0
-                logger.debug(f"[SPOT-DEBUG] Field {fi}: raw=({field_x_val}, {field_y_val}), normalized=({hx_norm}, {hy_norm})")
+                logger.debug(f"[SPOT] Field {fi}: raw=({field_x_val}, {field_y_val}), norm=({hx_norm}, {hy_norm})")
                 for wi in range(1, num_wavelengths + 1):
                     for px, py in pupil_coords:
                         norm_unpol.AddRay(wi, hx_norm, hy_norm, float(px), float(py), opd_none)
                         rays_added += 1
-            logger.info(f"[SPOT-DEBUG] Added {rays_added} rays to batch trace (expected {max_rays})")
+            logger.debug(f"[SPOT] Added {rays_added} rays to batch trace (expected {max_rays})")
 
             # Run the ray trace
             ray_trace.RunAndWaitForCompletion()
-            logger.debug("[SPOT-DEBUG] BatchRayTrace completed")
 
             # Read results and organize by field/wavelength
             total_success = 0
@@ -1471,22 +1470,20 @@ class ZosPyHandler:
                             entry_failed += 1
 
                     if entry_failed > 0:
-                        logger.debug(f"[SPOT-DEBUG] Field {fi} wl {wi}: {len(field_rays['rays'])} OK, {entry_failed} failed (err_code={err_code})")
+                        logger.debug(f"[SPOT] Field {fi} wl {wi}: {len(field_rays['rays'])} OK, {entry_failed} failed")
                     spot_rays.append(field_rays)
 
-            logger.info(f"[SPOT-DEBUG] Ray trace results: {total_success} success, {total_failed} failed out of {rays_added} total")
+            logger.info(f"[SPOT] Ray trace: {total_success} success, {total_failed} failed out of {rays_added} total")
 
         except Exception as e:
-            logger.error(f"[SPOT-DEBUG] Batch ray trace FAILED: {type(e).__name__}: {e}", exc_info=True)
+            logger.error(f"[SPOT] Batch ray trace FAILED: {type(e).__name__}: {e}", exc_info=True)
         finally:
             if ray_trace is not None:
                 try:
                     ray_trace.Close()
                 except Exception:
-                    pass  # Ignore cleanup errors
+                    pass
 
-        total_rays = sum(len(e.get("rays", [])) for e in spot_rays)
-        logger.info(f"Batch ray trace: {len(spot_rays)} field entries, {total_rays} total rays")
         return spot_rays
 
     def _extract_airy_radius(self, results: Any) -> Optional[float]:
@@ -1505,17 +1502,14 @@ class ZosPyHandler:
             Airy radius in lens units, or None if not available
         """
         # Try direct property first (future ZOSAPI versions may add it)
-        try:
-            if hasattr(results, 'AiryRadius'):
-                val = _extract_value(results.AiryRadius)
-                logger.info(f"[SPOT-DEBUG] AiryRadius from results: {val}")
-                return val
-            if hasattr(results, 'GetAiryDiskRadius'):
-                val = _extract_value(results.GetAiryDiskRadius())
-                logger.info(f"[SPOT-DEBUG] GetAiryDiskRadius from results: {val}")
-                return val
-        except Exception as e:
-            logger.debug(f"[SPOT-DEBUG] Direct airy radius extraction failed: {e}")
+        for attr_name, call in [("AiryRadius", False), ("GetAiryDiskRadius", True)]:
+            try:
+                if hasattr(results, attr_name):
+                    val = _extract_value(getattr(results, attr_name)() if call else getattr(results, attr_name))
+                    logger.info(f"[SPOT] Airy radius from {attr_name}: {val}")
+                    return val
+            except Exception as e:
+                logger.debug(f"[SPOT] {attr_name} extraction failed: {e}")
 
         # Compute from F/# and primary wavelength: r_airy = 1.22 * lambda * F/#
         try:
@@ -1525,16 +1519,14 @@ class ZosPyHandler:
                 wavelengths.GetWavelength(wavelengths.PrimaryWavelengthNumber).Wavelength,
                 0.5876,
             )
-            # Convert wavelength from um to mm (system lens units)
             primary_wl_mm = primary_wl_um * 0.001
             if fno and fno > 0:
                 airy_radius = 1.22 * primary_wl_mm * fno
-                logger.info(f"[SPOT-DEBUG] Computed airy_radius: 1.22 * {primary_wl_mm:.6f}mm * F/{fno:.2f} = {airy_radius:.6f} mm")
+                logger.info(f"[SPOT] Computed airy_radius: 1.22 * {primary_wl_mm:.6f}mm * F/{fno:.2f} = {airy_radius:.6f} mm")
                 return airy_radius
-            else:
-                logger.warning(f"[SPOT-DEBUG] Cannot compute airy radius: fno={fno}")
+            logger.warning(f"[SPOT] Cannot compute airy radius: fno={fno}")
         except Exception as e:
-            logger.warning(f"[SPOT-DEBUG] Could not compute Airy radius: {type(e).__name__}: {e}")
+            logger.warning(f"[SPOT] Could not compute Airy radius: {type(e).__name__}: {e}")
         return None
 
     def _extract_spot_data_from_results(
@@ -1620,22 +1612,18 @@ class ZosPyHandler:
         try:
             if not hasattr(results, 'SpotData'):
                 if field_index == 0:
-                    logger.warning("[SPOT-DEBUG] results has no SpotData attribute")
+                    logger.warning("[SPOT] results has no SpotData attribute")
                 return
 
             spot_data = results.SpotData
             if field_index == 0:
                 spot_attrs = [a for a in dir(spot_data) if not a.startswith('_')]
-                logger.info(f"[SPOT-DEBUG] SpotData type={type(spot_data).__name__}, attrs={spot_attrs}")
-
-            num_wavelengths = int(_extract_value(spot_data.NumberOfWavelengths, 1))
+                logger.debug(f"[SPOT] SpotData type={type(spot_data).__name__}, attrs={spot_attrs}")
 
             # ZOSAPI SpotData methods are 1-indexed for both field and wavelength.
-            # Use wavelength 1 (primary). For polychromatic spot diagrams the
-            # analysis is configured with UseAllWavelengths, so we query each
-            # wavelength and take the primary (index 1).
-            fi_1 = field_index + 1  # Convert to 1-based
-            wi = 1  # Primary wavelength (1-based)
+            # Query primary wavelength (index 1).
+            fi_1 = field_index + 1
+            wi = 1
 
             if hasattr(spot_data, 'GetRMSSpotSizeFor'):
                 field_data["rms_radius"] = _extract_value(spot_data.GetRMSSpotSizeFor(fi_1, wi))
@@ -1646,14 +1634,14 @@ class ZosPyHandler:
             if hasattr(spot_data, 'GetReferenceCoordinate_Y_For'):
                 field_data["centroid_y"] = _extract_value(spot_data.GetReferenceCoordinate_Y_For(fi_1, wi))
 
-            logger.info(
-                f"[SPOT-DEBUG] field[{field_index}] final: "
-                f"rms={field_data.get('rms_radius')}, geo={field_data.get('geo_radius')}, "
+            logger.debug(
+                f"[SPOT] field[{field_index}]: rms={field_data.get('rms_radius')}, "
+                f"geo={field_data.get('geo_radius')}, "
                 f"centroid=({field_data.get('centroid_x')}, {field_data.get('centroid_y')})"
             )
 
         except Exception as e:
-            logger.warning(f"[SPOT-DEBUG] Could not get spot data for field {field_index}: {type(e).__name__}: {e}", exc_info=True)
+            logger.warning(f"[SPOT] Could not get spot data for field {field_index}: {type(e).__name__}: {e}", exc_info=True)
 
 
     def get_mtf(
