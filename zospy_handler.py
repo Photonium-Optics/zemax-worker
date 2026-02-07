@@ -1254,12 +1254,15 @@ class ZosPyHandler:
         reference_code = 0 if reference == "chief_ray" else 1
 
         try:
+            logger.info(f"[SPOT-DEBUG] Starting spot diagram: ray_density={ray_density}, reference={reference} (code={reference_code}), num_fields={num_fields}")
+
             # Use ZosPy's new_analysis to access StandardSpot for metrics
             analysis = self._zp.analyses.new_analysis(
                 self.oss,
                 self._zp.constants.Analysis.AnalysisIDM.StandardSpot,
                 settings_first=True,
             )
+            logger.debug("[SPOT-DEBUG] StandardSpot analysis created successfully")
 
             # Configure and run the analysis
             self._configure_spot_analysis(analysis.Settings, ray_density, reference_code)
@@ -1276,6 +1279,11 @@ class ZosPyHandler:
             if analysis.Results is not None:
                 airy_radius = self._extract_airy_radius(analysis.Results)
                 spot_data = self._extract_spot_data_from_results(analysis.Results, fields, num_fields)
+                logger.info(f"[SPOT-DEBUG] StandardSpot results: airy_radius={airy_radius}, spot_data_count={len(spot_data)}")
+                for i, sd in enumerate(spot_data):
+                    logger.debug(f"[SPOT-DEBUG]   field[{i}]: rms={sd.get('rms_radius')}, geo={sd.get('geo_radius')}, centroid=({sd.get('centroid_x')}, {sd.get('centroid_y')}), num_rays={sd.get('num_rays')}")
+            else:
+                logger.warning("[SPOT-DEBUG] StandardSpot analysis.Results is None")
 
             # Close analysis before batch ray trace
             self._cleanup_analysis(analysis, None)
@@ -1289,6 +1297,11 @@ class ZosPyHandler:
             finally:
                 ray_trace_elapsed_ms = (time.perf_counter() - ray_trace_start) * 1000
                 log_timing(logger, "BatchRayTrace for spot diagram", ray_trace_elapsed_ms)
+
+            total_ray_count = sum(len(e.get("rays", [])) for e in spot_rays)
+            logger.info(f"[SPOT-DEBUG] Returning: spot_data={len(spot_data)} fields, spot_rays={len(spot_rays)} entries, total_rays={total_ray_count}, airy_radius={airy_radius}")
+            if total_ray_count == 0:
+                logger.warning("[SPOT-DEBUG] WARNING: No rays traced! Check pupil coords / field normalization")
 
             # Note: image is None because ZOSAPI StandardSpot doesn't support image export
             # Mac side will render the spot diagram from spot_rays data
@@ -1304,6 +1317,7 @@ class ZosPyHandler:
             }
 
         except Exception as e:
+            logger.error(f"[SPOT-DEBUG] StandardSpot analysis FAILED: {type(e).__name__}: {e}", exc_info=True)
             return {"success": False, "error": f"StandardSpot analysis failed: {e}"}
         finally:
             self._cleanup_analysis(analysis, None)
@@ -1366,6 +1380,7 @@ class ZosPyHandler:
         wavelengths = self.oss.SystemData.Wavelengths
         num_fields = fields.NumberOfFields
         num_wavelengths = wavelengths.NumberOfWavelengths
+        logger.info(f"[SPOT-DEBUG] _get_spot_ray_data: ray_density={ray_density}, num_fields={num_fields}, num_wavelengths={num_wavelengths}")
 
         # Generate pupil coordinates for ray grid
         # ray_density^2 rays in a circular pupil pattern
@@ -1374,6 +1389,7 @@ class ZosPyHandler:
             for py in np.linspace(-1, 1, ray_density):
                 if px**2 + py**2 <= 1.0:  # Inside circular pupil
                     pupil_coords.append((float(px), float(py)))
+        logger.debug(f"[SPOT-DEBUG] Pupil grid: {len(pupil_coords)} rays in circular pattern from {ray_density}x{ray_density} grid")
 
         # Calculate max field extent for normalization (avoid division by zero)
         max_field_x = 0.0
@@ -1381,6 +1397,7 @@ class ZosPyHandler:
         for fi in range(1, num_fields + 1):
             max_field_x = max(max_field_x, abs(_extract_value(fields.GetField(fi).X)))
             max_field_y = max(max_field_y, abs(_extract_value(fields.GetField(fi).Y)))
+        logger.debug(f"[SPOT-DEBUG] Field extents: max_field_x={max_field_x}, max_field_y={max_field_y}")
 
         ray_trace = None
         try:
@@ -1406,20 +1423,27 @@ class ZosPyHandler:
             opd_none = self._zp.constants.Tools.RayTrace.OPDMode.None_
 
             # Add rays for all field/wavelength/pupil combinations
+            rays_added = 0
             for fi in range(1, num_fields + 1):
                 field = fields.GetField(fi)
                 field_x_val = _extract_value(field.X)
                 field_y_val = _extract_value(field.Y)
                 hx_norm = float(field_x_val / max_field_x) if max_field_x > 1e-10 else 0.0
                 hy_norm = float(field_y_val / max_field_y) if max_field_y > 1e-10 else 0.0
+                logger.debug(f"[SPOT-DEBUG] Field {fi}: raw=({field_x_val}, {field_y_val}), normalized=({hx_norm}, {hy_norm})")
                 for wi in range(1, num_wavelengths + 1):
                     for px, py in pupil_coords:
                         norm_unpol.AddRay(wi, hx_norm, hy_norm, float(px), float(py), opd_none)
+                        rays_added += 1
+            logger.info(f"[SPOT-DEBUG] Added {rays_added} rays to batch trace (expected {max_rays})")
 
             # Run the ray trace
             ray_trace.RunAndWaitForCompletion()
+            logger.debug("[SPOT-DEBUG] BatchRayTrace completed")
 
             # Read results and organize by field/wavelength
+            total_success = 0
+            total_failed = 0
             for fi in range(1, num_fields + 1):
                 field = fields.GetField(fi)
                 field_x = _extract_value(field.X)
@@ -1434,17 +1458,26 @@ class ZosPyHandler:
                         "rays": [],
                     }
 
+                    entry_failed = 0
                     for _ in pupil_coords:
                         result = norm_unpol.ReadNextResult()
                         # ReadNextResult returns 15 values; we only need success(0), err_code(2), x(4), y(5)
                         success, err_code = result[0], result[2]
                         if success and err_code == 0:
                             field_rays["rays"].append({"x": float(result[4]), "y": float(result[5])})
+                            total_success += 1
+                        else:
+                            total_failed += 1
+                            entry_failed += 1
 
+                    if entry_failed > 0:
+                        logger.debug(f"[SPOT-DEBUG] Field {fi} wl {wi}: {len(field_rays['rays'])} OK, {entry_failed} failed (err_code={err_code})")
                     spot_rays.append(field_rays)
 
+            logger.info(f"[SPOT-DEBUG] Ray trace results: {total_success} success, {total_failed} failed out of {rays_added} total")
+
         except Exception as e:
-            logger.warning(f"Batch ray trace for spot diagram failed: {e}", exc_info=True)
+            logger.error(f"[SPOT-DEBUG] Batch ray trace FAILED: {type(e).__name__}: {e}", exc_info=True)
         finally:
             if ray_trace is not None:
                 try:
