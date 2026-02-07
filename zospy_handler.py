@@ -2530,7 +2530,8 @@ class ZosPyHandler:
                     for j, col in enumerate(param_columns):
                         try:
                             cell = op.GetOperandCell(col)
-                            params.append(float(cell.IntegerValue if j < 2 else cell.DoubleValue))
+                            raw = float(cell.IntegerValue if j < 2 else cell.DoubleValue)
+                            params.append(None if (math.isinf(raw) or math.isnan(raw)) else raw)
                         except Exception:
                             params.append(None)
 
