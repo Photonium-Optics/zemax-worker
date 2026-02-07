@@ -48,6 +48,33 @@ _BINARY_FIELDS = {"image", "zmx_content"}
 _TEXT_TRUNCATE_FIELDS = {"seidel_text": 200}
 
 
+def _summarize_value(key: str, value: Any) -> Any:
+    """Summarize a single result field for raw output logging.
+
+    Returns a log-friendly representation: truncates binary/text fields,
+    summarizes long arrays, and describes ndarrays by shape.
+    """
+    if key in _BINARY_FIELDS and isinstance(value, str) and len(value) > 100:
+        return f"<base64 {len(value)} chars>"
+
+    if key in _TEXT_TRUNCATE_FIELDS:
+        max_len = _TEXT_TRUNCATE_FIELDS[key]
+        if isinstance(value, str) and len(value) > max_len:
+            return value[:max_len] + f"... ({len(value)} chars total)"
+
+    if key in _ARRAY_SUMMARY_FIELDS and isinstance(value, (list, tuple)):
+        if len(value) > _ARRAY_SUMMARY_MAX:
+            return {
+                "_summary": f"{len(value)} items (showing first {_ARRAY_SUMMARY_MAX})",
+                "items": value[:_ARRAY_SUMMARY_MAX],
+            }
+
+    if isinstance(value, np.ndarray):
+        return f"ndarray(shape={value.shape}, dtype={value.dtype})"
+
+    return value
+
+
 def _log_raw_output(operation: str, result: dict[str, Any]) -> None:
     """Log raw Zemax analysis output at DEBUG level on the zemax.raw logger.
 
@@ -58,34 +85,11 @@ def _log_raw_output(operation: str, result: dict[str, Any]) -> None:
         return
 
     try:
-        filtered = {}
-        for key, value in result.items():
-            if key in _BINARY_FIELDS:
-                if isinstance(value, str) and len(value) > 100:
-                    filtered[key] = f"<base64 {len(value)} chars>"
-                else:
-                    filtered[key] = value
-            elif key in _TEXT_TRUNCATE_FIELDS:
-                max_len = _TEXT_TRUNCATE_FIELDS[key]
-                if isinstance(value, str) and len(value) > max_len:
-                    filtered[key] = value[:max_len] + f"... ({len(value)} chars total)"
-                else:
-                    filtered[key] = value
-            elif key in _ARRAY_SUMMARY_FIELDS and isinstance(value, (list, tuple)):
-                count = len(value)
-                if count > _ARRAY_SUMMARY_MAX:
-                    filtered[key] = {
-                        "_summary": f"{count} items (showing first {_ARRAY_SUMMARY_MAX})",
-                        "items": value[:_ARRAY_SUMMARY_MAX],
-                    }
-                else:
-                    filtered[key] = value
-            elif isinstance(value, np.ndarray):
-                filtered[key] = f"ndarray(shape={value.shape}, dtype={value.dtype})"
-            else:
-                filtered[key] = value
-
-        msg = json.dumps(filtered, indent=2, default=str)
+        filtered = {k: _summarize_value(k, v) for k, v in result.items()}
+        msg = json.dumps(
+            filtered, indent=2,
+            default=lambda obj: f"<{type(obj).__name__}>",
+        )
         if len(msg) > _RAW_LOG_MAX_CHARS:
             msg = msg[:_RAW_LOG_MAX_CHARS] + f"\n... (truncated at {_RAW_LOG_MAX_CHARS} chars)"
 
