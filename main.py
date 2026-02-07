@@ -33,7 +33,7 @@ import logging
 import os
 import tempfile
 from contextlib import asynccontextmanager
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -577,11 +577,11 @@ class MeritFunctionResponse(BaseModel):
 class OptimizationWizardRequest(BaseModel):
     """Request to apply the SEQ Optimization Wizard to generate merit function operands."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
-    criterion: str = Field(default="Spot", description="Optimization criterion: Spot, Wavefront, or Contrast")
-    reference: str = Field(default="Centroid", description="Reference type: Centroid or ChiefRay")
+    criterion: Literal["Spot", "Wavefront", "Contrast"] = Field(default="Spot", description="Optimization criterion: Spot, Wavefront, or Contrast")
+    reference: Literal["Centroid", "ChiefRay"] = Field(default="Centroid", description="Reference type: Centroid or ChiefRay")
     overall_weight: float = Field(default=1.0, ge=0, description="Overall weight for wizard operands")
     rings: int = Field(default=3, ge=1, le=20, description="Number of pupil rings")
-    arms: int = Field(default=6, description="Number of pupil arms: 6, 8, 10, or 12")
+    arms: Literal[6, 8, 10, 12] = Field(default=6, description="Number of pupil arms: 6, 8, 10, or 12")
     use_gaussian_quadrature: bool = Field(default=False, description="Use Gaussian quadrature sampling")
     use_glass_boundary_values: bool = Field(default=False, description="Apply glass thickness constraints")
     glass_min: float = Field(default=1.0, ge=0, description="Minimum glass thickness (mm)")
@@ -591,7 +591,7 @@ class OptimizationWizardRequest(BaseModel):
     air_max: float = Field(default=1000.0, ge=0, description="Maximum air spacing (mm)")
     air_edge_thickness: float = Field(default=0.0, ge=0, description="Minimum edge thickness for air spaces (mm)")
     # Optimization Function
-    type: str = Field(default="RMS", description="Optimization type: RMS or PTV")
+    type: Literal["RMS", "PTV"] = Field(default="RMS", description="Optimization type: RMS or PTV")
     spatial_frequency: float = Field(default=30.0, gt=0, description="Spatial frequency (cycles/mm)")
     xs_weight: float = Field(default=1.0, ge=0, description="Sagittal (X) weight")
     yt_weight: float = Field(default=1.0, ge=0, description="Tangential (Y) weight")
@@ -603,7 +603,7 @@ class OptimizationWizardRequest(BaseModel):
     # Boundary Values
     glass_edge_thickness: float = Field(default=0.0, ge=0, description="Minimum edge thickness for glass (mm)")
     # Optimization Goal
-    optimization_goal: str = Field(default="nominal", description="Goal: nominal or manufacturing_yield")
+    optimization_goal: Literal["nominal", "manufacturing_yield"] = Field(default="nominal", description="Goal: nominal or manufacturing_yield")
     manufacturing_yield_weight: float = Field(default=1.0, ge=0, description="Manufacturing yield weight")
     # Bottom bar
     start_at: int = Field(default=1, ge=1, description="Starting surface index")

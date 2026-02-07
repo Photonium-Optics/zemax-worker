@@ -12,6 +12,7 @@ Multiple workers are supported — the constraint is license seats, not threadin
 
 import base64
 import logging
+import math
 import os
 import tempfile
 import time
@@ -397,57 +398,50 @@ class ZosPyHandler:
             Dict with success flag and paraxial properties.
         """
         try:
-            result: dict[str, Any] = {"success": True}
-
             # Get EFL and BFL from SystemData analysis
             try:
                 sys_data = self._zp.analyses.reports.SystemData().run(self.oss)
                 gld = sys_data.data.general_lens_data
-                result["efl"] = _extract_value(gld.effective_focal_length_air, None)
-                result["bfl"] = _extract_value(
+                efl = _extract_value(gld.effective_focal_length_air, None)
+                bfl = _extract_value(
                     getattr(gld, "back_focal_length", None), None
                 )
             except Exception as e:
                 logger.warning(f"get_paraxial: SystemData failed: {e}")
-                result["efl"] = self._get_efl()
-                result["bfl"] = None
+                efl = self._get_efl()
+                bfl = None
 
-            # Get F/#
             fno = self._get_fno()
-            result["fno"] = fno
-
-            # Compute NA from F/#: NA = 1 / (2 * F/#) for infinite conjugate
-            if fno is not None and fno > 0:
-                import math
-                result["na"] = 1.0 / (2.0 * fno)
-            else:
-                result["na"] = None
+            na = 1.0 / (2.0 * fno) if fno is not None and fno > 0 else None
 
             # Get EPD, total track, field info from LDE
             lde_data = self._get_paraxial_from_lde()
-            result["epd"] = lde_data.get("epd")
-            result["total_track"] = lde_data.get("total_track")
-            result["max_field"] = lde_data.get("max_field")
-            result["field_type"] = lde_data.get("field_type")
-            result["field_unit"] = lde_data.get("field_unit")
+            max_field = lde_data.get("max_field")
+            field_type = lde_data.get("field_type")
 
             # Compute image height from EFL and max field angle
-            efl = result.get("efl")
-            max_field = result.get("max_field")
+            image_height = None
             if (
                 efl is not None
                 and max_field is not None
                 and max_field > 0
-                and lde_data.get("field_type") == "object_angle"
+                and field_type == "object_angle"
             ):
-                import math
-                result["image_height"] = abs(efl) * math.tan(
-                    math.radians(max_field)
-                )
-            else:
-                result["image_height"] = None
+                image_height = abs(efl) * math.tan(math.radians(max_field))
 
-            return result
+            return {
+                "success": True,
+                "efl": efl,
+                "bfl": bfl,
+                "fno": fno,
+                "na": na,
+                "epd": lde_data.get("epd"),
+                "total_track": lde_data.get("total_track"),
+                "max_field": max_field,
+                "field_type": field_type,
+                "field_unit": lde_data.get("field_unit"),
+                "image_height": image_height,
+            }
 
         except Exception as e:
             logger.error(f"get_paraxial failed: {e}")
@@ -2344,7 +2338,6 @@ class ZosPyHandler:
         air_min: float = 0.5,
         air_max: float = 1000.0,
         air_edge_thickness: float = 0.0,
-        # New parameters for full OpticStudio parity
         type: str = "RMS",
         spatial_frequency: float = 30.0,
         xs_weight: float = 1.0,
@@ -2384,27 +2377,11 @@ class ZosPyHandler:
         zp = self._zp
         mfe = self.oss.MFE
 
-        # Validate parameters
-        if not 1 <= rings <= 20:
-            return _wizard_error(f"Invalid rings={rings}, must be 1-20")
-        if arms not in (6, 8, 10, 12):
-            return _wizard_error(f"Invalid arms={arms}, must be 6, 8, 10, or 12")
-        if overall_weight < 0:
-            return _wizard_error("overall_weight must be >= 0")
+        # Cross-field validations (single-field constraints enforced by Pydantic)
         if use_glass_boundary_values and glass_min >= glass_max:
             return _wizard_error(f"glass_min ({glass_min}) must be < glass_max ({glass_max})")
         if use_air_boundary_values and air_min >= air_max:
             return _wizard_error(f"air_min ({air_min}) must be < air_max ({air_max})")
-        if use_air_boundary_values and air_edge_thickness < 0:
-            return _wizard_error(f"air_edge_thickness must be >= 0 (got {air_edge_thickness})")
-        if not 0 <= obscuration <= 1:
-            return _wizard_error(f"obscuration must be 0-1 (got {obscuration})")
-        if start_at < 1:
-            return _wizard_error(f"start_at must be >= 1 (got {start_at})")
-        if type not in ("RMS", "PTV"):
-            return _wizard_error(f"Invalid type={type}, must be RMS or PTV")
-        if optimization_goal not in ("nominal", "manufacturing_yield"):
-            return _wizard_error(f"Invalid optimization_goal={optimization_goal}")
 
         # Check wizard availability (requires OpticStudio 18.5+)
         wizard = getattr(mfe, 'SEQOptimizationWizard2', None)
