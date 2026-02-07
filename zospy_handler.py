@@ -1235,9 +1235,9 @@ class ZosPyHandler:
                 "success": True,
                 "image": None (not supported by ZOSAPI for StandardSpot),
                 "image_format": None,
-                "spot_data": [...] (per-field metrics: RMS, GEO radius, centroid),
-                "spot_rays": [...] (raw ray X,Y positions for Mac-side rendering),
-                "airy_radius": float,
+                "spot_data": [...] (per-field metrics in µm: RMS, GEO radius, centroid),
+                "spot_rays": [...] (raw ray X,Y positions in µm for Mac-side rendering),
+                "airy_radius": float (µm),
             }
             On error: {"success": False, "error": "..."}
         """
@@ -1365,6 +1365,8 @@ class ZosPyHandler:
         its Results interface. The only way to get ray X,Y data for rendering
         spot diagrams is via batch ray tracing (IBatchRayTrace).
 
+        Ray positions are converted from lens units (mm) to µm at the source.
+
         Args:
             ray_density: Rays per axis (e.g., 5 means ~5x5 grid per field)
 
@@ -1373,7 +1375,7 @@ class ZosPyHandler:
                 - field_index: int (0-based)
                 - field_x, field_y: float (field coordinates)
                 - wavelength_index: int (0-based)
-                - rays: list of {"x": float, "y": float} at image plane
+                - rays: list of {"x": float, "y": float} in µm at image plane
         """
         spot_rays: list[dict[str, Any]] = []
 
@@ -1463,7 +1465,7 @@ class ZosPyHandler:
                         # ReadNextResult returns 15 values; we only need success(0), err_code(2), x(4), y(5)
                         success, err_code = result[0], result[2]
                         if success and err_code == 0:
-                            field_rays["rays"].append({"x": float(result[4]), "y": float(result[5])})
+                            field_rays["rays"].append({"x": float(result[4]) * 1000, "y": float(result[5]) * 1000})
                             total_success += 1
                         else:
                             total_failed += 1
@@ -1492,26 +1494,29 @@ class ZosPyHandler:
 
         ZOSAPI's StandardSpot IAR_ results object does NOT expose AiryRadius
         directly. We compute it: r_airy = 1.22 * wavelength * f_number.
-        Result is in the same units as the system (typically mm).
+        Result is returned in micrometers (µm).
 
         Args:
             results: OpticStudio analysis results object (checked first for
                      direct property, then falls back to computation)
 
         Returns:
-            Airy radius in lens units, or None if not available
+            Airy radius in µm, or None if not available
         """
         # Try direct property first (future ZOSAPI versions may add it)
+        # Note: direct properties likely return lens units (mm), so convert to µm
         for attr_name, call in [("AiryRadius", False), ("GetAiryDiskRadius", True)]:
             try:
                 if hasattr(results, attr_name):
                     val = _extract_value(getattr(results, attr_name)() if call else getattr(results, attr_name))
-                    logger.info(f"[SPOT] Airy radius from {attr_name}: {val}")
-                    return val
+                    val_um = val * 1000  # mm -> µm
+                    logger.info(f"[SPOT] Airy radius from {attr_name}: {val} mm -> {val_um} µm")
+                    return val_um
             except Exception as e:
                 logger.debug(f"[SPOT] {attr_name} extraction failed: {e}")
 
         # Compute from F/# and primary wavelength: r_airy = 1.22 * lambda * F/#
+        # Using µm directly: 1.22 * wl_um * fno gives result in µm
         try:
             fno = self._get_fno()
             wavelengths = self.oss.SystemData.Wavelengths
@@ -1519,11 +1524,10 @@ class ZosPyHandler:
                 wavelengths.GetWavelength(wavelengths.PrimaryWavelengthNumber).Wavelength,
                 0.5876,
             )
-            primary_wl_mm = primary_wl_um * 0.001
             if fno and fno > 0:
-                airy_radius = 1.22 * primary_wl_mm * fno
-                logger.info(f"[SPOT] Computed airy_radius: 1.22 * {primary_wl_mm:.6f}mm * F/{fno:.2f} = {airy_radius:.6f} mm")
-                return airy_radius
+                airy_radius_um = 1.22 * primary_wl_um * fno
+                logger.info(f"[SPOT] Computed airy_radius: 1.22 * {primary_wl_um:.4f}µm * F/{fno:.2f} = {airy_radius_um:.3f} µm")
+                return airy_radius_um
             logger.warning(f"[SPOT] Cannot compute airy radius: fno={fno}")
         except Exception as e:
             logger.warning(f"[SPOT] Could not compute Airy radius: {type(e).__name__}: {e}")
@@ -1625,19 +1629,22 @@ class ZosPyHandler:
             fi_1 = field_index + 1
             wi = 1
 
+            # RMS/GEO spot sizes are already in µm from ZOSAPI
             if hasattr(spot_data, 'GetRMSSpotSizeFor'):
                 field_data["rms_radius"] = _extract_value(spot_data.GetRMSSpotSizeFor(fi_1, wi))
             if hasattr(spot_data, 'GetGeoSpotSizeFor'):
                 field_data["geo_radius"] = _extract_value(spot_data.GetGeoSpotSizeFor(fi_1, wi))
-            if hasattr(spot_data, 'GetReferenceCoordinate_X_For'):
-                field_data["centroid_x"] = _extract_value(spot_data.GetReferenceCoordinate_X_For(fi_1, wi))
-            if hasattr(spot_data, 'GetReferenceCoordinate_Y_For'):
-                field_data["centroid_y"] = _extract_value(spot_data.GetReferenceCoordinate_Y_For(fi_1, wi))
 
-            logger.debug(
-                f"[SPOT] field[{field_index}]: rms={field_data.get('rms_radius')}, "
-                f"geo={field_data.get('geo_radius')}, "
-                f"centroid=({field_data.get('centroid_x')}, {field_data.get('centroid_y')})"
+            # Centroid coordinates are in mm from ZOSAPI, convert to µm
+            if hasattr(spot_data, 'GetReferenceCoordinate_X_For'):
+                field_data["centroid_x"] = _extract_value(spot_data.GetReferenceCoordinate_X_For(fi_1, wi)) * 1000
+            if hasattr(spot_data, 'GetReferenceCoordinate_Y_For'):
+                field_data["centroid_y"] = _extract_value(spot_data.GetReferenceCoordinate_Y_For(fi_1, wi)) * 1000
+
+            logger.info(
+                f"[SPOT] field[{field_index}]: rms={field_data.get('rms_radius')} µm, "
+                f"geo={field_data.get('geo_radius')} µm, "
+                f"centroid=({field_data.get('centroid_x')}, {field_data.get('centroid_y')}) µm"
             )
 
         except Exception as e:
@@ -2270,27 +2277,32 @@ class ZosPyHandler:
         air_min: float = 0.5,
         air_max: float = 1000.0,
         air_edge_thickness: float = 0.0,
+        # New parameters for full OpticStudio parity
+        type: str = "RMS",
+        spatial_frequency: float = 30.0,
+        xs_weight: float = 1.0,
+        yt_weight: float = 1.0,
+        use_maximum_distortion: bool = False,
+        max_distortion_pct: float = 1.0,
+        ignore_lateral_color: bool = False,
+        obscuration: float = 0.0,
+        glass_edge_thickness: float = 0.0,
+        optimization_goal: str = "nominal",
+        manufacturing_yield_weight: float = 1.0,
+        start_at: int = 1,
+        use_all_configurations: bool = True,
+        configuration_number: int = 1,
+        use_all_fields: bool = True,
+        field_number: int = 1,
+        assume_axial_symmetry: bool = True,
+        add_favorite_operands: bool = False,
+        delete_vignetted: bool = True,
     ) -> dict[str, Any]:
         """
         Apply the SEQ Optimization Wizard to auto-generate merit function operands.
 
         Uses OpticStudio's SEQOptimizationWizard2 to populate the MFE based on
         image quality criteria (Spot, Wavefront, or Contrast).
-
-        Args:
-            criterion: 'Spot', 'Wavefront', or 'Contrast'
-            reference: 'Centroid' or 'ChiefRay'
-            overall_weight: Overall weight for generated operands
-            rings: Number of pupil sampling rings (1-10)
-            arms: Number of pupil arms (6, 8, 10, or 12)
-            use_gaussian_quadrature: Use Gaussian quadrature for pupil sampling
-            use_glass_boundary_values: Enable glass thickness constraints
-            glass_min: Minimum glass thickness (mm)
-            glass_max: Maximum glass thickness (mm)
-            use_air_boundary_values: Enable air spacing constraints
-            air_min: Minimum air spacing (mm)
-            air_max: Maximum air spacing (mm)
-            air_edge_thickness: Minimum edge thickness for air spaces (mm)
 
         Returns:
             Dict with success, total_merit, generated_rows, num_rows_generated
@@ -2306,8 +2318,8 @@ class ZosPyHandler:
         mfe = self.oss.MFE
 
         # Validate parameters
-        if not 1 <= rings <= 10:
-            return _wizard_error(f"Invalid rings={rings}, must be 1-10")
+        if not 1 <= rings <= 20:
+            return _wizard_error(f"Invalid rings={rings}, must be 1-20")
         if arms not in (6, 8, 10, 12):
             return _wizard_error(f"Invalid arms={arms}, must be 6, 8, 10, or 12")
         if overall_weight < 0:
@@ -2318,53 +2330,107 @@ class ZosPyHandler:
             return _wizard_error(f"air_min ({air_min}) must be < air_max ({air_max})")
         if use_air_boundary_values and air_edge_thickness < 0:
             return _wizard_error(f"air_edge_thickness must be >= 0 (got {air_edge_thickness})")
+        if not 0 <= obscuration <= 1:
+            return _wizard_error(f"obscuration must be 0-1 (got {obscuration})")
+        if start_at < 1:
+            return _wizard_error(f"start_at must be >= 1 (got {start_at})")
+        if type not in ("RMS", "PTV"):
+            return _wizard_error(f"Invalid type={type}, must be RMS or PTV")
+        if optimization_goal not in ("nominal", "manufacturing_yield"):
+            return _wizard_error(f"Invalid optimization_goal={optimization_goal}")
 
         # Check wizard availability (requires OpticStudio 18.5+)
         wizard = getattr(mfe, 'SEQOptimizationWizard2', None)
         if wizard is None:
             return _wizard_error("SEQOptimizationWizard2 not available (requires OpticStudio 18.5+)")
 
-        try:
-            # Set criterion enum (defaults to Spot if not recognized)
-            wizard_enums = zp.constants.Analysis.OptimizationWizard
+        def _set_wizard_prop(prop_name: str, value: Any) -> None:
+            """Set a wizard property, logging a warning on failure."""
             try:
-                wizard.Type = getattr(wizard_enums.CriterionTypes, criterion)
-            except AttributeError:
-                return _wizard_error(f"Unknown criterion type: {criterion}")
+                setattr(wizard, prop_name, value)
+            except Exception as e:
+                logger.warning(f"Failed to set {prop_name}: {e}")
 
-            # Set reference enum (defaults to Centroid if not recognized)
-            try:
-                wizard.Reference = getattr(wizard_enums.ReferenceTypes, reference)
-            except AttributeError:
+        try:
+            # Set criterion and reference enums (fail hard on unknown values)
+            wizard_enums = zp.constants.Analysis.OptimizationWizard
+            if not hasattr(wizard_enums.CriterionTypes, criterion):
+                return _wizard_error(f"Unknown criterion type: {criterion}")
+            wizard.Type = getattr(wizard_enums.CriterionTypes, criterion)
+
+            if not hasattr(wizard_enums.ReferenceTypes, reference):
                 return _wizard_error(f"Unknown reference type: {reference}")
+            wizard.Reference = getattr(wizard_enums.ReferenceTypes, reference)
 
             wizard.OverallWeight = float(overall_weight)
             wizard.Rings = int(rings)
 
             # Map arms count to ZOSAPI enum
             arms_enum_name = f"Arms_{arms}"
-            try:
+            if hasattr(wizard_enums.PupilArmsCount, arms_enum_name):
                 wizard.Arms = getattr(wizard_enums.PupilArmsCount, arms_enum_name)
-            except AttributeError:
+            else:
                 logger.warning(f"Unknown arms count {arms}, using Arms_6")
                 wizard.Arms = getattr(wizard_enums.PupilArmsCount, "Arms_6")
 
             wizard.IsGaussianQuadrature = bool(use_gaussian_quadrature)
 
+            # Glass boundary values
             wizard.IsGlassBoundaryValues = bool(use_glass_boundary_values)
             if use_glass_boundary_values:
                 wizard.GlassMin = float(glass_min)
                 wizard.GlassMax = float(glass_max)
+                _set_wizard_prop("GlassEdgeThickness", float(glass_edge_thickness))
 
+            # Air boundary values
             wizard.IsAirBoundaryValues = bool(use_air_boundary_values)
             if use_air_boundary_values:
                 wizard.AirMin = float(air_min)
                 wizard.AirMax = float(air_max)
                 wizard.AirEdgeThickness = float(air_edge_thickness)
 
+            # Type (RMS/PTV) -- separate from criterion
+            if hasattr(wizard_enums, "OptimizationTypes"):
+                opt_type = getattr(wizard_enums.OptimizationTypes, type, None)
+                if opt_type is not None:
+                    wizard.Type = opt_type
+                else:
+                    logger.warning(f"OptimizationTypes.{type} not found, skipping Type assignment")
+
+            # Optimization Function params
+            _set_wizard_prop("SpatialFrequency", float(spatial_frequency))
+            _set_wizard_prop("XSWeight", float(xs_weight))
+            _set_wizard_prop("YTWeight", float(yt_weight))
+            _set_wizard_prop("IsMaxDistortion", bool(use_maximum_distortion))
+            if use_maximum_distortion:
+                _set_wizard_prop("MaxDistortionPct", float(max_distortion_pct))
+            _set_wizard_prop("IsIgnoreLateralColor", bool(ignore_lateral_color))
+
+            # Pupil Integration
+            _set_wizard_prop("Obscuration", float(obscuration))
+
+            # Optimization Goal
+            _set_wizard_prop("OptimizeForBestNominalPerformance", optimization_goal == "nominal")
+            _set_wizard_prop("OptimizeForManufacturingYield", optimization_goal == "manufacturing_yield")
+            if optimization_goal == "manufacturing_yield":
+                _set_wizard_prop("ManufacturingYieldWeight", float(manufacturing_yield_weight))
+
+            # Bottom bar params
+            _set_wizard_prop("StartAt", int(start_at))
+            _set_wizard_prop("UseAllConfigurations", bool(use_all_configurations))
+            if not use_all_configurations:
+                _set_wizard_prop("ConfigurationNumber", int(configuration_number))
+            _set_wizard_prop("UseAllFields", bool(use_all_fields))
+            if not use_all_fields:
+                _set_wizard_prop("FieldNumber", int(field_number))
+            _set_wizard_prop("AssumeAxialSymmetry", bool(assume_axial_symmetry))
+            _set_wizard_prop("AddFavoriteOperands", bool(add_favorite_operands))
+            _set_wizard_prop("DeleteVignetted", bool(delete_vignetted))
+
             logger.info(
-                f"Applying optimization wizard: criterion={criterion}, reference={reference}, "
-                f"rings={rings}, arms={arms}, gaussian_quadrature={use_gaussian_quadrature}"
+                f"Applying optimization wizard: criterion={criterion}, type={type}, "
+                f"reference={reference}, rings={rings}, arms={arms}, "
+                f"gaussian_quadrature={use_gaussian_quadrature}, goal={optimization_goal}"
             )
             wizard.Apply()
 

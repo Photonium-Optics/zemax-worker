@@ -41,9 +41,11 @@ from pydantic import BaseModel, Field
 
 from zospy_handler import ZosPyHandler, ZosPyError
 from utils.timing import timed_operation, timed_lock_acquire
+from log_buffer import log_buffer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
+logging.getLogger().addHandler(log_buffer)
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -578,7 +580,7 @@ class OptimizationWizardRequest(BaseModel):
     criterion: str = Field(default="Spot", description="Optimization criterion: Spot, Wavefront, or Contrast")
     reference: str = Field(default="Centroid", description="Reference type: Centroid or ChiefRay")
     overall_weight: float = Field(default=1.0, ge=0, description="Overall weight for wizard operands")
-    rings: int = Field(default=3, ge=1, le=10, description="Number of pupil rings")
+    rings: int = Field(default=3, ge=1, le=20, description="Number of pupil rings")
     arms: int = Field(default=6, description="Number of pupil arms: 6, 8, 10, or 12")
     use_gaussian_quadrature: bool = Field(default=False, description="Use Gaussian quadrature sampling")
     use_glass_boundary_values: bool = Field(default=False, description="Apply glass thickness constraints")
@@ -588,6 +590,30 @@ class OptimizationWizardRequest(BaseModel):
     air_min: float = Field(default=0.5, ge=0, description="Minimum air spacing (mm)")
     air_max: float = Field(default=1000.0, ge=0, description="Maximum air spacing (mm)")
     air_edge_thickness: float = Field(default=0.0, ge=0, description="Minimum edge thickness for air spaces (mm)")
+    # Optimization Function
+    type: str = Field(default="RMS", description="Optimization type: RMS or PTV")
+    spatial_frequency: float = Field(default=30.0, gt=0, description="Spatial frequency (cycles/mm)")
+    xs_weight: float = Field(default=1.0, ge=0, description="Sagittal (X) weight")
+    yt_weight: float = Field(default=1.0, ge=0, description="Tangential (Y) weight")
+    use_maximum_distortion: bool = Field(default=False, description="Enable maximum distortion constraint")
+    max_distortion_pct: float = Field(default=1.0, ge=0, description="Maximum distortion percentage")
+    ignore_lateral_color: bool = Field(default=False, description="Ignore lateral color")
+    # Pupil Integration
+    obscuration: float = Field(default=0.0, ge=0, le=1, description="Pupil obscuration ratio (0-1)")
+    # Boundary Values
+    glass_edge_thickness: float = Field(default=0.0, ge=0, description="Minimum edge thickness for glass (mm)")
+    # Optimization Goal
+    optimization_goal: str = Field(default="nominal", description="Goal: nominal or manufacturing_yield")
+    manufacturing_yield_weight: float = Field(default=1.0, ge=0, description="Manufacturing yield weight")
+    # Bottom bar
+    start_at: int = Field(default=1, ge=1, description="Starting surface index")
+    use_all_configurations: bool = Field(default=True, description="Use all configurations")
+    configuration_number: int = Field(default=1, ge=1, description="Specific configuration number")
+    use_all_fields: bool = Field(default=True, description="Use all fields")
+    field_number: int = Field(default=1, ge=1, description="Specific field number")
+    assume_axial_symmetry: bool = Field(default=True, description="Assume axial symmetry")
+    add_favorite_operands: bool = Field(default=False, description="Add favorite operands")
+    delete_vignetted: bool = Field(default=True, description="Delete vignetted rays")
 
 
 class WizardGeneratedRow(BaseModel):
@@ -677,6 +703,28 @@ async def health_check() -> HealthResponse:
     finally:
         if lock_acquired:
             _zospy_lock.release()
+
+
+@app.get("/logs")
+async def get_logs(
+    since: int = 0,
+    limit: int = 200,
+    _: None = Depends(verify_api_key),
+):
+    """Return recent log entries from this worker process's ring buffer.
+
+    Query params:
+        since: sequence cursor — only entries with sequence > since are returned
+        limit: max entries to return (default 200, capped at 1000)
+    """
+    limit = min(max(limit, 1), 1000)
+    entries, latest_sequence = log_buffer.get_entries(since_sequence=since, limit=limit)
+    return {
+        "entries": entries,
+        "latest_sequence": latest_sequence,
+        "worker_pid": os.getpid(),
+        "worker_count": WORKER_COUNT,
+    }
 
 
 @app.post("/load-system", response_model=LoadSystemResponse)
@@ -923,23 +971,12 @@ async def apply_optimization_wizard(
             num_rows_generated=result.get("num_rows_generated", 0),
         )
 
+    # Pass all wizard params except zmx_content (already loaded by _run_endpoint)
+    wizard_params = request.model_dump(exclude={"zmx_content"})
+
     return await _run_endpoint(
         "/apply-optimization-wizard", OptimizationWizardResponse, request,
-        lambda: zospy_handler.apply_optimization_wizard(
-            criterion=request.criterion,
-            reference=request.reference,
-            overall_weight=request.overall_weight,
-            rings=request.rings,
-            arms=request.arms,
-            use_gaussian_quadrature=request.use_gaussian_quadrature,
-            use_glass_boundary_values=request.use_glass_boundary_values,
-            glass_min=request.glass_min,
-            glass_max=request.glass_max,
-            use_air_boundary_values=request.use_air_boundary_values,
-            air_min=request.air_min,
-            air_max=request.air_max,
-            air_edge_thickness=request.air_edge_thickness,
-        ),
+        lambda: zospy_handler.apply_optimization_wizard(**wizard_params),
         build_response=_build_wizard_response,
     )
 
