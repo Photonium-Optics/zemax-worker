@@ -1642,6 +1642,7 @@ class ZosPyHandler:
                 field_x = _extract_value(field.X)
                 field_y = _extract_value(field.Y)
 
+                analysis = None
                 try:
                     # Use new_analysis with FFTMtf
                     idm = self._zp.constants.Analysis.AnalysisIDM
@@ -1723,8 +1724,6 @@ class ZosPyHandler:
                         except Exception as e:
                             logger.warning(f"MTF: Could not extract data series for field {fi}: {e}")
 
-                    analysis.Close()
-
                     if frequency is None and freq_data:
                         frequency = freq_data
 
@@ -1745,6 +1744,12 @@ class ZosPyHandler:
                         "tangential": [],
                         "sagittal": [],
                     })
+                finally:
+                    if analysis is not None:
+                        try:
+                            analysis.Close()
+                        except Exception:
+                            pass
 
             # Generate frequency array if not obtained from analysis
             if frequency is None or len(frequency) == 0:
@@ -1830,74 +1835,79 @@ class ZosPyHandler:
                 settings_first=True,
             )
 
-            # Configure settings
-            settings = analysis.Settings
-            if hasattr(settings, 'Field'):
-                try:
-                    settings.Field.SetFieldNumber(field_index)
-                except Exception:
-                    pass
-            if hasattr(settings, 'Wavelength'):
-                try:
-                    settings.Wavelength.SetWavelengthNumber(wavelength_index)
-                except Exception:
-                    pass
-            if hasattr(settings, 'SampleSize'):
-                try:
-                    sample_map = {
-                        "32x32": 1, "64x64": 2, "128x128": 3,
-                        "256x256": 4, "512x512": 5, "1024x1024": 6,
-                    }
-                    settings.SampleSize = sample_map.get(sampling, 2)
-                except Exception:
-                    pass
-
-            psf_start = time.perf_counter()
             try:
-                analysis.ApplyAndWaitForCompletion()
-            finally:
-                psf_elapsed_ms = (time.perf_counter() - psf_start) * 1000
-                log_timing(logger, "FFTPSF.run", psf_elapsed_ms)
+                # Configure settings
+                settings = analysis.Settings
+                if hasattr(settings, 'Field'):
+                    try:
+                        settings.Field.SetFieldNumber(field_index)
+                    except Exception:
+                        pass
+                if hasattr(settings, 'Wavelength'):
+                    try:
+                        settings.Wavelength.SetWavelengthNumber(wavelength_index)
+                    except Exception:
+                        pass
+                if hasattr(settings, 'SampleSize'):
+                    try:
+                        sample_map = {
+                            "32x32": 1, "64x64": 2, "128x128": 3,
+                            "256x256": 4, "512x512": 5, "1024x1024": 6,
+                        }
+                        settings.SampleSize = sample_map.get(sampling, 2)
+                    except Exception:
+                        pass
 
-            # Extract 2D PSF data
-            results = analysis.Results
-            image_b64 = None
-            array_shape = None
-            array_dtype = None
-            psf_peak = None
-
-            if results is not None:
+                psf_start = time.perf_counter()
                 try:
-                    # Try to get the data grid
-                    num_rows = results.NumberOfDataGrids
-                    if num_rows > 0:
-                        grid = results.GetDataGrid(0)
-                        if grid is not None:
-                            nx = grid.Nx if hasattr(grid, 'Nx') else 0
-                            ny = grid.Ny if hasattr(grid, 'Ny') else 0
+                    analysis.ApplyAndWaitForCompletion()
+                finally:
+                    psf_elapsed_ms = (time.perf_counter() - psf_start) * 1000
+                    log_timing(logger, "FFTPSF.run", psf_elapsed_ms)
 
-                            if nx > 0 and ny > 0:
-                                arr = np.zeros((ny, nx), dtype=np.float64)
-                                for yi in range(ny):
-                                    for xi in range(nx):
-                                        val = _extract_value(grid.Z(xi, yi))
-                                        arr[yi, xi] = val
+                # Extract 2D PSF data
+                results = analysis.Results
+                image_b64 = None
+                array_shape = None
+                array_dtype = None
+                psf_peak = None
 
-                                psf_peak = float(np.max(arr))
-                                image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
-                                array_shape = list(arr.shape)
-                                array_dtype = str(arr.dtype)
-                                logger.info(f"PSF data extracted: shape={arr.shape}, peak={psf_peak:.6f}")
-                except Exception as e:
-                    logger.warning(f"PSF: Could not extract data grid: {e}")
+                if results is not None:
+                    try:
+                        # Try to get the data grid
+                        num_rows = results.NumberOfDataGrids
+                        if num_rows > 0:
+                            grid = results.GetDataGrid(0)
+                            if grid is not None:
+                                nx = grid.Nx if hasattr(grid, 'Nx') else 0
+                                ny = grid.Ny if hasattr(grid, 'Ny') else 0
 
-            analysis.Close()
+                                if nx > 0 and ny > 0:
+                                    arr = np.zeros((ny, nx), dtype=np.float64)
+                                    for yi in range(ny):
+                                        for xi in range(nx):
+                                            val = _extract_value(grid.Z(xi, yi))
+                                            arr[yi, xi] = val
+
+                                    psf_peak = float(np.max(arr))
+                                    image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                                    array_shape = list(arr.shape)
+                                    array_dtype = str(arr.dtype)
+                                    logger.info(f"PSF data extracted: shape={arr.shape}, peak={psf_peak:.6f}")
+                    except Exception as e:
+                        logger.warning(f"PSF: Could not extract data grid: {e}")
+            finally:
+                try:
+                    analysis.Close()
+                except Exception:
+                    pass
 
             if image_b64 is None:
                 return {"success": False, "error": "FFT PSF analysis did not produce data"}
 
             # Try to get Strehl ratio from Huygens PSF
             strehl_ratio = None
+            huygens = None
             try:
                 huygens = self._zp.analyses.new_analysis(
                     self.oss,
@@ -1942,9 +1952,14 @@ class ZosPyHandler:
                                     break
                     except Exception:
                         pass
-                huygens.Close()
             except Exception as e:
                 logger.debug(f"PSF: Huygens Strehl ratio extraction failed (non-critical): {e}")
+            finally:
+                if huygens is not None:
+                    try:
+                        huygens.Close()
+                    except Exception:
+                        pass
 
             return {
                 "success": True,
