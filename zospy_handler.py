@@ -2193,6 +2193,250 @@ class ZosPyHandler:
             "row_errors": row_errors,
         }
 
+    def apply_optimization_wizard(
+        self,
+        criterion: str = "Spot",
+        reference: str = "Centroid",
+        overall_weight: float = 1.0,
+        rings: int = 3,
+        arms: int = 6,
+        use_gaussian_quadrature: bool = False,
+        use_glass_boundary_values: bool = False,
+        glass_min: float = 1.0,
+        glass_max: float = 50.0,
+        use_air_boundary_values: bool = False,
+        air_min: float = 0.5,
+        air_max: float = 1000.0,
+        air_edge_thickness: float = 0.0,
+    ) -> dict[str, Any]:
+        """
+        Apply the SEQ Optimization Wizard to auto-generate merit function operands.
+
+        Uses OpticStudio's SEQOptimizationWizard2 to populate the MFE based on
+        image quality criteria (Spot, Wavefront, or Contrast).
+
+        Args:
+            criterion: 'Spot', 'Wavefront', or 'Contrast'
+            reference: 'Centroid' or 'ChiefRay'
+            overall_weight: Overall weight for generated operands
+            rings: Number of pupil sampling rings (1-10)
+            arms: Number of pupil arms (6, 8, 10, or 12)
+            use_gaussian_quadrature: Use Gaussian quadrature for pupil sampling
+            use_glass_boundary_values: Enable glass thickness constraints
+            glass_min: Minimum glass thickness (mm)
+            glass_max: Maximum glass thickness (mm)
+            use_air_boundary_values: Enable air spacing constraints
+            air_min: Minimum air spacing (mm)
+            air_max: Maximum air spacing (mm)
+            air_edge_thickness: Minimum edge thickness for air spaces (mm)
+
+        Returns:
+            Dict with success, total_merit, generated_rows, num_rows_generated
+        """
+        zp = self._zp
+        mfe = self.oss.MFE
+
+        # Check wizard availability (requires OpticStudio 18.5+)
+        wizard = getattr(mfe, 'SEQOptimizationWizard2', None)
+        if wizard is None:
+            return {
+                "success": False,
+                "error": "SEQOptimizationWizard2 not available (requires OpticStudio 18.5+)",
+                "total_merit": None,
+                "generated_rows": [],
+                "num_rows_generated": 0,
+            }
+
+        try:
+            # Map criterion string to ZOSAPI enum
+            criterion_map = {
+                "Spot": "Spot",
+                "Wavefront": "Wavefront",
+                "Contrast": "Contrast",
+            }
+            criterion_enum_name = criterion_map.get(criterion, "Spot")
+            try:
+                wizard.Type = getattr(
+                    zp.constants.Analysis.OptimizationWizard.CriterionTypes,
+                    criterion_enum_name,
+                )
+            except AttributeError:
+                return {
+                    "success": False,
+                    "error": f"Unknown criterion type: {criterion}",
+                    "total_merit": None,
+                    "generated_rows": [],
+                    "num_rows_generated": 0,
+                }
+
+            # Map reference string to ZOSAPI enum
+            reference_map = {
+                "Centroid": "Centroid",
+                "ChiefRay": "ChiefRay",
+            }
+            reference_enum_name = reference_map.get(reference, "Centroid")
+            try:
+                wizard.Reference = getattr(
+                    zp.constants.Analysis.OptimizationWizard.ReferenceTypes,
+                    reference_enum_name,
+                )
+            except AttributeError:
+                return {
+                    "success": False,
+                    "error": f"Unknown reference type: {reference}",
+                    "total_merit": None,
+                    "generated_rows": [],
+                    "num_rows_generated": 0,
+                }
+
+            # Set overall weight
+            wizard.OverallWeight = float(overall_weight)
+
+            # Set pupil sampling
+            wizard.Rings = int(rings)
+
+            # Map arms count to ZOSAPI enum
+            arms_map = {
+                6: "Arms_6",
+                8: "Arms_8",
+                10: "Arms_10",
+                12: "Arms_12",
+            }
+            arms_enum_name = arms_map.get(arms, "Arms_6")
+            try:
+                wizard.Arms = getattr(
+                    zp.constants.Analysis.OptimizationWizard.PupilArmsCount,
+                    arms_enum_name,
+                )
+            except AttributeError:
+                logger.warning(f"Unknown arms count {arms}, using Arms_6")
+                wizard.Arms = getattr(
+                    zp.constants.Analysis.OptimizationWizard.PupilArmsCount,
+                    "Arms_6",
+                )
+
+            # Set Gaussian quadrature
+            wizard.IsGaussianQuadrature = bool(use_gaussian_quadrature)
+
+            # Glass boundary values
+            wizard.IsGlassBoundaryValues = bool(use_glass_boundary_values)
+            if use_glass_boundary_values:
+                wizard.GlassMin = float(glass_min)
+                wizard.GlassMax = float(glass_max)
+
+            # Air boundary values
+            wizard.IsAirBoundaryValues = bool(use_air_boundary_values)
+            if use_air_boundary_values:
+                wizard.AirMin = float(air_min)
+                wizard.AirMax = float(air_max)
+                wizard.AirEdgeThickness = float(air_edge_thickness)
+
+            # Apply the wizard — this populates the MFE
+            logger.info(
+                f"Applying optimization wizard: criterion={criterion}, reference={reference}, "
+                f"rings={rings}, arms={arms}, gaussian_quadrature={use_gaussian_quadrature}"
+            )
+            wizard.Apply()
+
+        except Exception as e:
+            logger.error(f"Optimization wizard Apply() failed: {e}")
+            return {
+                "success": False,
+                "error": f"Wizard Apply() failed: {e}",
+                "total_merit": None,
+                "generated_rows": [],
+                "num_rows_generated": 0,
+            }
+
+        # Calculate merit function to get per-row values
+        try:
+            total_merit = _extract_value(mfe.CalculateMeritFunction())
+        except Exception as e:
+            logger.error(f"CalculateMeritFunction after wizard failed: {e}")
+            total_merit = None
+
+        # Read all generated rows from MFE
+        generated_rows = []
+        try:
+            mfe_cols = zp.constants.Editors.MFE.MeritColumn
+            param_columns = [
+                mfe_cols.Param1, mfe_cols.Param2,
+                mfe_cols.Param3, mfe_cols.Param4,
+                mfe_cols.Param5, mfe_cols.Param6,
+            ]
+
+            num_operands = mfe.NumberOfOperands
+            logger.info(f"Wizard generated {num_operands} operand rows")
+
+            for i in range(1, num_operands + 1):
+                try:
+                    op = mfe.GetOperandAt(i)
+
+                    # Get operand code from enum
+                    op_type = op.Type
+                    try:
+                        op_code = str(op_type).split('.')[-1]
+                    except Exception:
+                        op_code = f"UNK_{i}"
+
+                    # Read 6 parameter cells
+                    params = []
+                    for j, col in enumerate(param_columns):
+                        try:
+                            cell = op.GetOperandCell(col)
+                            if j < 2:
+                                val = cell.IntegerValue
+                                params.append(float(val) if val != 0 else 0.0)
+                            else:
+                                val = cell.DoubleValue
+                                params.append(float(val) if val != 0.0 else 0.0)
+                        except Exception:
+                            params.append(None)
+
+                    # Read target, weight, value, contribution
+                    target = _extract_value(op.Target, 0.0)
+                    weight = _extract_value(op.Weight, 0.0)
+                    value = _extract_value(op.Value, None)
+                    contribution = _extract_value(op.Contribution, None)
+
+                    generated_rows.append({
+                        "row_index": i - 1,
+                        "operand_code": op_code,
+                        "params": params,
+                        "target": target,
+                        "weight": weight,
+                        "value": value,
+                        "contribution": contribution,
+                    })
+                except Exception as e:
+                    logger.warning(f"Error reading wizard MFE row {i}: {e}")
+                    generated_rows.append({
+                        "row_index": i - 1,
+                        "operand_code": f"ERR_{i}",
+                        "params": [None] * 6,
+                        "target": 0.0,
+                        "weight": 0.0,
+                        "value": None,
+                        "contribution": None,
+                    })
+
+        except Exception as e:
+            logger.error(f"Error reading wizard-generated MFE rows: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to read wizard-generated rows: {e}",
+                "total_merit": total_merit,
+                "generated_rows": [],
+                "num_rows_generated": 0,
+            }
+
+        return {
+            "success": True,
+            "total_merit": total_merit,
+            "generated_rows": generated_rows,
+            "num_rows_generated": len(generated_rows),
+        }
+
 
 class ZosPyError(Exception):
     """Exception raised when ZosPy operations fail."""
