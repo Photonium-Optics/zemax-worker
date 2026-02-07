@@ -74,4 +74,5 @@ class LogBuffer(logging.Handler):
 
 
 # Module-level singleton — one per process
-log_buffer = LogBuffer()
+# 4000 entries to accommodate raw output DEBUG entries alongside normal logs
+log_buffer = LogBuffer(maxlen=4000)

@@ -46,6 +46,8 @@ from log_buffer import log_buffer
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logging.getLogger().addHandler(log_buffer)
+# Enable DEBUG for raw Zemax output logger (root is INFO, so explicit level needed)
+logging.getLogger("zemax.raw").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # =============================================================================

@@ -11,6 +11,7 @@ Multiple workers are supported — the constraint is license seats, not threadin
 """
 
 import base64
+import json
 import logging
 import math
 import os
@@ -24,6 +25,73 @@ from utils.timing import log_timing
 
 # Configure module logger
 logger = logging.getLogger(__name__)
+
+# Dedicated logger for raw Zemax analysis output (filterable in dashboard)
+logger_raw = logging.getLogger("zemax.raw")
+
+# Maximum characters per raw output log message
+_RAW_LOG_MAX_CHARS = 4000
+
+# Fields to summarize (show first N elements + count)
+_ARRAY_SUMMARY_FIELDS = {
+    "spot_data", "spot_rays", "data", "evaluated_rows",
+    "zernike_coefficients", "raw_rays", "generated_rows",
+    "surface_semi_diameters", "surfaces", "frequency",
+    "diffraction_limit", "tangential", "sagittal",
+}
+_ARRAY_SUMMARY_MAX = 5
+
+# Fields containing binary/large base64 data to skip
+_BINARY_FIELDS = {"image", "zmx_content"}
+
+# Text fields to truncate
+_TEXT_TRUNCATE_FIELDS = {"seidel_text": 200}
+
+
+def _log_raw_output(operation: str, result: dict[str, Any]) -> None:
+    """Log raw Zemax analysis output at DEBUG level on the zemax.raw logger.
+
+    Filters out binary fields, summarizes arrays, and truncates long text
+    to keep log entries readable in the dashboard.
+    """
+    if not logger_raw.isEnabledFor(logging.DEBUG):
+        return
+
+    try:
+        filtered = {}
+        for key, value in result.items():
+            if key in _BINARY_FIELDS:
+                if isinstance(value, str) and len(value) > 100:
+                    filtered[key] = f"<base64 {len(value)} chars>"
+                else:
+                    filtered[key] = value
+            elif key in _TEXT_TRUNCATE_FIELDS:
+                max_len = _TEXT_TRUNCATE_FIELDS[key]
+                if isinstance(value, str) and len(value) > max_len:
+                    filtered[key] = value[:max_len] + f"... ({len(value)} chars total)"
+                else:
+                    filtered[key] = value
+            elif key in _ARRAY_SUMMARY_FIELDS and isinstance(value, (list, tuple)):
+                count = len(value)
+                if count > _ARRAY_SUMMARY_MAX:
+                    filtered[key] = {
+                        "_summary": f"{count} items (showing first {_ARRAY_SUMMARY_MAX})",
+                        "items": value[:_ARRAY_SUMMARY_MAX],
+                    }
+                else:
+                    filtered[key] = value
+            elif isinstance(value, np.ndarray):
+                filtered[key] = f"ndarray(shape={value.shape}, dtype={value.dtype})"
+            else:
+                filtered[key] = value
+
+        msg = json.dumps(filtered, indent=2, default=str)
+        if len(msg) > _RAW_LOG_MAX_CHARS:
+            msg = msg[:_RAW_LOG_MAX_CHARS] + f"\n... (truncated at {_RAW_LOG_MAX_CHARS} chars)"
+
+        logger_raw.debug(f"[RAW] {operation} output:\n{msg}")
+    except Exception as e:
+        logger_raw.debug(f"[RAW] {operation}: failed to serialize output: {e}")
 
 # =============================================================================
 # Lazy ZosPy Import
@@ -429,7 +497,7 @@ class ZosPyHandler:
             ):
                 image_height = abs(efl) * math.tan(math.radians(max_field))
 
-            return {
+            result = {
                 "success": True,
                 "efl": efl,
                 "bfl": bfl,
@@ -442,6 +510,8 @@ class ZosPyHandler:
                 "field_unit": lde_data.get("field_unit"),
                 "image_height": image_height,
             }
+            _log_raw_output("/paraxial", result)
+            return result
 
         except Exception as e:
             logger.error(f"get_paraxial failed: {e}")
@@ -501,7 +571,7 @@ class ZosPyHandler:
 
             rays_total = DEFAULT_NUM_CROSS_SECTION_RAYS * max(1, num_fields)
 
-            return {
+            result = {
                 "success": True,
                 "image": image_b64,
                 "image_format": "png",
@@ -512,6 +582,8 @@ class ZosPyHandler:
                 "rays_total": rays_total,
                 "rays_through": rays_total,
             }
+            _log_raw_output("/cross-section", result)
+            return result
 
         except Exception as e:
             return {"success": False, "error": f"CrossSection analysis failed: {e}"}
@@ -769,7 +841,7 @@ class ZosPyHandler:
             ray_trace_elapsed_ms = (time.perf_counter() - ray_trace_start) * 1000
             log_timing(logger, "ray_trace_all", ray_trace_elapsed_ms)
 
-        return {
+        result = {
             "paraxial": {
                 "efl": paraxial.get("efl"),
                 "bfl": paraxial.get("bfl"),
@@ -781,6 +853,8 @@ class ZosPyHandler:
             "raw_rays": raw_rays,
             "surface_semi_diameters": surface_semi_diameters,
         }
+        _log_raw_output("/ray-trace-diagnostic", result)
+        return result
 
     def _error_code_to_mode(self, error_code: int) -> str:
         """
@@ -878,12 +952,14 @@ class ZosPyHandler:
             wl_um = _extract_value(wl_obj, 0.5876)
             num_surfaces = self.oss.LDE.NumberOfSurfaces - 1
 
-            return {
+            result = {
                 "success": True,
                 "zernike_coefficients": coefficients,
                 "wavelength_um": wl_um,
                 "num_surfaces": num_surfaces,
             }
+            _log_raw_output("/seidel", result)
+            return result
 
         except Exception as e:
             return {"success": False, "error": f"ZosPy analysis failed: {e}"}
@@ -942,11 +1018,13 @@ class ZosPyHandler:
 
             num_surfaces = self.oss.LDE.NumberOfSurfaces - 1  # Exclude object surface
 
-            return {
+            result = {
                 "success": True,
                 "seidel_text": text_content,
                 "num_surfaces": num_surfaces,
             }
+            _log_raw_output("/seidel-native", result)
+            return result
 
         except Exception as e:
             return {"success": False, "error": f"SeidelCoefficients analysis failed: {e}"}
@@ -1105,12 +1183,14 @@ class ZosPyHandler:
             trace_elapsed_ms = (time.perf_counter() - trace_start) * 1000
             log_timing(logger, "trace_rays_all", trace_elapsed_ms)
 
-        return {
+        result = {
             "num_surfaces": num_surfaces,
             "num_fields": num_fields,
             "num_wavelengths": num_wavelengths,
             "data": data,
         }
+        _log_raw_output("/trace-rays", result)
+        return result
 
     def get_wavefront(
         self,
@@ -1253,7 +1333,7 @@ class ZosPyHandler:
             except Exception as e:
                 logger.warning(f"WavefrontMap failed: {e} (metrics still available)")
 
-            return {
+            result = {
                 "success": True,
                 "rms_waves": rms_waves,
                 "pv_waves": pv_waves,
@@ -1266,6 +1346,8 @@ class ZosPyHandler:
                 "array_shape": array_shape,
                 "array_dtype": array_dtype,
             }
+            _log_raw_output("/wavefront", result)
+            return result
 
         except Exception as e:
             return {"success": False, "error": f"Wavefront analysis failed: {e}"}
@@ -1367,7 +1449,7 @@ class ZosPyHandler:
 
             # Image is None: ZOSAPI StandardSpot doesn't support image export.
             # Mac side renders the spot diagram from spot_rays data.
-            return {
+            result = {
                 "success": True,
                 "image": None,
                 "image_format": None,
@@ -1377,6 +1459,8 @@ class ZosPyHandler:
                 "spot_rays": spot_rays,
                 "airy_radius": airy_radius,
             }
+            _log_raw_output("/spot-diagram", result)
+            return result
 
         except Exception as e:
             logger.error(f"[SPOT] StandardSpot analysis FAILED: {type(e).__name__}: {e}", exc_info=True)
@@ -1888,7 +1972,7 @@ class ZosPyHandler:
             )
             diffraction_limit = dl.tolist()
 
-            return {
+            result = {
                 "success": True,
                 "frequency": freq_arr.tolist(),
                 "fields": all_fields_data,
@@ -1896,6 +1980,8 @@ class ZosPyHandler:
                 "cutoff_frequency": float(cutoff_frequency),
                 "wavelength_um": float(wavelength_um),
             }
+            _log_raw_output("/mtf", result)
+            return result
 
         except Exception as e:
             return {"success": False, "error": f"MTF analysis failed: {e}"}
@@ -2063,7 +2149,7 @@ class ZosPyHandler:
                     except Exception:
                         pass
 
-            return {
+            result = {
                 "success": True,
                 "image": image_b64,
                 "image_format": "numpy_array",
@@ -2075,6 +2161,8 @@ class ZosPyHandler:
                 "field_x": field_x,
                 "field_y": field_y,
             }
+            _log_raw_output("/psf", result)
+            return result
 
         except Exception as e:
             return {"success": False, "error": f"PSF analysis failed: {e}"}
@@ -2316,12 +2404,14 @@ class ZosPyHandler:
         # Sort evaluated_rows by row_index for consistent output
         evaluated_rows.sort(key=lambda r: r["row_index"])
 
-        return {
+        result = {
             "success": True,
             "total_merit": total_merit,
             "evaluated_rows": evaluated_rows,
             "row_errors": row_errors,
         }
+        _log_raw_output("/evaluate-merit-function", result)
+        return result
 
     def apply_optimization_wizard(
         self,
@@ -2560,12 +2650,14 @@ class ZosPyHandler:
             logger.error(f"Error reading wizard-generated MFE rows: {e}")
             return _wizard_error(f"Failed to read wizard-generated rows: {e}", total_merit=total_merit)
 
-        return {
+        result = {
             "success": True,
             "total_merit": total_merit,
             "generated_rows": generated_rows,
             "num_rows_generated": len(generated_rows),
         }
+        _log_raw_output("/apply-optimization-wizard", result)
+        return result
 
 
 class ZosPyError(Exception):
