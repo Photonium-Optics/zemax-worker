@@ -2236,6 +2236,23 @@ class ZosPyHandler:
         zp = self._zp
         mfe = self.oss.MFE
 
+        # Validate parameters
+        if not 1 <= rings <= 10:
+            return {"success": False, "error": f"Invalid rings={rings}, must be 1-10",
+                    "total_merit": None, "generated_rows": [], "num_rows_generated": 0}
+        if arms not in (6, 8, 10, 12):
+            return {"success": False, "error": f"Invalid arms={arms}, must be 6, 8, 10, or 12",
+                    "total_merit": None, "generated_rows": [], "num_rows_generated": 0}
+        if overall_weight < 0:
+            return {"success": False, "error": "overall_weight must be >= 0",
+                    "total_merit": None, "generated_rows": [], "num_rows_generated": 0}
+        if use_glass_boundary_values and glass_min >= glass_max:
+            return {"success": False, "error": f"glass_min ({glass_min}) must be < glass_max ({glass_max})",
+                    "total_merit": None, "generated_rows": [], "num_rows_generated": 0}
+        if use_air_boundary_values and air_min >= air_max:
+            return {"success": False, "error": f"air_min ({air_min}) must be < air_max ({air_max})",
+                    "total_merit": None, "generated_rows": [], "num_rows_generated": 0}
+
         # Check wizard availability (requires OpticStudio 18.5+)
         wizard = getattr(mfe, 'SEQOptimizationWizard2', None)
         if wizard is None:
@@ -2353,7 +2370,13 @@ class ZosPyHandler:
             total_merit = _extract_value(mfe.CalculateMeritFunction())
         except Exception as e:
             logger.error(f"CalculateMeritFunction after wizard failed: {e}")
-            total_merit = None
+            return {
+                "success": False,
+                "error": f"Merit function calculation failed after wizard: {e}",
+                "total_merit": None,
+                "generated_rows": [],
+                "num_rows_generated": 0,
+            }
 
         # Read all generated rows from MFE
         generated_rows = []
@@ -2380,16 +2403,16 @@ class ZosPyHandler:
                         op_code = f"UNK_{i}"
 
                     # Read 6 parameter cells
+                    # Note: 0 is a valid value (e.g., surface index 0 = image surface),
+                    # so we always include it rather than converting to None.
                     params = []
                     for j, col in enumerate(param_columns):
                         try:
                             cell = op.GetOperandCell(col)
                             if j < 2:
-                                val = cell.IntegerValue
-                                params.append(float(val) if val != 0 else 0.0)
+                                params.append(float(cell.IntegerValue))
                             else:
-                                val = cell.DoubleValue
-                                params.append(float(val) if val != 0.0 else 0.0)
+                                params.append(float(cell.DoubleValue))
                         except Exception:
                             params.append(None)
 
