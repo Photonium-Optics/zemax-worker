@@ -2252,6 +2252,9 @@ class ZosPyHandler:
         if use_air_boundary_values and air_min >= air_max:
             return {"success": False, "error": f"air_min ({air_min}) must be < air_max ({air_max})",
                     "total_merit": None, "generated_rows": [], "num_rows_generated": 0}
+        if use_air_boundary_values and air_edge_thickness < 0:
+            return {"success": False, "error": f"air_edge_thickness must be >= 0 (got {air_edge_thickness})",
+                    "total_merit": None, "generated_rows": [], "num_rows_generated": 0}
 
         # Check wizard availability (requires OpticStudio 18.5+)
         wizard = getattr(mfe, 'SEQOptimizationWizard2', None)
