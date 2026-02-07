@@ -172,8 +172,8 @@ def _extract_value(obj: Any, default: float = 0.0) -> float:
 
     try:
         result = float(value)
-        # Check for NaN
-        if np.isnan(result):
+        # Check for NaN or Infinity (not JSON-serializable)
+        if np.isnan(result) or np.isinf(result):
             return default
         return result
     except (TypeError, ValueError):
