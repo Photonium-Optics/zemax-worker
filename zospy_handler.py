@@ -1714,20 +1714,8 @@ class ZosPyHandler:
         # Using µm directly: 1.22 * wl_um * fno gives result in µm
         try:
             fno = self._get_fno()
-            wavelengths = self.oss.SystemData.Wavelengths
-            # Try PrimaryWavelengthNumber first, fall back to scanning IsPrimary,
-            # then default to wavelength 1
-            primary_idx = 1
-            if hasattr(wavelengths, 'PrimaryWavelengthNumber'):
-                primary_idx = int(wavelengths.PrimaryWavelengthNumber)
-            else:
-                for i in range(1, wavelengths.NumberOfWavelengths + 1):
-                    wl = wavelengths.GetWavelength(i)
-                    if hasattr(wl, 'IsPrimary') and wl.IsPrimary:
-                        primary_idx = i
-                        break
             primary_wl_um = _extract_value(
-                wavelengths.GetWavelength(primary_idx).Wavelength,
+                self.oss.SystemData.Wavelengths.GetWavelength(1).Wavelength,
                 0.5876,
             )
             if fno and fno > 0:
