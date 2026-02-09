@@ -1360,6 +1360,8 @@ class ZosPyHandler:
         self,
         ray_density: int = 5,
         reference: str = "chief_ray",
+        field_index: Optional[int] = None,
+        wavelength_index: Optional[int] = None,
     ) -> dict[str, Any]:
         """
         Generate spot diagram data using ZosPy's StandardSpot analysis for metrics
@@ -1376,6 +1378,8 @@ class ZosPyHandler:
         Args:
             ray_density: Rays per axis (determines grid density, 1-20)
             reference: Reference point: 'chief_ray' or 'centroid'
+            field_index: Field index (1-indexed). None = all fields.
+            wavelength_index: Wavelength index (1-indexed). None = all wavelengths.
 
         Returns:
             On success: {
@@ -1401,7 +1405,7 @@ class ZosPyHandler:
         reference_code = 0 if reference == "chief_ray" else 1
 
         try:
-            logger.info(f"[SPOT] Starting: ray_density={ray_density}, reference={reference}, num_fields={num_fields}")
+            logger.info(f"[SPOT] Starting: ray_density={ray_density}, reference={reference}, num_fields={num_fields}, field_index={field_index}, wavelength_index={wavelength_index}")
 
             # Use ZosPy's new_analysis to access StandardSpot for metrics
             analysis = self._zp.analyses.new_analysis(
@@ -1411,7 +1415,7 @@ class ZosPyHandler:
             )
 
             # Configure and run the analysis
-            self._configure_spot_analysis(analysis.Settings, ray_density, reference_code)
+            self._configure_spot_analysis(analysis.Settings, ray_density, reference_code, field_index, wavelength_index)
             spot_start = time.perf_counter()
             try:
                 analysis.ApplyAndWaitForCompletion()
@@ -1472,7 +1476,14 @@ class ZosPyHandler:
         finally:
             self._cleanup_analysis(analysis, None)
 
-    def _configure_spot_analysis(self, settings: Any, ray_density: int, reference_code: int) -> None:
+    def _configure_spot_analysis(
+        self,
+        settings: Any,
+        ray_density: int,
+        reference_code: int,
+        field_index: Optional[int] = None,
+        wavelength_index: Optional[int] = None,
+    ) -> None:
         """
         Configure StandardSpot analysis settings.
 
@@ -1480,6 +1491,8 @@ class ZosPyHandler:
             settings: OpticStudio analysis settings object
             ray_density: Rays per axis (1-20)
             reference_code: Reference point (0=Chief Ray, 1=Centroid)
+            field_index: Field index (1-indexed). None = all fields.
+            wavelength_index: Wavelength index (1-indexed). None = all wavelengths.
         """
         # Set ray density
         if hasattr(settings, 'RayDensity'):
@@ -1493,16 +1506,23 @@ class ZosPyHandler:
         elif hasattr(settings, 'Reference'):
             settings.Reference = reference_code
 
-        # Set to show all fields and wavelengths
+        # Set field selection
         if hasattr(settings, 'Field'):
             try:
-                settings.Field.UseAllFields()
+                if field_index is not None:
+                    settings.Field.SetFieldNumber(field_index)
+                else:
+                    settings.Field.UseAllFields()
             except Exception:
                 pass
 
+        # Set wavelength selection
         if hasattr(settings, 'Wavelength'):
             try:
-                settings.Wavelength.UseAllWavelengths()
+                if wavelength_index is not None:
+                    settings.Wavelength.SetWavelengthNumber(wavelength_index)
+                else:
+                    settings.Wavelength.UseAllWavelengths()
             except Exception:
                 pass
 
@@ -2754,35 +2774,42 @@ class ZosPyHandler:
             "total_count": len(operands),
         }
 
+    @staticmethod
+    def _read_cell_default(cell: Any, data_type: str) -> float | int | str | None:
+        """Extract the default value from a COM operand cell.
+
+        Returns None if the value cannot be read or is inf/NaN.
+        """
+        try:
+            if data_type == "Integer" and hasattr(cell, 'IntegerValue'):
+                raw = cell.IntegerValue
+                if raw is not None and not (isinstance(raw, float) and not math.isfinite(raw)):
+                    return int(raw)
+            elif data_type == "Double" and hasattr(cell, 'DoubleValue'):
+                raw = cell.DoubleValue
+                if raw is not None and math.isfinite(raw):
+                    return float(raw)
+            elif data_type == "String" and hasattr(cell, 'Value'):
+                raw = cell.Value
+                if raw is not None:
+                    return str(raw)
+        except Exception:
+            pass
+        return None
+
     def _read_operand_cell(
         self, op: Any, col_name: str, col_enum: Any, operand_code: str,
     ) -> dict[str, Any]:
         """Read metadata from a single MFE operand cell.
 
-        Returns a dict with column, header, data_type, is_active, is_read_only.
-        Falls back to safe defaults if the cell cannot be read.
+        Returns a dict with column, header, data_type, is_active, is_read_only,
+        and default_value. Falls back to safe defaults if the cell cannot be read.
         """
         try:
             cell = op.GetOperandCell(col_enum)
             data_type = str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else "Unknown"
 
-            # Read default value based on cell data type
-            default_value = None
-            try:
-                if data_type == "Integer" and hasattr(cell, 'IntegerValue'):
-                    raw = cell.IntegerValue
-                    if raw is not None and not (isinstance(raw, float) and (math.isinf(raw) or math.isnan(raw))):
-                        default_value = int(raw)
-                elif data_type == "Double" and hasattr(cell, 'DoubleValue'):
-                    raw = cell.DoubleValue
-                    if raw is not None and not (math.isinf(raw) or math.isnan(raw)):
-                        default_value = float(raw)
-                elif data_type == "String" and hasattr(cell, 'Value'):
-                    raw = cell.Value
-                    if raw is not None:
-                        default_value = str(raw)
-            except Exception:
-                pass  # default_value stays None
+            default_value = self._read_cell_default(cell, data_type)
 
             return {
                 "column": col_name,

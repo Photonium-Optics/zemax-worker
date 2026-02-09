@@ -430,6 +430,8 @@ class SpotDiagramRequest(BaseModel):
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
     ray_density: int = Field(default=5, ge=1, le=20, description="Rays per axis (grid density)")
     reference: str = Field(default="chief_ray", description="Reference point: 'chief_ray' or 'centroid'")
+    field_index: Optional[int] = Field(default=None, ge=1, description="Field index (1-indexed). None = all fields.")
+    wavelength_index: Optional[int] = Field(default=None, ge=1, description="Wavelength index (1-indexed). None = all wavelengths.")
 
 
 class SpotFieldData(BaseModel):
@@ -927,6 +929,8 @@ async def get_spot_diagram(
         lambda: zospy_handler.get_spot_diagram(
             ray_density=request.ray_density,
             reference=request.reference,
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
         ),
         build_response=_build_spot_response,
     )
