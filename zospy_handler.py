@@ -1514,9 +1514,8 @@ class ZosPyHandler:
                 else:
                     settings.Field.UseAllFields()
             except Exception as e:
-                logger.error(f"[SPOT] Failed to set field_index={field_index}: {e}")
-                if field_index is not None:
-                    raise ValueError(f"Cannot set field index {field_index}: {e}") from e
+                logger.error(f"[SPOT] Failed to configure field selection (field_index={field_index}): {e}")
+                raise ValueError(f"Cannot configure field selection: {e}") from e
 
         # Set wavelength selection
         if hasattr(settings, 'Wavelength'):
@@ -1526,9 +1525,8 @@ class ZosPyHandler:
                 else:
                     settings.Wavelength.UseAllWavelengths()
             except Exception as e:
-                logger.error(f"[SPOT] Failed to set wavelength_index={wavelength_index}: {e}")
-                if wavelength_index is not None:
-                    raise ValueError(f"Cannot set wavelength index {wavelength_index}: {e}") from e
+                logger.error(f"[SPOT] Failed to configure wavelength selection (wavelength_index={wavelength_index}): {e}")
+                raise ValueError(f"Cannot configure wavelength selection: {e}") from e
 
     def _get_spot_ray_data(
         self,
