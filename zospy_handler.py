@@ -2764,12 +2764,33 @@ class ZosPyHandler:
         """
         try:
             cell = op.GetOperandCell(col_enum)
+            data_type = str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else "Unknown"
+
+            # Read default value based on cell data type
+            default_value = None
+            try:
+                if data_type == "Integer" and hasattr(cell, 'IntegerValue'):
+                    raw = cell.IntegerValue
+                    if raw is not None and not (isinstance(raw, float) and (math.isinf(raw) or math.isnan(raw))):
+                        default_value = int(raw)
+                elif data_type == "Double" and hasattr(cell, 'DoubleValue'):
+                    raw = cell.DoubleValue
+                    if raw is not None and not (math.isinf(raw) or math.isnan(raw)):
+                        default_value = float(raw)
+                elif data_type == "String" and hasattr(cell, 'Value'):
+                    raw = cell.Value
+                    if raw is not None:
+                        default_value = str(raw)
+            except Exception:
+                pass  # default_value stays None
+
             return {
                 "column": col_name,
                 "header": str(cell.Header) if hasattr(cell, 'Header') else col_name,
-                "data_type": str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else "Unknown",
+                "data_type": data_type,
                 "is_active": bool(cell.IsActive) if hasattr(cell, 'IsActive') else False,
                 "is_read_only": bool(cell.IsReadOnly) if hasattr(cell, 'IsReadOnly') else False,
+                "default_value": default_value,
             }
         except Exception as e:
             logger.debug(f"Failed to read {col_name} for {operand_code}: {e}")
@@ -2779,6 +2800,7 @@ class ZosPyHandler:
                 "data_type": "Unknown",
                 "is_active": False,
                 "is_read_only": True,
+                "default_value": None,
             }
 
 

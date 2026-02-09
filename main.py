@@ -1056,6 +1056,7 @@ class OperandParameterInfo(BaseModel):
     data_type: str = Field(description="Cell data type as string")
     is_active: bool = Field(description="Whether this parameter column is active")
     is_read_only: bool = Field(description="Whether this parameter column is read-only")
+    default_value: Optional[float | int | str] = Field(default=None, description="Default value after ChangeType()")
 
 
 class OperandCatalogEntry(BaseModel):
