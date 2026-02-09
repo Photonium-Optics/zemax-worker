@@ -1872,7 +1872,7 @@ class ZosPyHandler:
                     idm = self._zp.constants.Analysis.AnalysisIDM
                     analysis = self._zp.analyses.new_analysis(
                         self.oss,
-                        idm.FFTMtf,
+                        idm.FftMtf,
                         settings_first=True,
                     )
 
@@ -2041,7 +2041,7 @@ class ZosPyHandler:
             idm = self._zp.constants.Analysis.AnalysisIDM
             analysis = self._zp.analyses.new_analysis(
                 self.oss,
-                idm.FFTPSF,
+                idm.FftPsf,
                 settings_first=True,
             )
 
@@ -2060,7 +2060,7 @@ class ZosPyHandler:
                     analysis.ApplyAndWaitForCompletion()
                 finally:
                     psf_elapsed_ms = (time.perf_counter() - psf_start) * 1000
-                    log_timing(logger, "FFTPSF.run", psf_elapsed_ms)
+                    log_timing(logger, "FftPsf.run", psf_elapsed_ms)
 
                 # Extract 2D PSF data
                 results = analysis.Results
