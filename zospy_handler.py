@@ -1996,15 +1996,14 @@ class ZosPyHandler:
                             # Fallback: assign unclassified series to missing slots
                             if unclassified and (not tangential or not sagittal):
                                 logger.info(f"MTF field {fi}: using positional fallback for {len(unclassified)} unclassified series")
-                                remaining = iter(unclassified)
-                                if not tangential:
-                                    x, tangential = next(remaining)
+                                idx = 0
+                                if not tangential and idx < len(unclassified):
+                                    x, tangential = unclassified[idx]
                                     if not freq_data:
                                         freq_data = x
-                                if not sagittal:
-                                    entry = next(remaining, None)
-                                    if entry is not None:
-                                        sagittal = entry[1]
+                                    idx += 1
+                                if not sagittal and idx < len(unclassified):
+                                    _, sagittal = unclassified[idx]
                         except Exception as e:
                             logger.warning(f"MTF: Could not extract data series for field {fi}: {e}")
 
