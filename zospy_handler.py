@@ -521,7 +521,11 @@ class ZosPyHandler:
             logger.error(f"get_paraxial failed: {e}")
             return {"success": False, "error": str(e)}
 
-    def get_cross_section(self) -> dict[str, Any]:
+    def get_cross_section(
+        self,
+        number_of_rays: int = DEFAULT_NUM_CROSS_SECTION_RAYS,
+        color_rays_by: str = "Fields",
+    ) -> dict[str, Any]:
         """
         Generate cross-section diagram using ZosPy's CrossSection analysis.
 
@@ -545,10 +549,10 @@ class ZosPyHandler:
             from zospy.analyses.systemviewers.cross_section import CrossSection
 
             cross_section = CrossSection(
-                number_of_rays=DEFAULT_NUM_CROSS_SECTION_RAYS,
+                number_of_rays=number_of_rays,
                 field="All",
                 wavelength="All",
-                color_rays_by="Fields",
+                color_rays_by=color_rays_by,
                 delete_vignetted=True,
                 surface_line_thickness="Thick",
                 rays_line_thickness="Standard",
@@ -573,7 +577,7 @@ class ZosPyHandler:
             paraxial = self._get_paraxial_from_lde()
             surfaces_data = self._get_surface_geometry()
 
-            rays_total = DEFAULT_NUM_CROSS_SECTION_RAYS * max(1, num_fields)
+            rays_total = number_of_rays * max(1, num_fields)
 
             result = {
                 "success": True,
@@ -1953,50 +1957,50 @@ class ZosPyHandler:
                             unclassified = []
                             for si in range(num_series):
                                 series = results.GetDataSeries(si)
-                                if series is not None:
-                                    desc = str(series.Description) if hasattr(series, 'Description') else ""
-                                    desc_lower = desc.lower()
-                                    n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
-                                    logger.debug(f"MTF field {fi} series {si}: desc='{desc}', points={n_points}")
+                                if series is None:
+                                    continue
 
-                                    series_x = []
-                                    series_y = []
-                                    for pi in range(n_points):
-                                        pt = series.GetDataPoint(pi)
-                                        if pt is not None:
-                                            x_val = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
-                                            y_val = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
-                                            series_x.append(x_val)
-                                            series_y.append(y_val)
+                                desc = str(series.Description) if hasattr(series, 'Description') else ""
+                                desc_lower = desc.lower()
+                                n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
+                                logger.debug(f"MTF field {fi} series {si}: desc='{desc}', points={n_points}")
 
-                                    # Skip diffraction limit series (rendered separately)
-                                    if "diffrac" in desc_lower or "limit" in desc_lower:
-                                        logger.debug(f"MTF field {fi} series {si}: skipping (diffraction limit)")
-                                        continue
+                                # Skip diffraction limit series before extracting points
+                                if "diffrac" in desc_lower or "limit" in desc_lower:
+                                    logger.debug(f"MTF field {fi} series {si}: skipping (diffraction limit)")
+                                    continue
 
-                                    # Classify series by description prefix:
-                                    # ZosPy uses "TS ..." for tangential, "SS ..." for sagittal
-                                    if "tang" in desc_lower or desc_lower.startswith("ts ") or desc_lower.startswith("ts,"):
-                                        tangential = series_y
-                                        if not freq_data:
-                                            freq_data = series_x
-                                    elif "sag" in desc_lower or desc_lower.startswith("ss ") or desc_lower.startswith("ss,"):
-                                        sagittal = series_y
-                                        if not freq_data:
-                                            freq_data = series_x
-                                    else:
-                                        unclassified.append((si, series_x, series_y))
+                                series_x = []
+                                series_y = []
+                                for pi in range(n_points):
+                                    pt = series.GetDataPoint(pi)
+                                    if pt is not None:
+                                        x_val = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
+                                        y_val = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
+                                        series_x.append(x_val)
+                                        series_y.append(y_val)
+
+                                # Classify series by description prefix:
+                                # ZosPy uses "TS ..." for tangential, "SS ..." for sagittal
+                                if desc_lower.startswith(("ts ", "ts,", "tangential")):
+                                    tangential = series_y
+                                    if not freq_data:
+                                        freq_data = series_x
+                                elif desc_lower.startswith(("ss ", "ss,", "sagittal")):
+                                    sagittal = series_y
+                                    if not freq_data:
+                                        freq_data = series_x
+                                else:
+                                    unclassified.append((series_x, series_y))
 
                             # Fallback: if description matching failed, use positional assignment
-                            # for unclassified non-diffraction-limit series
                             if not tangential and not sagittal and unclassified:
                                 logger.info(f"MTF field {fi}: using positional fallback for {len(unclassified)} unclassified series")
-                                if len(unclassified) >= 1:
-                                    tangential = unclassified[0][2]
-                                    if not freq_data:
-                                        freq_data = unclassified[0][1]
+                                tangential = unclassified[0][1]
+                                if not freq_data:
+                                    freq_data = unclassified[0][0]
                                 if len(unclassified) >= 2:
-                                    sagittal = unclassified[1][2]
+                                    sagittal = unclassified[1][1]
                         except Exception as e:
                             logger.warning(f"MTF: Could not extract data series for field {fi}: {e}")
 
