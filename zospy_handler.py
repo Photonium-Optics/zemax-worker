@@ -1441,7 +1441,7 @@ class ZosPyHandler:
             # (ZOSAPI doesn't expose raw ray data from StandardSpot)
             ray_trace_start = time.perf_counter()
             try:
-                spot_rays = self._get_spot_ray_data(ray_density)
+                spot_rays = self._get_spot_ray_data(ray_density, field_index, wavelength_index)
             finally:
                 ray_trace_elapsed_ms = (time.perf_counter() - ray_trace_start) * 1000
                 log_timing(logger, "BatchRayTrace for spot diagram", ray_trace_elapsed_ms)
@@ -1513,8 +1513,10 @@ class ZosPyHandler:
                     settings.Field.SetFieldNumber(field_index)
                 else:
                     settings.Field.UseAllFields()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"[SPOT] Failed to set field_index={field_index}: {e}")
+                if field_index is not None:
+                    raise ValueError(f"Cannot set field index {field_index}: {e}") from e
 
         # Set wavelength selection
         if hasattr(settings, 'Wavelength'):
@@ -1523,10 +1525,17 @@ class ZosPyHandler:
                     settings.Wavelength.SetWavelengthNumber(wavelength_index)
                 else:
                     settings.Wavelength.UseAllWavelengths()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"[SPOT] Failed to set wavelength_index={wavelength_index}: {e}")
+                if wavelength_index is not None:
+                    raise ValueError(f"Cannot set wavelength index {wavelength_index}: {e}") from e
 
-    def _get_spot_ray_data(self, ray_density: int) -> list[dict[str, Any]]:
+    def _get_spot_ray_data(
+        self,
+        ray_density: int,
+        field_index: Optional[int] = None,
+        wavelength_index: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
         """
         Get raw ray X,Y positions at image plane using batch ray tracing.
 
@@ -1538,6 +1547,8 @@ class ZosPyHandler:
 
         Args:
             ray_density: Rays per axis (e.g., 5 means ~5x5 grid per field)
+            field_index: Field index (1-indexed). None = all fields.
+            wavelength_index: Wavelength index (1-indexed). None = all wavelengths.
 
         Returns:
             List of dicts per field, each containing:
@@ -1552,7 +1563,19 @@ class ZosPyHandler:
         wavelengths = self.oss.SystemData.Wavelengths
         num_fields = fields.NumberOfFields
         num_wavelengths = wavelengths.NumberOfWavelengths
-        logger.info(f"[SPOT] Ray trace: density={ray_density}, fields={num_fields}, wavelengths={num_wavelengths}")
+
+        # Determine which fields and wavelengths to trace
+        if field_index is not None:
+            field_indices = [field_index]
+        else:
+            field_indices = list(range(1, num_fields + 1))
+
+        if wavelength_index is not None:
+            wl_indices = [wavelength_index]
+        else:
+            wl_indices = list(range(1, num_wavelengths + 1))
+
+        logger.info(f"[SPOT] Ray trace: density={ray_density}, fields={field_indices}, wavelengths={wl_indices}")
 
         # Generate pupil coordinates for ray grid (circular pupil pattern)
         pupil_coords = []
@@ -1562,7 +1585,8 @@ class ZosPyHandler:
                     pupil_coords.append((float(px), float(py)))
         logger.debug(f"[SPOT] Pupil grid: {len(pupil_coords)} rays from {ray_density}x{ray_density} grid")
 
-        # Calculate max field extent for normalization (avoid division by zero)
+        # Calculate max field extent for normalization (must use ALL fields,
+        # not just filtered ones, because Hx/Hy are normalized to full extent)
         max_field_x = 0.0
         max_field_y = 0.0
         for fi in range(1, num_fields + 1):
@@ -1579,7 +1603,7 @@ class ZosPyHandler:
                 return spot_rays
 
             # Get the normalized unpolarized ray trace interface
-            max_rays = num_fields * num_wavelengths * len(pupil_coords)
+            max_rays = len(field_indices) * len(wl_indices) * len(pupil_coords)
             norm_unpol = ray_trace.CreateNormUnpol(
                 max_rays,
                 self._zp.constants.Tools.RayTrace.RaysType.Real,
@@ -1593,16 +1617,16 @@ class ZosPyHandler:
             # AddRay signature: (WaveNumber, Hx, Hy, Px, Py, OPDMode)
             opd_none = self._zp.constants.Tools.RayTrace.OPDMode.None_
 
-            # Add rays for all field/wavelength/pupil combinations
+            # Add rays for selected field/wavelength/pupil combinations
             rays_added = 0
-            for fi in range(1, num_fields + 1):
+            for fi in field_indices:
                 field = fields.GetField(fi)
                 field_x_val = _extract_value(field.X)
                 field_y_val = _extract_value(field.Y)
                 hx_norm = float(field_x_val / max_field_x) if max_field_x > 1e-10 else 0.0
                 hy_norm = float(field_y_val / max_field_y) if max_field_y > 1e-10 else 0.0
                 logger.debug(f"[SPOT] Field {fi}: raw=({field_x_val}, {field_y_val}), norm=({hx_norm}, {hy_norm})")
-                for wi in range(1, num_wavelengths + 1):
+                for wi in wl_indices:
                     for px, py in pupil_coords:
                         norm_unpol.AddRay(wi, hx_norm, hy_norm, float(px), float(py), opd_none)
                         rays_added += 1
@@ -1614,12 +1638,12 @@ class ZosPyHandler:
             # Read results and organize by field/wavelength
             total_success = 0
             total_failed = 0
-            for fi in range(1, num_fields + 1):
+            for fi in field_indices:
                 field = fields.GetField(fi)
                 field_x = _extract_value(field.X)
                 field_y = _extract_value(field.Y)
 
-                for wi in range(1, num_wavelengths + 1):
+                for wi in wl_indices:
                     field_rays = {
                         "field_index": fi - 1,
                         "field_x": field_x,
