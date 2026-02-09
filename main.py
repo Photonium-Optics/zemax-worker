@@ -1049,6 +1049,65 @@ async def get_paraxial(request: SystemRequest, _: None = Depends(verify_api_key)
     )
 
 
+class OperandParameterInfo(BaseModel):
+    """Metadata for a single operand parameter column."""
+    column: str = Field(description="Column name: Comment, Param1-Param8")
+    header: str = Field(description="Column header label from OpticStudio")
+    data_type: str = Field(description="Cell data type as string")
+    is_active: bool = Field(description="Whether this parameter column is active")
+    is_read_only: bool = Field(description="Whether this parameter column is read-only")
+
+
+class OperandCatalogEntry(BaseModel):
+    """Metadata for a single operand type."""
+    code: str = Field(description="Operand code (e.g. 'EFFL')")
+    type_name: str = Field(default="", description="Human-readable operand description")
+    parameters: list[OperandParameterInfo] = Field(default_factory=list)
+
+
+class OperandCatalogResponse(BaseModel):
+    """Response from operand catalog discovery."""
+    success: bool = Field(description="Whether the operation succeeded")
+    operands: list[OperandCatalogEntry] = Field(default_factory=list)
+    total_count: int = Field(default=0, description="Total number of operands discovered")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
+@app.post("/operand-catalog", response_model=OperandCatalogResponse)
+async def get_operand_catalog(
+    _: None = Depends(verify_api_key),
+) -> OperandCatalogResponse:
+    """
+    Discover all supported merit function operand types and their parameter metadata.
+
+    No ZMX file needed -- only requires an OpticStudio connection.
+    """
+    with timed_operation(logger, "/operand-catalog"):
+        async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
+            if _ensure_connected() is None:
+                error_msg = f"{NOT_CONNECTED_ERROR}: {_last_connection_error}" if _last_connection_error else NOT_CONNECTED_ERROR
+                return OperandCatalogResponse(success=False, error=error_msg)
+
+            try:
+                result = zospy_handler.get_operand_catalog()
+
+                if not result.get("success"):
+                    return OperandCatalogResponse(
+                        success=False,
+                        error=result.get("error", "/operand-catalog failed"),
+                    )
+
+                # Filter to known model fields, matching _run_endpoint pattern
+                model_fields = set(OperandCatalogResponse.model_fields.keys())
+                return OperandCatalogResponse(success=True, **{
+                    k: v for k, v in result.items()
+                    if k not in ("success", "error") and k in model_fields
+                })
+            except Exception as e:
+                _handle_zospy_error("/operand-catalog", e)
+                return OperandCatalogResponse(success=False, error=str(e))
+
+
 if __name__ == "__main__":
     import argparse
 

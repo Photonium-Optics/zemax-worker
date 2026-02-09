@@ -2664,6 +2664,124 @@ class ZosPyHandler:
         return result
 
 
+    def get_operand_catalog(self) -> dict[str, Any]:
+        """
+        Discover all supported MeritOperandType values and their parameter metadata.
+
+        Iterates every operand type in the MeritOperandType enum, sets it on a
+        temporary MFE row, and reads back cell metadata (Header, DataType,
+        IsActive, IsReadOnly) for Comment + Param1-Param8 columns.
+
+        Returns:
+            Dict with success, operands list, total_count
+        """
+        mfe = self.oss.MFE
+        mfe_constants = self._zp.constants.Editors.MFE
+        MeritOperandType = mfe_constants.MeritOperandType
+        mfe_cols = mfe_constants.MeritColumn
+
+        # Column definitions: (name, enum_value)
+        columns = [
+            ("Comment", mfe_cols.Comment),
+            *((f"Param{i}", getattr(mfe_cols, f"Param{i}")) for i in range(1, 9)),
+        ]
+
+        # Ensure at least 1 row exists in the MFE
+        try:
+            if mfe.NumberOfOperands < 1:
+                mfe.AddOperand()
+            op = mfe.GetOperandAt(1)
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Failed to initialize MFE for operand catalog: {e}",
+                "operands": [],
+                "total_count": 0,
+            }
+
+        # Enumerate all operand type names from the namedtuple.
+        # Use _fields (not dir()) to avoid namedtuple methods like count/index.
+        if hasattr(MeritOperandType, '_fields'):
+            type_names = list(MeritOperandType._fields)
+        else:
+            type_names = [name for name in dir(MeritOperandType) if not name.startswith('_')]
+        logger.info(f"Enumerating {len(type_names)} operand types for catalog")
+
+        operands = []
+        skipped = 0
+        start_time = time.time()
+
+        for code in type_names:
+            try:
+                enum_val = getattr(MeritOperandType, code)
+                op.ChangeType(enum_val)
+
+                # Read the human-readable type name from OpticStudio
+                type_name = ""
+                try:
+                    type_name = str(op.TypeName) if hasattr(op, 'TypeName') else ""
+                except Exception:
+                    pass
+
+                parameters = [
+                    self._read_operand_cell(op, col_name, col_enum, code)
+                    for col_name, col_enum in columns
+                ]
+
+                operands.append({
+                    "code": code,
+                    "type_name": type_name,
+                    "parameters": parameters,
+                })
+            except Exception as e:
+                logger.warning(f"Skipping operand {code}: {e}")
+                skipped += 1
+                # Re-acquire the row reference in case ChangeType corrupted it
+                try:
+                    op = mfe.GetOperandAt(1)
+                except Exception:
+                    pass
+
+        elapsed = time.time() - start_time
+        logger.info(
+            f"Operand catalog complete: {len(operands)} operands in {elapsed:.1f}s "
+            f"(skipped {skipped})"
+        )
+
+        return {
+            "success": True,
+            "operands": operands,
+            "total_count": len(operands),
+        }
+
+    def _read_operand_cell(
+        self, op: Any, col_name: str, col_enum: Any, operand_code: str,
+    ) -> dict[str, Any]:
+        """Read metadata from a single MFE operand cell.
+
+        Returns a dict with column, header, data_type, is_active, is_read_only.
+        Falls back to safe defaults if the cell cannot be read.
+        """
+        try:
+            cell = op.GetOperandCell(col_enum)
+            return {
+                "column": col_name,
+                "header": str(cell.Header) if hasattr(cell, 'Header') else col_name,
+                "data_type": str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else "Unknown",
+                "is_active": bool(cell.IsActive) if hasattr(cell, 'IsActive') else False,
+                "is_read_only": bool(cell.IsReadOnly) if hasattr(cell, 'IsReadOnly') else False,
+            }
+        except Exception as e:
+            logger.debug(f"Failed to read {col_name} for {operand_code}: {e}")
+            return {
+                "column": col_name,
+                "header": col_name,
+                "data_type": "Unknown",
+                "is_active": False,
+                "is_read_only": True,
+            }
+
+
 class ZosPyError(Exception):
     """Exception raised when ZosPy operations fail."""
     pass
