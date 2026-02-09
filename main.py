@@ -309,6 +309,13 @@ class HealthResponse(BaseModel):
     connection_error: Optional[str] = Field(default=None, description="Error detail when opticstudio_connected is False")
 
 
+class CrossSectionRequest(BaseModel):
+    """Cross-section diagram request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    number_of_rays: int = Field(default=11, ge=3, le=100, description="Number of rays per field")
+    color_rays_by: Literal["Fields", "Wavelengths", "None"] = Field(default="Fields", description="Color rays by")
+
+
 class CrossSectionResponse(BaseModel):
     """Cross-section diagram response."""
     success: bool = Field(description="Whether the operation succeeded")
@@ -769,11 +776,14 @@ async def load_system(request: SystemRequest, _: None = Depends(verify_api_key))
 
 
 @app.post("/cross-section", response_model=CrossSectionResponse)
-async def get_cross_section(request: SystemRequest, _: None = Depends(verify_api_key)) -> CrossSectionResponse:
+async def get_cross_section(request: CrossSectionRequest, _: None = Depends(verify_api_key)) -> CrossSectionResponse:
     """Generate cross-section diagram using ZosPy's CrossSection analysis."""
     return await _run_endpoint(
         "/cross-section", CrossSectionResponse, request,
-        lambda: zospy_handler.get_cross_section(),
+        lambda: zospy_handler.get_cross_section(
+            number_of_rays=request.number_of_rays,
+            color_rays_by=request.color_rays_by,
+        ),
     )
 
 

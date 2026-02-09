@@ -17,7 +17,7 @@ import math
 import os
 import tempfile
 import time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import numpy as np
 
@@ -524,7 +524,7 @@ class ZosPyHandler:
     def get_cross_section(
         self,
         number_of_rays: int = DEFAULT_NUM_CROSS_SECTION_RAYS,
-        color_rays_by: str = "Fields",
+        color_rays_by: Literal["Fields", "Wavelengths", "None"] = "Fields",
     ) -> dict[str, Any]:
         """
         Generate cross-section diagram using ZosPy's CrossSection analysis.
@@ -561,7 +561,7 @@ class ZosPyHandler:
 
             cs_start = time.perf_counter()
             try:
-                result = cross_section.run(self.oss, image_output_file=temp_path)
+                cross_section.run(self.oss, image_output_file=temp_path)
             finally:
                 cs_elapsed_ms = (time.perf_counter() - cs_start) * 1000
                 log_timing(logger, "CrossSection.run", cs_elapsed_ms)
@@ -1993,14 +1993,18 @@ class ZosPyHandler:
                                 else:
                                     unclassified.append((series_x, series_y))
 
-                            # Fallback: if description matching failed, use positional assignment
-                            if not tangential and not sagittal and unclassified:
+                            # Fallback: assign unclassified series to missing slots
+                            if unclassified and (not tangential or not sagittal):
                                 logger.info(f"MTF field {fi}: using positional fallback for {len(unclassified)} unclassified series")
-                                tangential = unclassified[0][1]
-                                if not freq_data:
-                                    freq_data = unclassified[0][0]
-                                if len(unclassified) >= 2:
-                                    sagittal = unclassified[1][1]
+                                remaining = iter(unclassified)
+                                if not tangential:
+                                    x, tangential = next(remaining)
+                                    if not freq_data:
+                                        freq_data = x
+                                if not sagittal:
+                                    entry = next(remaining, None)
+                                    if entry is not None:
+                                        sagittal = entry[1]
                         except Exception as e:
                             logger.warning(f"MTF: Could not extract data series for field {fi}: {e}")
 
