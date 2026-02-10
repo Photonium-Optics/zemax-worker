@@ -54,6 +54,11 @@ import traceback as _tb_mod
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logging.getLogger().addHandler(log_buffer)
+# Uvicorn sets propagate=False on its loggers, so they never reach the root
+# logger (and thus never reach log_buffer). Attach log_buffer directly so the
+# Mac debug dashboard sees access logs and server lifecycle messages too.
+for _uv_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    logging.getLogger(_uv_name).addHandler(log_buffer)
 # Enable DEBUG for raw Zemax output logger (root is INFO, so explicit level needed)
 logging.getLogger("zemax.raw").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
