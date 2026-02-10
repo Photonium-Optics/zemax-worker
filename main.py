@@ -174,19 +174,16 @@ async def _reconnect_zospy() -> Optional[ZosPyHandler]:
 
 async def _ensure_connected() -> Optional[ZosPyHandler]:
     """Ensure ZosPy is connected, attempting reconnection if needed. Caller MUST hold _zospy_lock."""
-    global zospy_handler
     if zospy_handler is None:
-        zospy_handler = await _reconnect_zospy()
+        await _reconnect_zospy()  # sets the global
     return zospy_handler
 
 
 async def _handle_zospy_error(operation_name: str, error: Exception) -> None:
     """Handle errors from ZosPy operations, reconnecting only when the connection is dead."""
-    global zospy_handler
-
     if isinstance(error, ZosPyError):
         logger.error(f"{operation_name} ZosPyError: {error}")
-        zospy_handler = await _reconnect_zospy()
+        await _reconnect_zospy()
         return
 
     # Generic exception (COM/analysis). Only reconnect if the connection died;
@@ -196,7 +193,14 @@ async def _handle_zospy_error(operation_name: str, error: Exception) -> None:
         logger.info(f"{operation_name}: connection still alive, not reconnecting")
     else:
         logger.warning(f"{operation_name}: connection dead, reconnecting...")
-        zospy_handler = await _reconnect_zospy()
+        await _reconnect_zospy()
+
+
+def _not_connected_error() -> str:
+    """Build the not-connected error message, appending the last error detail if available."""
+    if _last_connection_error:
+        return f"{NOT_CONNECTED_ERROR}: {_last_connection_error}"
+    return NOT_CONNECTED_ERROR
 
 
 async def verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -232,8 +236,7 @@ async def _run_endpoint(
     with timed_operation(logger, endpoint_name):
         async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
             if await _ensure_connected() is None:
-                error_msg = f"{NOT_CONNECTED_ERROR}: {_last_connection_error}" if _last_connection_error else NOT_CONNECTED_ERROR
-                return response_cls(success=False, error=error_msg)
+                return response_cls(success=False, error=_not_connected_error())
 
             try:
                 _load_system_from_request(request)
@@ -818,8 +821,7 @@ async def load_system(request: SystemRequest, _: None = Depends(verify_api_key))
     with timed_operation(logger, "/load-system"):
         async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
             if await _ensure_connected() is None:
-                error_msg = f"{NOT_CONNECTED_ERROR}: {_last_connection_error}" if _last_connection_error else NOT_CONNECTED_ERROR
-                return LoadSystemResponse(success=False, error=error_msg)
+                return LoadSystemResponse(success=False, error=_not_connected_error())
 
             try:
                 result = _load_system_from_request(request)
@@ -1285,8 +1287,7 @@ async def get_operand_catalog(
     with timed_operation(logger, "/operand-catalog"):
         async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
             if await _ensure_connected() is None:
-                error_msg = f"{NOT_CONNECTED_ERROR}: {_last_connection_error}" if _last_connection_error else NOT_CONNECTED_ERROR
-                return OperandCatalogResponse(success=False, error=error_msg)
+                return OperandCatalogResponse(success=False, error=_not_connected_error())
 
             try:
                 result = zospy_handler.get_operand_catalog()
