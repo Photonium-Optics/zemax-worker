@@ -43,6 +43,13 @@ from pydantic import BaseModel, Field
 from zospy_handler import ZosPyHandler, ZosPyError
 from utils.timing import timed_operation, timed_lock_acquire
 from log_buffer import log_buffer
+from diagnostics.connection_diagnostics import (
+    record_connect_attempt, record_connect_success, record_connect_failure,
+    record_disconnect, record_operation_start, record_operation_success,
+    record_operation_error, record_reconnect_triggered, record_reconnect_skipped_backoff,
+    record_connection_alive_check, record_license_seat_info, get_diagnostic_report,
+)
+import traceback as _tb_mod
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -93,13 +100,19 @@ _zospy_lock = asyncio.Lock()
 def _init_zospy() -> Optional[ZosPyHandler]:
     """Initialize ZosPy connection with error handling."""
     global _last_connection_error
+    record_connect_attempt(mode="standalone")
+    record_license_seat_info()
     try:
         handler = ZosPyHandler()
+        version = handler.get_version()
         logger.info("ZosPy connection established.")
+        record_connect_success(version=version)
         _last_connection_error = None
         return handler
     except Exception as e:
+        tb = _tb_mod.format_exc()
         logger.error(f"Failed to initialize ZosPy: {e}")
+        record_connect_failure(error=str(e), tb=tb)
         _last_connection_error = str(e)
         return None
 
@@ -107,10 +120,17 @@ def _init_zospy() -> Optional[ZosPyHandler]:
 def _is_connection_alive() -> bool:
     """Check if the OpticStudio COM connection is still responsive."""
     if zospy_handler is None:
+        record_connection_alive_check(alive=False, check_duration_ms=0)
         return False
+    t0 = time.monotonic()
     try:
-        return zospy_handler.get_version() != "Unknown"
+        alive = zospy_handler.get_version() != "Unknown"
+        dur = (time.monotonic() - t0) * 1000
+        record_connection_alive_check(alive=alive, check_duration_ms=dur)
+        return alive
     except Exception:
+        dur = (time.monotonic() - t0) * 1000
+        record_connection_alive_check(alive=False, check_duration_ms=dur)
         return False
 
 
@@ -135,15 +155,18 @@ async def _reconnect_zospy() -> Optional[ZosPyHandler]:
         backoff = _backoff_delay()
         elapsed = now - _last_reconnect_attempt
         if elapsed < backoff:
+            remaining = backoff - elapsed
             logger.warning(
-                f"Reconnect backoff: {backoff - elapsed:.1f}s remaining "
+                f"Reconnect backoff: {remaining:.1f}s remaining "
                 f"(attempt {_reconnect_failures})"
             )
+            record_reconnect_skipped_backoff(remaining_s=remaining, attempt=_reconnect_failures)
             return None
 
     _last_reconnect_attempt = now
 
     if zospy_handler:
+        record_disconnect(reason="reconnect_replacing_existing")
         try:
             zospy_handler.close()
         except Exception:
@@ -156,6 +179,12 @@ async def _reconnect_zospy() -> Optional[ZosPyHandler]:
             f"Waiting {_RECONNECT_COM_RELEASE_DELAY}s for COM license release..."
         )
         await asyncio.sleep(_RECONNECT_COM_RELEASE_DELAY)
+    else:
+        record_reconnect_triggered(
+            reason="zospy_handler_was_None",
+            reconnect_failures=_reconnect_failures,
+            backoff_s=_backoff_delay() if _reconnect_failures > 0 else 0,
+        )
 
     logger.info("Attempting to reconnect to OpticStudio...")
     zospy_handler = _init_zospy()
@@ -181,8 +210,14 @@ async def _ensure_connected() -> Optional[ZosPyHandler]:
 
 async def _handle_zospy_error(operation_name: str, error: Exception) -> None:
     """Handle errors from ZosPy operations, reconnecting only when the connection is dead."""
+    tb = _tb_mod.format_exc()
     if isinstance(error, ZosPyError):
         logger.error(f"{operation_name} ZosPyError: {error}")
+        record_reconnect_triggered(
+            reason=f"ZosPyError in {operation_name}: {error}",
+            reconnect_failures=_reconnect_failures,
+            backoff_s=_backoff_delay() if _reconnect_failures > 0 else 0,
+        )
         await _reconnect_zospy()
         return
 
@@ -193,6 +228,11 @@ async def _handle_zospy_error(operation_name: str, error: Exception) -> None:
         logger.info(f"{operation_name}: connection still alive, not reconnecting")
     else:
         logger.warning(f"{operation_name}: connection dead, reconnecting...")
+        record_reconnect_triggered(
+            reason=f"connection_dead after {type(error).__name__} in {operation_name}: {error}",
+            reconnect_failures=_reconnect_failures,
+            backoff_s=_backoff_delay() if _reconnect_failures > 0 else 0,
+        )
         await _reconnect_zospy()
 
 
@@ -238,9 +278,14 @@ async def _run_endpoint(
             if await _ensure_connected() is None:
                 return response_cls(success=False, error=_not_connected_error())
 
+            record_operation_start(endpoint=endpoint_name)
+            op_t0 = time.monotonic()
             try:
                 _load_system_from_request(request)
                 result = handler()
+
+                dur_ms = (time.monotonic() - op_t0) * 1000
+                record_operation_success(endpoint=endpoint_name, duration_ms=dur_ms)
 
                 if build_response:
                     return build_response(result)
@@ -259,6 +304,14 @@ async def _run_endpoint(
                     if k not in ("success", "error") and k in model_fields
                 })
             except Exception as e:
+                dur_ms = (time.monotonic() - op_t0) * 1000
+                record_operation_error(
+                    endpoint=endpoint_name,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    tb=_tb_mod.format_exc(),
+                    duration_ms=dur_ms,
+                )
                 await _handle_zospy_error(endpoint_name, e)
                 return response_cls(success=False, error=str(e))
 
@@ -312,6 +365,12 @@ async def lifespan(app: FastAPI):
     # This allows the server to start instantly without waiting for OpticStudio/ZosPy
     logger.info("Starting Zemax Worker (lazy connection mode - connects on first request)")
     logger.info(f"Reporting worker_count={WORKER_COUNT} (from WEB_CONCURRENCY env var)")
+    from diagnostics.connection_diagnostics import record_event
+    record_event(
+        "worker_startup",
+        worker_count=WORKER_COUNT,
+        web_concurrency=os.getenv("WEB_CONCURRENCY", "NOT_SET"),
+    )
     if WORKER_COUNT == 1 and not os.getenv("WEB_CONCURRENCY"):
         logger.warning(
             "WEB_CONCURRENCY not set — reporting worker_count=1. "
@@ -791,6 +850,12 @@ async def health_check() -> HealthResponse:
     finally:
         if lock_acquired:
             _zospy_lock.release()
+
+
+@app.get("/diagnostics/connection")
+async def diagnostics_connection(_: None = Depends(verify_api_key)):
+    """Return connection diagnostic events for debugging license/connection issues."""
+    return get_diagnostic_report()
 
 
 @app.get("/logs")
