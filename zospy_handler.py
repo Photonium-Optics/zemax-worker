@@ -2062,6 +2062,201 @@ class ZosPyHandler:
         except Exception as e:
             return {"success": False, "error": f"MTF analysis failed: {e}"}
 
+    def get_rms_vs_field(
+        self,
+        ray_density: int = 5,
+        num_field_points: int = 20,
+        reference: str = "centroid",
+        wavelength_index: int = 1,
+    ) -> dict[str, Any]:
+        """
+        Get RMS spot radius vs field using native RmsField analysis.
+
+        Uses OpticStudio's AnalysisIDM.RmsField which auto-samples across
+        the full field range, producing a smooth curve.
+
+        Args:
+            ray_density: Ray density (1-20, maps to RayDens_N enum)
+            num_field_points: Number of field sample points (snapped to nearest FieldDensity enum: 5,10,...,100)
+            reference: Reference point ('centroid' or 'chief_ray')
+            wavelength_index: Wavelength index (1-indexed)
+
+        Returns:
+            On success: {
+                "success": True,
+                "data": [{"field_value": float, "rms_radius_um": float}, ...],
+                "diffraction_limit": [{"field_value": float, "rms_radius_um": float}, ...],
+                "wavelength_um": float,
+                "field_unit": str,
+            }
+            On error: {"success": False, "error": "..."}
+        """
+        try:
+            wavelengths = self.oss.SystemData.Wavelengths
+            if wavelength_index > wavelengths.NumberOfWavelengths:
+                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+
+            # Determine field unit from system
+            fields = self.oss.SystemData.Fields
+            field_type_str = ""
+            try:
+                ft = fields.GetFieldType()
+                field_type_str = ft.name if hasattr(ft, 'name') else str(ft).split(".")[-1]
+            except Exception:
+                pass
+            field_unit = "deg" if "angle" in field_type_str.lower() else "mm"
+
+            # Snap num_field_points to nearest FieldDensity enum value (multiples of 5, 5-100)
+            snapped = max(5, min(100, round(num_field_points / 5) * 5))
+            # Clamp ray_density to 1-20
+            ray_density = max(1, min(20, ray_density))
+
+            analysis = None
+            try:
+                idm = self._zp.constants.Analysis.AnalysisIDM
+                analysis = self._zp.analyses.new_analysis(
+                    self.oss,
+                    idm.RmsField,
+                    settings_first=True,
+                )
+
+                settings = analysis.Settings
+
+                # Data = SpotRadius (RMS spot radius)
+                if hasattr(settings, 'Data'):
+                    try:
+                        data_types = self._zp.constants.Analysis.Settings.RMS.DataType
+                        settings.Data = data_types.SpotRadius
+                    except Exception as e:
+                        logger.warning(f"RmsField: Could not set Data type: {e}")
+
+                # FieldDensity
+                if hasattr(settings, 'FieldDensity'):
+                    try:
+                        fd_enum = self._zp.constants.Analysis.Settings.RMS.FieldDensities
+                        fd_name = f"FieldDens_{snapped}"
+                        if hasattr(fd_enum, fd_name):
+                            settings.FieldDensity = getattr(fd_enum, fd_name)
+                        else:
+                            logger.warning(f"RmsField: FieldDensity enum '{fd_name}' not found, using default")
+                    except Exception as e:
+                        logger.warning(f"RmsField: Could not set FieldDensity: {e}")
+
+                # RayDensity
+                if hasattr(settings, 'RayDensity'):
+                    try:
+                        rd_enum = self._zp.constants.Analysis.Settings.RMS.RayDensities
+                        rd_name = f"RayDens_{ray_density}"
+                        if hasattr(rd_enum, rd_name):
+                            settings.RayDensity = getattr(rd_enum, rd_name)
+                        else:
+                            logger.warning(f"RmsField: RayDensity enum '{rd_name}' not found, using default")
+                    except Exception as e:
+                        logger.warning(f"RmsField: Could not set RayDensity: {e}")
+
+                # ReferTo
+                if hasattr(settings, 'ReferTo'):
+                    try:
+                        refer_enum = self._zp.constants.Analysis.Settings.RMS.ReferTo
+                        if reference == "chief_ray" and hasattr(refer_enum, 'ChiefRay'):
+                            settings.ReferTo = refer_enum.ChiefRay
+                        elif hasattr(refer_enum, 'Centroid'):
+                            settings.ReferTo = refer_enum.Centroid
+                    except Exception as e:
+                        logger.warning(f"RmsField: Could not set ReferTo: {e}")
+
+                # Wavelength
+                if hasattr(settings, 'Wavelength'):
+                    try:
+                        settings.Wavelength.SetWavelengthNumber(wavelength_index)
+                    except Exception as e:
+                        logger.warning(f"RmsField: Could not set Wavelength: {e}")
+
+                # ShowDiffractionLimit
+                if hasattr(settings, 'ShowDiffractionLimit'):
+                    try:
+                        settings.ShowDiffractionLimit = True
+                    except Exception as e:
+                        logger.warning(f"RmsField: Could not set ShowDiffractionLimit: {e}")
+
+                rms_start = time.perf_counter()
+                try:
+                    analysis.ApplyAndWaitForCompletion()
+                finally:
+                    rms_elapsed_ms = (time.perf_counter() - rms_start) * 1000
+                    log_timing(logger, "RmsField.run", rms_elapsed_ms)
+
+                # Extract data series
+                results = analysis.Results
+                data_points = []
+                diffraction_limit = []
+
+                if results is not None:
+                    try:
+                        num_series = results.NumberOfDataSeries
+                        logger.info(f"RmsField: {num_series} data series returned")
+
+                        for si in range(num_series):
+                            series = results.GetDataSeries(si)
+                            if series is None:
+                                continue
+
+                            desc = str(series.Description) if hasattr(series, 'Description') else ""
+                            desc_lower = desc.lower()
+                            n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
+                            logger.debug(f"RmsField series {si}: desc='{desc}', points={n_points}")
+
+                            series_points = []
+                            for pi in range(n_points):
+                                pt = series.GetDataPoint(pi)
+                                if pt is not None:
+                                    x_val = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
+                                    y_val = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
+                                    series_points.append({
+                                        "field_value": x_val,
+                                        "rms_radius_um": y_val,
+                                    })
+
+                            if "diffrac" in desc_lower or "limit" in desc_lower:
+                                diffraction_limit = series_points
+                            else:
+                                data_points.extend(series_points)
+
+                    except Exception as e:
+                        logger.warning(f"RmsField: Could not extract data series: {e}")
+
+                # Fallback: parse text output
+                if not data_points:
+                    logger.warning("RmsField: No data series, attempting text fallback")
+                    try:
+                        text_file = results.GetTextFile()
+                        if text_file:
+                            logger.info(f"RmsField text output (first 500 chars): {text_file[:500]}")
+                    except Exception as e:
+                        logger.warning(f"RmsField: Text fallback also failed: {e}")
+                    return {"success": False, "error": "RmsField analysis returned no data series"}
+
+                result = {
+                    "success": True,
+                    "data": data_points,
+                    "diffraction_limit": diffraction_limit,
+                    "wavelength_um": float(wavelength_um),
+                    "field_unit": field_unit,
+                }
+                _log_raw_output("/rms-vs-field", result)
+                return result
+
+            finally:
+                if analysis is not None:
+                    try:
+                        analysis.Close()
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            return {"success": False, "error": f"RmsField analysis failed: {e}"}
+
     def get_psf(
         self,
         field_index: int = 1,

@@ -588,7 +588,7 @@ class MeritFunctionResponse(BaseModel):
 class OptimizationWizardRequest(BaseModel):
     """Request to apply the SEQ Optimization Wizard to generate merit function operands."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
-    criterion: Literal["Spot", "Wavefront", "Contrast"] = Field(default="Spot", description="Optimization criterion: Spot, Wavefront, or Contrast")
+    criterion: Literal["Spot", "Wavefront", "Angular", "Contrast"] = Field(default="Spot", description="Optimization criterion: Spot, Wavefront, Angular, or Contrast")
     reference: Literal["Centroid", "ChiefRay"] = Field(default="Centroid", description="Reference type: Centroid or ChiefRay")
     overall_weight: float = Field(default=1.0, ge=0, description="Overall weight for wizard operands")
     rings: int = Field(default=3, ge=1, le=20, description="Number of pupil rings")
@@ -1010,6 +1010,52 @@ async def apply_optimization_wizard(
         "/apply-optimization-wizard", OptimizationWizardResponse, request,
         lambda: zospy_handler.apply_optimization_wizard(**wizard_params),
         build_response=_build_wizard_response,
+    )
+
+
+class RmsVsFieldRequest(BaseModel):
+    """RMS vs Field analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    ray_density: int = Field(default=5, ge=1, le=20, description="Ray density (1-20)")
+    num_field_points: int = Field(default=20, ge=3, le=256, description="Number of field points (snapped to nearest FieldDensity enum)")
+    reference: str = Field(default="centroid", description="Reference point: 'centroid' or 'chief_ray'")
+    wavelength_index: int = Field(default=1, ge=1, description="Wavelength index (1-indexed)")
+
+
+class RmsVsFieldDataPoint(BaseModel):
+    """Single data point in RMS vs Field result."""
+    field_value: float = Field(description="Field coordinate value")
+    rms_radius_um: float = Field(description="RMS spot radius in micrometers")
+
+
+class RmsVsFieldResponse(BaseModel):
+    """RMS vs Field analysis response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    data: Optional[list[RmsVsFieldDataPoint]] = Field(default=None, description="RMS vs field data points")
+    diffraction_limit: Optional[list[RmsVsFieldDataPoint]] = Field(default=None, description="Diffraction limit curve")
+    wavelength_um: Optional[float] = Field(default=None, description="Wavelength in micrometers")
+    field_unit: Optional[str] = Field(default=None, description="Field coordinate unit (e.g. deg, mm)")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
+@app.post("/rms-vs-field", response_model=RmsVsFieldResponse)
+async def get_rms_vs_field(
+    request: RmsVsFieldRequest,
+    _: None = Depends(verify_api_key),
+) -> RmsVsFieldResponse:
+    """
+    Get RMS spot radius vs field using native RmsField analysis.
+
+    Auto-samples across the full field range, producing a smooth curve.
+    """
+    return await _run_endpoint(
+        "/rms-vs-field", RmsVsFieldResponse, request,
+        lambda: zospy_handler.get_rms_vs_field(
+            ray_density=request.ray_density,
+            num_field_points=request.num_field_points,
+            reference=request.reference,
+            wavelength_index=request.wavelength_index,
+        ),
     )
 
 
