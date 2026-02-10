@@ -2547,9 +2547,23 @@ class ZosPyHandler:
             # Resolve semantic pseudo-codes to real Zemax operands
             if code == "BFD_SEMANTIC":
                 # Back focal distance = TTHI from last glass surface to image surface
-                # Int1 = last surface before image, Int2 = image surface
                 num_surf = self.oss.LDE.NumberOfSurfaces
-                image_surf = num_surf - 1  # 0-based, image is last
+                if num_surf < 3:
+                    row_errors.append({
+                        "row_index": row_index,
+                        "error": "BFD requires at least one optical surface between object and image",
+                    })
+                    evaluated_rows.append({
+                        "row_index": row_index,
+                        "operand_code": code,
+                        "value": None,
+                        "target": target,
+                        "weight": weight,
+                        "contribution": None,
+                        "error": "Insufficient surfaces for BFD calculation",
+                    })
+                    continue
+                image_surf = num_surf - 1
                 last_before_image = image_surf - 1
                 code = "TTHI"
                 params = [last_before_image, image_surf, None, None, None, None]
@@ -3232,6 +3246,13 @@ class ZosPyHandler:
         _log_raw_output("/run-optimization", result)
         return result
 
+    # Maps parameter name -> (cell attribute, value attribute)
+    _VARIABLE_PARAMS = {
+        "radius": ("RadiusCell", "Radius"),
+        "thickness": ("ThicknessCell", "Thickness"),
+        "conic": ("ConicCell", "Conic"),
+    }
+
     def _extract_variable_states(self) -> list[dict[str, Any]]:
         """
         Extract current values of all variable parameters from the LDE.
@@ -3248,59 +3269,28 @@ class ZosPyHandler:
         try:
             num_surfaces = lde.NumberOfSurfaces
             # Start at surface 1 (skip object surface 0).
-            # Return surf_idx as-is (1-based Zemax LDE index) — the analysis
+            # Return surf_idx as-is (1-based Zemax LDE index) -- the analysis
             # service's surface_patcher converts to 0-based LLM index.
             for surf_idx in range(1, num_surfaces):
                 try:
                     surf = lde.GetSurfaceAt(surf_idx)
 
-                    # Check radius
-                    try:
-                        radius_cell = surf.RadiusCell
-                        if hasattr(radius_cell, 'GetSolveData'):
-                            solve = radius_cell.GetSolveData()
+                    for param_name, (cell_attr, value_attr) in self._VARIABLE_PARAMS.items():
+                        try:
+                            cell = getattr(surf, cell_attr)
+                            if not hasattr(cell, 'GetSolveData'):
+                                continue
+                            solve = cell.GetSolveData()
                             solve_type = str(solve.Type).split('.')[-1] if solve else ""
                             if solve_type == "Variable":
                                 variable_states.append({
                                     "surface_index": surf_idx,
-                                    "parameter": "radius",
-                                    "value": _extract_value(surf.Radius, 0.0),
+                                    "parameter": param_name,
+                                    "value": _extract_value(getattr(surf, value_attr), 0.0),
                                     "is_variable": True,
                                 })
-                    except Exception:
-                        pass
-
-                    # Check thickness
-                    try:
-                        thickness_cell = surf.ThicknessCell
-                        if hasattr(thickness_cell, 'GetSolveData'):
-                            solve = thickness_cell.GetSolveData()
-                            solve_type = str(solve.Type).split('.')[-1] if solve else ""
-                            if solve_type == "Variable":
-                                variable_states.append({
-                                    "surface_index": surf_idx,
-                                    "parameter": "thickness",
-                                    "value": _extract_value(surf.Thickness, 0.0),
-                                    "is_variable": True,
-                                })
-                    except Exception:
-                        pass
-
-                    # Check conic
-                    try:
-                        conic_cell = surf.ConicCell
-                        if hasattr(conic_cell, 'GetSolveData'):
-                            solve = conic_cell.GetSolveData()
-                            solve_type = str(solve.Type).split('.')[-1] if solve else ""
-                            if solve_type == "Variable":
-                                variable_states.append({
-                                    "surface_index": surf_idx,
-                                    "parameter": "conic",
-                                    "value": _extract_value(surf.Conic, 0.0),
-                                    "is_variable": True,
-                                })
-                    except Exception:
-                        pass
+                        except Exception:
+                            pass
 
                 except Exception as e:
                     logger.debug(f"Error reading surface {surf_idx} variables: {e}")
