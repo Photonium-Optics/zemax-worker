@@ -1621,8 +1621,11 @@ async def get_cardinal_points(request: SystemRequest, _: None = Depends(verify_a
 class RunOptimizationRequest(BaseModel):
     """Request to run OpticStudio optimization."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
-    algorithm: Literal["DLS", "Hammer"] = Field(default="DLS", description="Optimization algorithm: DLS (damped least squares) or Hammer")
-    cycles: int = Field(default=5, ge=1, le=50, description="Number of automatic optimization cycles")
+    method: Literal["local", "global", "hammer"] = Field(default="local", description="Optimization method: local (gradient descent), global (full search), hammer (perturb+refine)")
+    algorithm: Literal["DLS", "Hammer", "OrthogonalDescent", "DLSX", "PSD"] = Field(default="DLS", description="Optimization algorithm")
+    cycles: Optional[int] = Field(default=5, ge=1, le=50, description="Cycles for local optimization (ignored for global/hammer)")
+    timeout_seconds: Optional[float] = Field(default=60, ge=5, le=600, description="Time limit in seconds for global/hammer optimization")
+    num_to_save: Optional[int] = Field(default=10, ge=1, le=50, description="Number of best solutions to retain (global only)")
     operand_rows: Optional[list[MeritFunctionOperandRow]] = Field(default=None, description="Explicit MFE operand rows (mutually exclusive with setup_wizard)")
     setup_wizard: bool = Field(default=False, description="Use SEQ Optimization Wizard to populate MFE")
     wizard_params: Optional[dict[str, Any]] = Field(default=None, description="Wizard parameters when setup_wizard=True")
@@ -1639,11 +1642,15 @@ class VariableState(BaseModel):
 class RunOptimizationResponse(BaseModel):
     """Response from optimization run."""
     success: bool = Field(description="Whether the optimization succeeded")
+    method: Optional[str] = Field(default=None, description="Optimization method used: local, global, or hammer")
+    algorithm: Optional[str] = Field(default=None, description="Optimization algorithm used")
     merit_before: Optional[float] = Field(default=None, description="Merit function value before optimization")
     merit_after: Optional[float] = Field(default=None, description="Merit function value after optimization")
-    cycles_completed: Optional[int] = Field(default=None, description="Number of optimization cycles completed")
+    cycles_completed: Optional[int] = Field(default=None, description="Number of optimization cycles completed (local only)")
     operand_results: Optional[list[dict[str, Any]]] = Field(default=None, description="Per-operand results after optimization")
     variable_states: Optional[list[VariableState]] = Field(default=None, description="Variable parameter states after optimization")
+    best_solutions: Optional[list[float]] = Field(default=None, description="Best merit function values from global optimization")
+    systems_evaluated: Optional[int] = Field(default=None, description="Number of systems evaluated (global/hammer)")
     error: Optional[str] = Field(default=None, description="Error message if failed")
 
 
@@ -1653,7 +1660,7 @@ async def run_optimization(
     _: None = Depends(verify_api_key),
 ) -> RunOptimizationResponse:
     """
-    Run OpticStudio's DLS or Hammer optimization for N cycles.
+    Run OpticStudio optimization using Local, Global, or Hammer method.
 
     Loads the system from zmx_content, populates the MFE (via explicit rows
     or wizard), runs the optimizer, and returns before/after merit values
@@ -1673,11 +1680,15 @@ async def run_optimization(
 
         return RunOptimizationResponse(
             success=True,
+            method=result.get("method"),
+            algorithm=result.get("algorithm"),
             merit_before=result.get("merit_before"),
             merit_after=result.get("merit_after"),
             cycles_completed=result.get("cycles_completed"),
             operand_results=result.get("operand_results"),
             variable_states=variable_states,
+            best_solutions=result.get("best_solutions"),
+            systems_evaluated=result.get("systems_evaluated"),
         )
 
     def _call_handler():
@@ -1685,8 +1696,11 @@ async def run_optimization(
         if request.operand_rows:
             operand_dicts = [row.model_dump() for row in request.operand_rows]
         return zospy_handler.run_optimization(
+            method=request.method,
             algorithm=request.algorithm,
             cycles=request.cycles,
+            timeout_seconds=request.timeout_seconds,
+            num_to_save=request.num_to_save,
             operand_rows=operand_dicts,
             setup_wizard=request.setup_wizard,
             wizard_params=request.wizard_params,

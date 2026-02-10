@@ -3814,31 +3814,109 @@ class ZosPyHandler:
             }
 
 
+    # ── Optimization enum helpers ──────────────────────────────────────
+
+    @staticmethod
+    def _resolve_algorithm(zp_module, algorithm: str):
+        """Map algorithm string to OptimizationAlgorithm enum value."""
+        alg_enum = zp_module.constants.Tools.Optimization.OptimizationAlgorithm
+        mapping = {
+            "DLS": "DampedLeastSquares",
+            "DampedLeastSquares": "DampedLeastSquares",
+            "OrthogonalDescent": "OrthogonalDescent",
+            "DLSX": "DLSX",
+            "PSD": "PSD",
+        }
+        attr_name = mapping.get(algorithm, "DampedLeastSquares")
+        resolved = getattr(alg_enum, attr_name, None)
+        if resolved is None:
+            logger.warning(
+                f"Algorithm '{algorithm}' not found in OptimizationAlgorithm enum, "
+                f"falling back to DampedLeastSquares"
+            )
+            resolved = getattr(alg_enum, "DampedLeastSquares")
+        return resolved
+
+    @staticmethod
+    def _resolve_cycles(zp_module, cycles: int | None):
+        """Map cycle count to OptimizationCycles enum value."""
+        cycles_enum = zp_module.constants.Tools.Optimization.OptimizationCycles
+        if cycles is None:
+            return getattr(cycles_enum, "Automatic", None)
+        mapping = {
+            1: "Fixed_1",
+            5: "Fixed_5",
+            10: "Fixed_10",
+            50: "Fixed_50",
+        }
+        attr_name = mapping.get(cycles)
+        if attr_name:
+            resolved = getattr(cycles_enum, attr_name, None)
+            if resolved is not None:
+                return resolved
+        # For other values, use Automatic (the API doesn't support arbitrary counts)
+        return getattr(cycles_enum, "Automatic", None)
+
+    @staticmethod
+    def _resolve_save_count(zp_module, num_to_save: int | None):
+        """Map save count to OptimizationSaveCount enum value."""
+        save_enum = zp_module.constants.Tools.Optimization.OptimizationSaveCount
+        if num_to_save is None:
+            return getattr(save_enum, "Save_10", None)
+        mapping = {
+            5: "Save_5",
+            10: "Save_10",
+            20: "Save_20",
+            50: "Save_50",
+        }
+        # Find closest value
+        closest = min(mapping.keys(), key=lambda k: abs(k - num_to_save))
+        attr_name = mapping[closest]
+        resolved = getattr(save_enum, attr_name, None)
+        if resolved is None:
+            return getattr(save_enum, "Save_10", None)
+        return resolved
+
+    # ── Main optimization entry point ───────────────────────────────
+
     def run_optimization(
         self,
+        method: str = "local",
         algorithm: str = "DLS",
-        cycles: int = 5,
+        cycles: int | None = 5,
+        timeout_seconds: float | None = 60,
+        num_to_save: int | None = 10,
         operand_rows: list[dict] | None = None,
         setup_wizard: bool = False,
         wizard_params: dict | None = None,
     ) -> dict[str, Any]:
         """
-        Run OpticStudio's local or hammer optimization for N cycles.
+        Run OpticStudio optimization using Local, Global, or Hammer method.
 
         Args:
-            algorithm: "DLS" (damped least squares) or "Hammer"
-            cycles: Number of automatic cycles (1-50)
+            method: "local" | "global" | "hammer"
+            algorithm: "DLS" | "OrthogonalDescent" | "DLSX" | "PSD"
+            cycles: Cycle count for local optimization (1, 5, 10, 50, or None=auto)
+            timeout_seconds: Time limit for global/hammer (they run indefinitely)
+            num_to_save: Number of best solutions to retain (global only)
             operand_rows: Explicit MFE operand rows (if not using wizard)
             setup_wizard: If True, use SEQOptimizationWizard2 to populate MFE
             wizard_params: Parameters for the wizard (criterion, rings, etc.)
 
         Returns:
             Dict with merit_before, merit_after, cycles_completed,
-            operand_results, variable_states
+            operand_results, variable_states, and (for global) best_solutions
         """
         zp = self._zp
         mfe = self.oss.MFE
-        lde = self.oss.LDE
+
+        # Normalize method
+        method = (method or "local").lower()
+
+        # Backward compat: algorithm="Hammer" → method="hammer"
+        if algorithm and algorithm.upper() == "HAMMER":
+            method = "hammer"
+            algorithm = "DLS"
 
         # Step 1: Populate MFE
         if setup_wizard:
@@ -3868,36 +3946,81 @@ class ZosPyHandler:
         except Exception as e:
             return {"success": False, "error": f"Initial merit calculation failed: {e}"}
 
-        # Step 3: Run optimization
+        # Step 3: Run optimization (method-specific)
+        best_solutions: list[float] | None = None
+        systems_evaluated: int | None = None
+
         try:
             tools = self.oss.Tools
-            if algorithm.upper() == "HAMMER":
-                opt_tool = tools.OpenHammerOptimization()
-            else:
-                opt_tool = tools.OpenLocalOptimization()
+            resolved_alg = self._resolve_algorithm(zp, algorithm or "DLS")
 
-            # Clamp cycles
-            cycles = max(1, min(cycles, 50))
+            if method == "global":
+                opt_tool = tools.OpenGlobalOptimization()
+                opt_tool.Algorithm = resolved_alg
+                opt_tool.NumberOfCores = getattr(opt_tool, 'MaxCores', 8)
 
-            if hasattr(opt_tool, 'NumberOfAutomaticCycles'):
-                opt_tool.NumberOfAutomaticCycles = cycles
+                save_count = self._resolve_save_count(zp, num_to_save)
+                if save_count is not None:
+                    opt_tool.NumberToSave = save_count
 
-            # Set algorithm (DLS only has one variant)
-            if algorithm.upper() == "DLS" and hasattr(opt_tool, 'Algorithm'):
+                timeout = max(10, min(timeout_seconds or 60, 600))
                 try:
-                    dls_alg = getattr(
-                        zp.constants.Tools.Optimization.OptimizationAlgorithm,
-                        "DampedLeastSquares", None
-                    )
-                    if dls_alg is not None:
-                        opt_tool.Algorithm = dls_alg
-                except Exception:
-                    pass  # Use default algorithm
+                    opt_tool.RunAndWaitWithTimeout(timeout)
+                    opt_tool.Cancel()
+                    opt_tool.WaitForCompletion()
+                finally:
+                    # Read best merit value before closing
+                    try:
+                        best_solutions = []
+                        try:
+                            mf_val = _extract_value(opt_tool.CurrentMeritFunction)
+                            if mf_val is not None and mf_val > 0:
+                                best_solutions.append(mf_val)
+                        except Exception:
+                            pass
+                        if not best_solutions:
+                            # Fallback: read merit from MFE
+                            mf_val = _extract_value(mfe.CalculateMeritFunction())
+                            if mf_val is not None:
+                                best_solutions.append(mf_val)
+                    except Exception as e:
+                        logger.warning(f"Failed to read global best solutions: {e}")
+                    try:
+                        systems_evaluated = int(opt_tool.Systems) if hasattr(opt_tool, 'Systems') else None
+                    except Exception as e:
+                        logger.debug(f"Could not read systems_evaluated from global optimizer: {e}")
+                    opt_tool.Close()
 
-            try:
-                opt_tool.RunAndWaitForCompletion()
-            finally:
-                opt_tool.Close()
+            elif method == "hammer":
+                opt_tool = tools.OpenHammerOptimization()
+                opt_tool.Algorithm = resolved_alg
+                opt_tool.NumberOfCores = getattr(opt_tool, 'MaxCores', 8)
+
+                timeout = max(10, min(timeout_seconds or 60, 600))
+                try:
+                    opt_tool.RunAndWaitWithTimeout(timeout)
+                    opt_tool.Cancel()
+                    opt_tool.WaitForCompletion()
+                finally:
+                    try:
+                        systems_evaluated = int(opt_tool.Systems) if hasattr(opt_tool, 'Systems') else None
+                    except Exception as e:
+                        logger.debug(f"Could not read systems_evaluated from hammer optimizer: {e}")
+                    opt_tool.Close()
+
+            else:  # local (default)
+                opt_tool = tools.OpenLocalOptimization()
+                opt_tool.Algorithm = resolved_alg
+                opt_tool.NumberOfCores = getattr(opt_tool, 'MaxCores', 8)
+
+                resolved_cycles = self._resolve_cycles(zp, cycles)
+                if resolved_cycles is not None and hasattr(opt_tool, 'Cycles'):
+                    opt_tool.Cycles = resolved_cycles
+
+                try:
+                    opt_tool.RunAndWaitForCompletion()
+                finally:
+                    opt_tool.Close()
 
         except Exception as e:
             logger.error(f"Optimization run failed: {e}")
@@ -3954,14 +4077,20 @@ class ZosPyHandler:
         # Step 6: Extract variable states from LDE
         variable_states = self._extract_variable_states()
 
-        result = {
+        result: dict[str, Any] = {
             "success": True,
+            "method": method,
+            "algorithm": algorithm,
             "merit_before": merit_before,
             "merit_after": merit_after,
-            "cycles_completed": cycles,
+            "cycles_completed": cycles if method == "local" else None,
             "operand_results": operand_results,
             "variable_states": variable_states,
         }
+        if best_solutions is not None:
+            result["best_solutions"] = best_solutions
+        if systems_evaluated is not None:
+            result["systems_evaluated"] = systems_evaluated
         _log_raw_output("/run-optimization", result)
         return result
 
@@ -4793,9 +4922,9 @@ class ZosPyHandler:
                     pop_elapsed_ms = (time.perf_counter() - pop_start) * 1000
                     log_timing(logger, "PhysicalOpticsPropagation.run", pop_elapsed_ms)
 
-                if pop_result is not None and hasattr(pop_result, 'values') and hasattr(pop_result, 'size') and pop_result.size > 0:
-                    # ZosPy wrapper returns a pandas DataFrame directly
-                    arr = pop_result.values.astype(np.float64)
+                if pop_result is not None and hasattr(pop_result, 'data') and pop_result.data is not None and pop_result.data.size > 0:
+                    # ZosPy wrapper returns AnalysisResult; .data is the DataFrame
+                    arr = pop_result.data.values.astype(np.float64)
                     image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
                     array_shape = list(arr.shape)
                     array_dtype = str(arr.dtype)
