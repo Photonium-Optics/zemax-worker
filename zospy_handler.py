@@ -2176,7 +2176,11 @@ class ZosPyHandler:
                     rms_elapsed_ms = (time.perf_counter() - rms_start) * 1000
                     log_timing(logger, "RmsField.run", rms_elapsed_ms)
 
-                # Extract data series
+                # Extract data series using IAR_DataSeries interface:
+                # series.XData.Data = field values (1D array)
+                # series.YData.Data = RMS values (2D matrix: [num_points, num_curves])
+                # series.NumSeries = number of sub-curves
+                # series.SeriesLabels = labels for each sub-curve
                 results = analysis.Results
                 data_points = []
                 diffraction_limit = []
@@ -2189,46 +2193,90 @@ class ZosPyHandler:
                         for si in range(num_series):
                             series = results.GetDataSeries(si)
                             if series is None:
-                                logger.info(f"RmsField series {si}: None")
                                 continue
 
                             desc = str(series.Description) if hasattr(series, 'Description') else ""
-                            desc_lower = desc.lower()
-                            n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
-                            logger.info(f"RmsField series {si}: desc='{desc}', points={n_points}")
+                            logger.info(f"RmsField series {si}: desc='{desc}'")
 
-                            series_points = []
-                            for pi in range(n_points):
-                                pt = series.GetDataPoint(pi)
-                                if pt is not None:
-                                    x_val = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
-                                    y_val = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
-                                    series_points.append({
+                            # Get X data (field values) from IVectorData
+                            x_data = series.XData
+                            if x_data is None:
+                                logger.warning(f"RmsField series {si}: XData is None")
+                                continue
+
+                            x_raw = x_data.Data
+                            if x_raw is None:
+                                logger.warning(f"RmsField series {si}: XData.Data is None")
+                                continue
+
+                            x_values = list(x_raw)
+                            num_points = len(x_values)
+
+                            # Get Y data (RMS values) from IMatrixData
+                            y_data = series.YData
+                            if y_data is None:
+                                logger.warning(f"RmsField series {si}: YData is None")
+                                continue
+
+                            y_raw = y_data.Data
+                            num_curves = series.NumSeries if hasattr(series, 'NumSeries') else 1
+
+                            # Get labels to identify diffraction limit curve
+                            labels = []
+                            if hasattr(series, 'SeriesLabels') and series.SeriesLabels is not None:
+                                labels = list(series.SeriesLabels)
+
+                            logger.info(f"RmsField series {si}: {num_points} points, {num_curves} curves, labels={labels}")
+
+                            for ci in range(num_curves):
+                                label = labels[ci] if ci < len(labels) else ""
+                                label_lower = label.lower()
+                                is_diffraction = "diffrac" in label_lower or "limit" in label_lower
+
+                                curve_points = []
+                                for pi in range(num_points):
+                                    x_val = float(x_values[pi])
+                                    # YData is 2D: [point_index, curve_index]
+                                    try:
+                                        y_val = float(y_raw[pi, ci])
+                                    except (TypeError, IndexError):
+                                        # Might be 1D if only one curve
+                                        try:
+                                            y_val = float(y_raw[pi])
+                                        except Exception:
+                                            continue
+                                    curve_points.append({
                                         "field_value": x_val,
                                         "rms_radius_um": y_val,
                                     })
 
-                            is_diffraction = "diffrac" in desc_lower or "limit" in desc_lower
-                            logger.info(f"RmsField series {si}: extracted {len(series_points)} points, is_diffraction={is_diffraction}")
+                                logger.info(f"RmsField series {si} curve {ci}: label='{label}', {len(curve_points)} points, is_diffraction={is_diffraction}")
 
-                            if is_diffraction:
-                                diffraction_limit = series_points
-                            else:
-                                data_points.extend(series_points)
+                                if is_diffraction:
+                                    diffraction_limit = curve_points
+                                else:
+                                    data_points.extend(curve_points)
 
                     except Exception as e:
                         logger.warning(f"RmsField: Could not extract data series: {e}", exc_info=True)
 
                 # Fallback: parse text output
                 if not data_points:
-                    logger.warning("RmsField: No data series, attempting text fallback")
+                    logger.warning("RmsField: No data extracted from DataSeries, attempting text fallback")
                     try:
-                        text_file = results.GetTextFile()
-                        if text_file:
-                            logger.info(f"RmsField text output (first 500 chars): {text_file[:500]}")
+                        import tempfile, os
+                        tmp = tempfile.NamedTemporaryFile(suffix='.txt', delete=False)
+                        tmp_path = tmp.name
+                        tmp.close()
+                        results.GetTextFile(tmp_path)
+                        with open(tmp_path, 'r') as f:
+                            text_content = f.read()
+                        os.unlink(tmp_path)
+                        if text_content:
+                            logger.info(f"RmsField text output (first 500 chars): {text_content[:500]}")
                     except Exception as e:
                         logger.warning(f"RmsField: Text fallback also failed: {e}")
-                    return {"success": False, "error": "RmsField analysis returned no data series"}
+                    return {"success": False, "error": "RmsField analysis returned no extractable data"}
 
                 result = {
                     "success": True,
