@@ -207,7 +207,6 @@ SAMPLING_ENUM_MAP = {
 CROSS_SECTION_IMAGE_SIZE = (1200, 800)
 CROSS_SECTION_TEMP_FILENAME = "zemax_cross_section.png"
 SEIDEL_TEMP_FILENAME = "seidel_native.txt"
-SPOT_DIAGRAM_TEMP_FILENAME = "zemax_spot_diagram.png"
 
 # OpticStudio version requirements
 MIN_IMAGE_EXPORT_VERSION = (24, 1, 0)
