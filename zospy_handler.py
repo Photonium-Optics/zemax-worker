@@ -3889,6 +3889,33 @@ class ZosPyHandler:
             return getattr(save_enum, "Save_10", None)
         return resolved
 
+    @staticmethod
+    def _read_systems_evaluated(opt_tool) -> int | None:
+        """Read systems evaluated count from an optimization tool, or None on failure."""
+        try:
+            return int(opt_tool.Systems) if hasattr(opt_tool, 'Systems') else None
+        except Exception as e:
+            logger.debug(f"Could not read systems_evaluated: {e}")
+            return None
+
+    def _read_best_solutions(self, opt_tool, mfe) -> list[float]:
+        """Read the best merit value from a global optimizer, with MFE fallback."""
+        solutions: list[float] = []
+        try:
+            mf_val = _extract_value(opt_tool.CurrentMeritFunction)
+            if mf_val is not None and mf_val > 0:
+                solutions.append(mf_val)
+        except Exception:
+            pass
+        if not solutions:
+            try:
+                mf_val = _extract_value(mfe.CalculateMeritFunction())
+                if mf_val is not None:
+                    solutions.append(mf_val)
+            except Exception as e:
+                logger.warning(f"Failed to read global best solutions: {e}")
+        return solutions
+
     # ── Main optimization entry point ───────────────────────────────
 
     def run_optimization(
@@ -3966,58 +3993,28 @@ class ZosPyHandler:
             tools = self.oss.Tools
             resolved_alg = self._resolve_algorithm(zp, algorithm or "DLS")
 
-            if method == "global":
-                opt_tool = tools.OpenGlobalOptimization()
+            if method in ("global", "hammer"):
+                # Global and Hammer both use timeout-based execution
+                if method == "global":
+                    opt_tool = tools.OpenGlobalOptimization()
+                    save_count = self._resolve_save_count(zp, num_to_save)
+                    if save_count is not None:
+                        opt_tool.NumberToSave = save_count
+                else:
+                    opt_tool = tools.OpenHammerOptimization()
+
                 opt_tool.Algorithm = resolved_alg
                 opt_tool.NumberOfCores = getattr(opt_tool, 'MaxCores', 8)
-
-                save_count = self._resolve_save_count(zp, num_to_save)
-                if save_count is not None:
-                    opt_tool.NumberToSave = save_count
-
                 timeout = max(10, min(timeout_seconds or 60, 600))
+
                 try:
                     opt_tool.RunAndWaitWithTimeout(timeout)
                     opt_tool.Cancel()
                     opt_tool.WaitForCompletion()
                 finally:
-                    # Read best merit value before closing
-                    try:
-                        best_solutions = []
-                        try:
-                            mf_val = _extract_value(opt_tool.CurrentMeritFunction)
-                            if mf_val is not None and mf_val > 0:
-                                best_solutions.append(mf_val)
-                        except Exception:
-                            pass
-                        if not best_solutions:
-                            # Fallback: read merit from MFE
-                            mf_val = _extract_value(mfe.CalculateMeritFunction())
-                            if mf_val is not None:
-                                best_solutions.append(mf_val)
-                    except Exception as e:
-                        logger.warning(f"Failed to read global best solutions: {e}")
-                    try:
-                        systems_evaluated = int(opt_tool.Systems) if hasattr(opt_tool, 'Systems') else None
-                    except Exception as e:
-                        logger.debug(f"Could not read systems_evaluated from global optimizer: {e}")
-                    opt_tool.Close()
-
-            elif method == "hammer":
-                opt_tool = tools.OpenHammerOptimization()
-                opt_tool.Algorithm = resolved_alg
-                opt_tool.NumberOfCores = getattr(opt_tool, 'MaxCores', 8)
-
-                timeout = max(10, min(timeout_seconds or 60, 600))
-                try:
-                    opt_tool.RunAndWaitWithTimeout(timeout)
-                    opt_tool.Cancel()
-                    opt_tool.WaitForCompletion()
-                finally:
-                    try:
-                        systems_evaluated = int(opt_tool.Systems) if hasattr(opt_tool, 'Systems') else None
-                    except Exception as e:
-                        logger.debug(f"Could not read systems_evaluated from hammer optimizer: {e}")
+                    if method == "global":
+                        best_solutions = self._read_best_solutions(opt_tool, mfe)
+                    systems_evaluated = self._read_systems_evaluated(opt_tool)
                     opt_tool.Close()
 
             else:  # local (default)
@@ -4694,6 +4691,12 @@ class ZosPyHandler:
 
             if hasattr(curvature_result, 'data') and curvature_result.data is not None:
                 curv_data = curvature_result.data
+                # Curvature.run() returns AnalysisResult where .data is CurvatureResult
+                # (or list[CurvatureResult]). The actual grid is in CurvatureResult.data.
+                if hasattr(curv_data, 'data') and curv_data.data is not None:
+                    curv_data = curv_data.data
+                elif isinstance(curv_data, list) and len(curv_data) > 0:
+                    curv_data = curv_data[0].data if hasattr(curv_data[0], 'data') else curv_data[0]
                 if hasattr(curv_data, 'values'):
                     arr = np.array(curv_data.values, dtype=np.float64)
                 else:
@@ -4826,23 +4829,20 @@ class ZosPyHandler:
 
             if result is not None:
                 try:
-                    # ZosPy GeometricImageAnalysis returns a DataFrame or None.
-                    # Try get_data_grid first (available on analysis wrapper),
-                    # then fall back to the result DataFrame directly.
-                    grid_data = None
+                    # run() returns AnalysisResult where .data is a DataFrame.
+                    # Extract the DataFrame from the AnalysisResult wrapper.
+                    actual_data = result.data if hasattr(result, 'data') else result
 
-                    if hasattr(analysis, 'get_data_grid'):
-                        grid_data = analysis.get_data_grid()
+                    if actual_data is None:
+                        return {"success": False, "error": "Geometric Image Analysis returned no data"}
 
-                    if grid_data is not None and hasattr(grid_data, 'values'):
-                        arr = np.array(grid_data.values, dtype=np.float64)
-                    elif hasattr(result, 'values'):
-                        arr = np.array(result.values, dtype=np.float64)
-                    elif isinstance(result, np.ndarray):
-                        arr = result.astype(np.float64)
+                    if hasattr(actual_data, 'values'):
+                        arr = np.array(actual_data.values, dtype=np.float64)
+                    elif isinstance(actual_data, np.ndarray):
+                        arr = actual_data.astype(np.float64)
                     else:
-                        logger.warning(f"[GEO_IMAGE] Unexpected result type: {type(result)}")
-                        return {"success": False, "error": f"Unexpected result type: {type(result)}"}
+                        logger.warning(f"[GEO_IMAGE] Unexpected result type: {type(actual_data)}")
+                        return {"success": False, "error": f"Unexpected result type: {type(actual_data)}"}
 
                     if arr.size == 0:
                         return {"success": False, "error": "Geometric Image Analysis returned empty data"}
