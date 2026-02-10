@@ -2126,9 +2126,11 @@ class ZosPyHandler:
                 def _set_setting(attr: str, value: Any, label: str = "") -> None:
                     """Set a setting attribute, logging warnings on failure."""
                     if not hasattr(settings, attr):
+                        logger.info(f"RmsField: settings has no attribute '{attr}'")
                         return
                     try:
                         setattr(settings, attr, value)
+                        logger.info(f"RmsField: Set {label or attr} = {value}")
                     except Exception as e:
                         logger.warning(f"RmsField: Could not set {label or attr}: {e}")
 
@@ -2187,31 +2189,35 @@ class ZosPyHandler:
                         for si in range(num_series):
                             series = results.GetDataSeries(si)
                             if series is None:
+                                logger.info(f"RmsField series {si}: None")
                                 continue
 
-                            desc = str(getattr(series, 'Description', ""))
+                            desc = str(series.Description) if hasattr(series, 'Description') else ""
                             desc_lower = desc.lower()
-                            n_points = getattr(series, 'NumberOfPoints', 0)
-                            logger.debug(f"RmsField series {si}: desc='{desc}', points={n_points}")
+                            n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
+                            logger.info(f"RmsField series {si}: desc='{desc}', points={n_points}")
 
                             series_points = []
                             for pi in range(n_points):
                                 pt = series.GetDataPoint(pi)
                                 if pt is not None:
-                                    x_val = _extract_value(getattr(pt, 'X', pt[0]))
-                                    y_val = _extract_value(getattr(pt, 'Y', pt[1]))
+                                    x_val = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
+                                    y_val = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
                                     series_points.append({
                                         "field_value": x_val,
                                         "rms_radius_um": y_val,
                                     })
 
-                            if "diffrac" in desc_lower or "limit" in desc_lower:
+                            is_diffraction = "diffrac" in desc_lower or "limit" in desc_lower
+                            logger.info(f"RmsField series {si}: extracted {len(series_points)} points, is_diffraction={is_diffraction}")
+
+                            if is_diffraction:
                                 diffraction_limit = series_points
                             else:
                                 data_points.extend(series_points)
 
                     except Exception as e:
-                        logger.warning(f"RmsField: Could not extract data series: {e}")
+                        logger.warning(f"RmsField: Could not extract data series: {e}", exc_info=True)
 
                 # Fallback: parse text output
                 if not data_points:
