@@ -2229,9 +2229,16 @@ class ZosPyHandler:
                             logger.info(f"RmsField series {si}: {num_points} points, {num_curves} curves, labels={labels}")
 
                             for ci in range(num_curves):
-                                label = labels[ci] if ci < len(labels) else ""
-                                label_lower = label.lower()
-                                is_diffraction = "diffrac" in label_lower or "limit" in label_lower
+                                label = labels[ci] if ci < len(labels) else None
+                                label_str = str(label) if label is not None else ""
+                                label_lower = label_str.lower()
+                                # Diffraction limit curve: label is None (unlabeled second curve)
+                                # or contains "diffrac"/"limit"
+                                is_diffraction = (
+                                    "diffrac" in label_lower
+                                    or "limit" in label_lower
+                                    or (ci > 0 and label is None)
+                                )
 
                                 curve_points = []
                                 for pi in range(num_points):
