@@ -1181,7 +1181,7 @@ class RunOptimizationRequest(BaseModel):
 
 class VariableState(BaseModel):
     """State of a single variable parameter after optimization."""
-    surface_index: int = Field(description="0-based surface index in OpticStudio LDE")
+    surface_index: int = Field(description="1-based surface index in OpticStudio LDE (surface 1 = first optical surface)")
     parameter: str = Field(description="Parameter name: radius, thickness, or conic")
     value: float = Field(description="Current value after optimization")
     is_variable: bool = Field(default=True, description="Whether the parameter is marked as variable")
