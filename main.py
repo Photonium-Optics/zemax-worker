@@ -1109,6 +1109,87 @@ async def get_paraxial(request: SystemRequest, _: None = Depends(verify_api_key)
     )
 
 
+class RunOptimizationRequest(BaseModel):
+    """Request to run OpticStudio optimization."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    algorithm: Literal["DLS", "Hammer"] = Field(default="DLS", description="Optimization algorithm: DLS (damped least squares) or Hammer")
+    cycles: int = Field(default=5, ge=1, le=50, description="Number of automatic optimization cycles")
+    operand_rows: Optional[list[MeritFunctionOperandRow]] = Field(default=None, description="Explicit MFE operand rows (mutually exclusive with setup_wizard)")
+    setup_wizard: bool = Field(default=False, description="Use SEQ Optimization Wizard to populate MFE")
+    wizard_params: Optional[dict[str, Any]] = Field(default=None, description="Wizard parameters when setup_wizard=True")
+
+
+class VariableState(BaseModel):
+    """State of a single variable parameter after optimization."""
+    surface_index: int = Field(description="0-based surface index in OpticStudio LDE")
+    parameter: str = Field(description="Parameter name: radius, thickness, or conic")
+    value: float = Field(description="Current value after optimization")
+    is_variable: bool = Field(default=True, description="Whether the parameter is marked as variable")
+
+
+class RunOptimizationResponse(BaseModel):
+    """Response from optimization run."""
+    success: bool = Field(description="Whether the optimization succeeded")
+    merit_before: Optional[float] = Field(default=None, description="Merit function value before optimization")
+    merit_after: Optional[float] = Field(default=None, description="Merit function value after optimization")
+    cycles_completed: Optional[int] = Field(default=None, description="Number of optimization cycles completed")
+    operand_results: Optional[list[dict[str, Any]]] = Field(default=None, description="Per-operand results after optimization")
+    variable_states: Optional[list[VariableState]] = Field(default=None, description="Variable parameter states after optimization")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
+@app.post("/run-optimization", response_model=RunOptimizationResponse)
+async def run_optimization(
+    request: RunOptimizationRequest,
+    _: None = Depends(verify_api_key),
+) -> RunOptimizationResponse:
+    """
+    Run OpticStudio's DLS or Hammer optimization for N cycles.
+
+    Loads the system from zmx_content, populates the MFE (via explicit rows
+    or wizard), runs the optimizer, and returns before/after merit values
+    plus variable states from the LDE.
+    """
+    def _build_response(result: dict) -> RunOptimizationResponse:
+        if not result.get("success"):
+            return RunOptimizationResponse(
+                success=False,
+                error=result.get("error", "Optimization failed"),
+            )
+
+        variable_states = None
+        raw_states = result.get("variable_states")
+        if raw_states:
+            variable_states = [VariableState(**vs) for vs in raw_states]
+
+        return RunOptimizationResponse(
+            success=True,
+            merit_before=result.get("merit_before"),
+            merit_after=result.get("merit_after"),
+            cycles_completed=result.get("cycles_completed"),
+            operand_results=result.get("operand_results"),
+            variable_states=variable_states,
+        )
+
+    def _call_handler():
+        operand_dicts = None
+        if request.operand_rows:
+            operand_dicts = [row.model_dump() for row in request.operand_rows]
+        return zospy_handler.run_optimization(
+            algorithm=request.algorithm,
+            cycles=request.cycles,
+            operand_rows=operand_dicts,
+            setup_wizard=request.setup_wizard,
+            wizard_params=request.wizard_params,
+        )
+
+    return await _run_endpoint(
+        "/run-optimization", RunOptimizationResponse, request,
+        _call_handler,
+        build_response=_build_response,
+    )
+
+
 class OperandParameterInfo(BaseModel):
     """Metadata for a single operand parameter column."""
     column: str = Field(description="Column name: Comment, Param1-Param8")

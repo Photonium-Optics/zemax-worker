@@ -2099,12 +2099,11 @@ class ZosPyHandler:
 
             # Determine field unit from system
             fields = self.oss.SystemData.Fields
-            field_type_str = ""
             try:
                 ft = fields.GetFieldType()
-                field_type_str = ft.name if hasattr(ft, 'name') else str(ft).split(".")[-1]
+                field_type_str = getattr(ft, 'name', str(ft).split(".")[-1])
             except Exception:
-                pass
+                field_type_str = ""
             field_unit = "deg" if "angle" in field_type_str.lower() else "mm"
 
             # Snap num_field_points to nearest FieldDensity enum value (multiples of 5, 5-100)
@@ -2122,63 +2121,50 @@ class ZosPyHandler:
                 )
 
                 settings = analysis.Settings
+                rms_consts = self._zp.constants.Analysis.Settings.RMS
+
+                def _set_setting(attr: str, value: Any, label: str = "") -> None:
+                    """Set a setting attribute, logging warnings on failure."""
+                    if not hasattr(settings, attr):
+                        return
+                    try:
+                        setattr(settings, attr, value)
+                    except Exception as e:
+                        logger.warning(f"RmsField: Could not set {label or attr}: {e}")
+
+                def _get_enum_value(enum_cls: Any, name: str) -> Any:
+                    """Get an enum value by name, returning None if not found."""
+                    value = getattr(enum_cls, name, None)
+                    if value is None:
+                        logger.warning(f"RmsField: Enum value '{name}' not found on {enum_cls}")
+                    return value
 
                 # Data = SpotRadius (RMS spot radius)
-                if hasattr(settings, 'Data'):
-                    try:
-                        data_types = self._zp.constants.Analysis.Settings.RMS.DataType
-                        settings.Data = data_types.SpotRadius
-                    except Exception as e:
-                        logger.warning(f"RmsField: Could not set Data type: {e}")
+                data_type = _get_enum_value(rms_consts.DataType, 'SpotRadius')
+                if data_type is not None:
+                    _set_setting('Data', data_type, 'Data type')
 
                 # FieldDensity
-                if hasattr(settings, 'FieldDensity'):
-                    try:
-                        fd_enum = self._zp.constants.Analysis.Settings.RMS.FieldDensities
-                        fd_name = f"FieldDens_{snapped}"
-                        if hasattr(fd_enum, fd_name):
-                            settings.FieldDensity = getattr(fd_enum, fd_name)
-                        else:
-                            logger.warning(f"RmsField: FieldDensity enum '{fd_name}' not found, using default")
-                    except Exception as e:
-                        logger.warning(f"RmsField: Could not set FieldDensity: {e}")
+                fd_value = _get_enum_value(rms_consts.FieldDensities, f"FieldDens_{snapped}")
+                if fd_value is not None:
+                    _set_setting('FieldDensity', fd_value)
 
                 # RayDensity
-                if hasattr(settings, 'RayDensity'):
-                    try:
-                        rd_enum = self._zp.constants.Analysis.Settings.RMS.RayDensities
-                        rd_name = f"RayDens_{ray_density}"
-                        if hasattr(rd_enum, rd_name):
-                            settings.RayDensity = getattr(rd_enum, rd_name)
-                        else:
-                            logger.warning(f"RmsField: RayDensity enum '{rd_name}' not found, using default")
-                    except Exception as e:
-                        logger.warning(f"RmsField: Could not set RayDensity: {e}")
+                rd_value = _get_enum_value(rms_consts.RayDensities, f"RayDens_{ray_density}")
+                if rd_value is not None:
+                    _set_setting('RayDensity', rd_value)
 
                 # ReferTo
-                if hasattr(settings, 'ReferTo'):
-                    try:
-                        refer_enum = self._zp.constants.Analysis.Settings.RMS.ReferTo
-                        if reference == "chief_ray" and hasattr(refer_enum, 'ChiefRay'):
-                            settings.ReferTo = refer_enum.ChiefRay
-                        elif hasattr(refer_enum, 'Centroid'):
-                            settings.ReferTo = refer_enum.Centroid
-                    except Exception as e:
-                        logger.warning(f"RmsField: Could not set ReferTo: {e}")
+                refer_name = "ChiefRay" if reference == "chief_ray" else "Centroid"
+                refer_value = _get_enum_value(rms_consts.ReferTo, refer_name)
+                if refer_value is not None:
+                    _set_setting('ReferTo', refer_value)
 
                 # Wavelength
-                if hasattr(settings, 'Wavelength'):
-                    try:
-                        settings.Wavelength.SetWavelengthNumber(wavelength_index)
-                    except Exception as e:
-                        logger.warning(f"RmsField: Could not set Wavelength: {e}")
+                self._configure_analysis_settings(settings, wavelength_index=wavelength_index)
 
                 # ShowDiffractionLimit
-                if hasattr(settings, 'ShowDiffractionLimit'):
-                    try:
-                        settings.ShowDiffractionLimit = True
-                    except Exception as e:
-                        logger.warning(f"RmsField: Could not set ShowDiffractionLimit: {e}")
+                _set_setting('ShowDiffractionLimit', True)
 
                 rms_start = time.perf_counter()
                 try:
@@ -2202,17 +2188,17 @@ class ZosPyHandler:
                             if series is None:
                                 continue
 
-                            desc = str(series.Description) if hasattr(series, 'Description') else ""
+                            desc = str(getattr(series, 'Description', ""))
                             desc_lower = desc.lower()
-                            n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
+                            n_points = getattr(series, 'NumberOfPoints', 0)
                             logger.debug(f"RmsField series {si}: desc='{desc}', points={n_points}")
 
                             series_points = []
                             for pi in range(n_points):
                                 pt = series.GetDataPoint(pi)
                                 if pt is not None:
-                                    x_val = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
-                                    y_val = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
+                                    x_val = _extract_value(getattr(pt, 'X', pt[0]))
+                                    y_val = _extract_value(getattr(pt, 'Y', pt[1]))
                                     series_points.append({
                                         "field_value": x_val,
                                         "rms_radius_um": y_val,
@@ -3076,6 +3062,231 @@ class ZosPyHandler:
                 "is_read_only": True,
                 "default_value": None,
             }
+
+
+    def run_optimization(
+        self,
+        algorithm: str = "DLS",
+        cycles: int = 5,
+        operand_rows: list[dict] | None = None,
+        setup_wizard: bool = False,
+        wizard_params: dict | None = None,
+    ) -> dict[str, Any]:
+        """
+        Run OpticStudio's local or hammer optimization for N cycles.
+
+        Args:
+            algorithm: "DLS" (damped least squares) or "Hammer"
+            cycles: Number of automatic cycles (1-50)
+            operand_rows: Explicit MFE operand rows (if not using wizard)
+            setup_wizard: If True, use SEQOptimizationWizard2 to populate MFE
+            wizard_params: Parameters for the wizard (criterion, rings, etc.)
+
+        Returns:
+            Dict with merit_before, merit_after, cycles_completed,
+            operand_results, variable_states
+        """
+        zp = self._zp
+        mfe = self.oss.MFE
+        lde = self.oss.LDE
+
+        # Step 1: Populate MFE
+        if setup_wizard:
+            params = wizard_params or {}
+            wizard_result = self.apply_optimization_wizard(**params)
+            if not wizard_result.get("success"):
+                return {
+                    "success": False,
+                    "error": f"Wizard setup failed: {wizard_result.get('error')}",
+                }
+        elif operand_rows:
+            mfe_result = self.evaluate_merit_function(operand_rows)
+            if not mfe_result.get("success"):
+                return {
+                    "success": False,
+                    "error": f"MFE setup failed: {mfe_result.get('error')}",
+                }
+        else:
+            return {
+                "success": False,
+                "error": "Must provide either operand_rows or setup_wizard=True",
+            }
+
+        # Step 2: Read initial merit
+        try:
+            merit_before = _extract_value(mfe.CalculateMeritFunction())
+        except Exception as e:
+            return {"success": False, "error": f"Initial merit calculation failed: {e}"}
+
+        # Step 3: Run optimization
+        try:
+            tools = self.oss.Tools
+            if algorithm.upper() == "HAMMER":
+                opt_tool = tools.OpenHammerOptimization()
+            else:
+                opt_tool = tools.OpenLocalOptimization()
+
+            # Clamp cycles
+            cycles = max(1, min(cycles, 50))
+
+            if hasattr(opt_tool, 'NumberOfAutomaticCycles'):
+                opt_tool.NumberOfAutomaticCycles = cycles
+
+            # Set algorithm (DLS only has one variant)
+            if algorithm.upper() == "DLS" and hasattr(opt_tool, 'Algorithm'):
+                try:
+                    dls_alg = getattr(
+                        zp.constants.Tools.Optimization.OptimizationAlgorithm,
+                        "DampedLeastSquares", None
+                    )
+                    if dls_alg is not None:
+                        opt_tool.Algorithm = dls_alg
+                except Exception:
+                    pass  # Use default algorithm
+
+            opt_tool.RunAndWaitForCompletion()
+            opt_tool.Close()
+
+        except Exception as e:
+            logger.error(f"Optimization run failed: {e}")
+            return {"success": False, "error": f"Optimization failed: {e}"}
+
+        # Step 4: Read final merit
+        try:
+            merit_after = _extract_value(mfe.CalculateMeritFunction())
+        except Exception as e:
+            merit_after = merit_before
+            logger.warning(f"Post-optimization merit calculation failed: {e}")
+
+        # Step 5: Read operand results from MFE
+        operand_results = []
+        try:
+            mfe_cols = zp.constants.Editors.MFE.MeritColumn
+            param_columns = [
+                mfe_cols.Param1, mfe_cols.Param2,
+                mfe_cols.Param3, mfe_cols.Param4,
+                mfe_cols.Param5, mfe_cols.Param6,
+            ]
+            num_operands = mfe.NumberOfOperands
+            for i in range(1, num_operands + 1):
+                try:
+                    op = mfe.GetOperandAt(i)
+                    try:
+                        op_code = str(op.Type).split('.')[-1]
+                    except Exception:
+                        op_code = f"UNK_{i}"
+
+                    params = []
+                    for j, col in enumerate(param_columns):
+                        try:
+                            cell = op.GetOperandCell(col)
+                            raw = float(cell.IntegerValue if j < 2 else cell.DoubleValue)
+                            params.append(None if (math.isinf(raw) or math.isnan(raw)) else raw)
+                        except Exception:
+                            params.append(None)
+
+                    operand_results.append({
+                        "row_index": i - 1,
+                        "operand_code": op_code,
+                        "params": params,
+                        "target": _extract_value(op.Target, 0.0),
+                        "weight": _extract_value(op.Weight, 0.0),
+                        "value": _extract_value(op.Value, None),
+                        "contribution": _extract_value(op.Contribution, None),
+                    })
+                except Exception as e:
+                    logger.warning(f"Error reading post-opt MFE row {i}: {e}")
+        except Exception as e:
+            logger.warning(f"Error reading post-optimization MFE: {e}")
+
+        # Step 6: Extract variable states from LDE
+        variable_states = self._extract_variable_states()
+
+        result = {
+            "success": True,
+            "merit_before": merit_before,
+            "merit_after": merit_after,
+            "cycles_completed": cycles,
+            "operand_results": operand_results,
+            "variable_states": variable_states,
+        }
+        _log_raw_output("/run-optimization", result)
+        return result
+
+    def _extract_variable_states(self) -> list[dict[str, Any]]:
+        """
+        Extract current values of all variable parameters from the LDE.
+
+        Iterates all surfaces and checks if radius, thickness, or conic
+        is marked as variable. Returns a list of variable state dicts.
+
+        Returns:
+            List of {surface_index, parameter, value, is_variable}
+        """
+        lde = self.oss.LDE
+        variable_states = []
+
+        try:
+            num_surfaces = lde.NumberOfSurfaces
+            for surf_idx in range(num_surfaces):
+                try:
+                    surf = lde.GetSurfaceAt(surf_idx)
+
+                    # Check radius
+                    try:
+                        radius_cell = surf.RadiusCell
+                        if hasattr(radius_cell, 'GetSolveData'):
+                            solve = radius_cell.GetSolveData()
+                            solve_type = str(solve.Type).split('.')[-1] if solve else ""
+                            if solve_type == "Variable":
+                                variable_states.append({
+                                    "surface_index": surf_idx,
+                                    "parameter": "radius",
+                                    "value": _extract_value(surf.Radius, 0.0),
+                                    "is_variable": True,
+                                })
+                    except Exception:
+                        pass
+
+                    # Check thickness
+                    try:
+                        thickness_cell = surf.ThicknessCell
+                        if hasattr(thickness_cell, 'GetSolveData'):
+                            solve = thickness_cell.GetSolveData()
+                            solve_type = str(solve.Type).split('.')[-1] if solve else ""
+                            if solve_type == "Variable":
+                                variable_states.append({
+                                    "surface_index": surf_idx,
+                                    "parameter": "thickness",
+                                    "value": _extract_value(surf.Thickness, 0.0),
+                                    "is_variable": True,
+                                })
+                    except Exception:
+                        pass
+
+                    # Check conic
+                    try:
+                        conic_cell = surf.ConicCell
+                        if hasattr(conic_cell, 'GetSolveData'):
+                            solve = conic_cell.GetSolveData()
+                            solve_type = str(solve.Type).split('.')[-1] if solve else ""
+                            if solve_type == "Variable":
+                                variable_states.append({
+                                    "surface_index": surf_idx,
+                                    "parameter": "conic",
+                                    "value": _extract_value(surf.Conic, 0.0),
+                                    "is_variable": True,
+                                })
+                    except Exception:
+                        pass
+
+                except Exception as e:
+                    logger.debug(f"Error reading surface {surf_idx} variables: {e}")
+
+        except Exception as e:
+            logger.warning(f"Error extracting variable states: {e}")
+
+        return variable_states
 
 
 class ZosPyError(Exception):
