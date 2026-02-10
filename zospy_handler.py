@@ -3167,11 +3167,24 @@ class ZosPyHandler:
                 settings.Wavelength.SetWavelengthNumber(wavelength_index)
             except Exception:
                 pass
-        if sampling is not None and hasattr(settings, 'SampleSize'):
-            try:
-                settings.SampleSize = SAMPLING_ENUM_MAP.get(sampling, 2)
-            except Exception:
-                pass
+        if sampling is not None:
+            sample_value = SAMPLING_ENUM_MAP.get(sampling, 2)
+            if hasattr(settings, 'SampleSize'):
+                try:
+                    settings.SampleSize = sample_value
+                except Exception:
+                    pass
+            # Huygens analyses use PupilSampleSize/ImageSampleSize instead of SampleSize
+            if hasattr(settings, 'PupilSampleSize'):
+                try:
+                    settings.PupilSampleSize = sample_value
+                except Exception:
+                    pass
+            if hasattr(settings, 'ImageSampleSize'):
+                try:
+                    settings.ImageSampleSize = sample_value
+                except Exception:
+                    pass
 
     def _get_fno(self) -> Optional[float]:
         """
@@ -4789,51 +4802,13 @@ class ZosPyHandler:
                     pop_elapsed_ms = (time.perf_counter() - pop_start) * 1000
                     log_timing(logger, "PhysicalOpticsPropagation.run", pop_elapsed_ms)
 
-                if pop_result is not None and hasattr(pop_result, 'data') and pop_result.data is not None:
-                    data = pop_result.data
-                    arr = None
-
-                    # Try .values (numpy ndarray from DataFrame)
-                    if hasattr(data, 'values') and data.values is not None:
-                        try:
-                            arr = data.values
-                            if isinstance(arr, np.ndarray) and arr.size > 0:
-                                arr = arr.astype(np.float64)
-                        except Exception:
-                            arr = None
-
-                    # Try to_numpy() for DataFrame
-                    if arr is None and hasattr(data, 'to_numpy'):
-                        try:
-                            arr = data.to_numpy().astype(np.float64)
-                        except Exception:
-                            arr = None
-
-                    # Direct ndarray
-                    if arr is None and isinstance(data, np.ndarray):
-                        arr = data.astype(np.float64)
-
-                    if arr is not None and arr.size > 0:
-                        image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
-                        array_shape = list(arr.shape)
-                        array_dtype = str(arr.dtype)
-                        logger.info(f"POP: Extracted data array shape={arr.shape}")
-
-                # Extract metadata
-                if pop_result is not None and hasattr(pop_result, 'metadata'):
-                    try:
-                        meta = pop_result.metadata
-                        if meta is not None:
-                            for attr_name in dir(meta):
-                                if not attr_name.startswith('_'):
-                                    try:
-                                        val = getattr(meta, attr_name)
-                                        if isinstance(val, (int, float, str, bool)):
-                                            result_beam_params[attr_name] = val
-                                    except Exception:
-                                        pass
-                    except Exception as e:
-                        logger.warning(f"POP: Failed to extract metadata: {e}")
+                if pop_result is not None and hasattr(pop_result, 'values') and hasattr(pop_result, 'size') and pop_result.size > 0:
+                    # ZosPy wrapper returns a pandas DataFrame directly
+                    arr = pop_result.values.astype(np.float64)
+                    image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                    array_shape = list(arr.shape)
+                    array_dtype = str(arr.dtype)
+                    logger.info(f"POP: Extracted data array shape={arr.shape}")
 
             except Exception as e:
                 logger.warning(f"POP high-level wrapper failed: {e}, trying raw API")
