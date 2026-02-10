@@ -122,8 +122,12 @@ def _backoff_delay() -> float:
     )
 
 
-def _reconnect_zospy() -> Optional[ZosPyHandler]:
-    """Attempt to reconnect to OpticStudio with exponential backoff."""
+async def _reconnect_zospy() -> Optional[ZosPyHandler]:
+    """
+    Attempt to reconnect to OpticStudio with exponential backoff.
+
+    Caller MUST hold _zospy_lock.
+    """
     global zospy_handler, _reconnect_failures, _last_reconnect_attempt
 
     now = time.monotonic()
@@ -151,7 +155,7 @@ def _reconnect_zospy() -> Optional[ZosPyHandler]:
         logger.info(
             f"Waiting {_RECONNECT_COM_RELEASE_DELAY}s for COM license release..."
         )
-        time.sleep(_RECONNECT_COM_RELEASE_DELAY)
+        await asyncio.sleep(_RECONNECT_COM_RELEASE_DELAY)
 
     logger.info("Attempting to reconnect to OpticStudio...")
     zospy_handler = _init_zospy()
@@ -168,26 +172,21 @@ def _reconnect_zospy() -> Optional[ZosPyHandler]:
     return zospy_handler
 
 
-def _ensure_connected() -> Optional[ZosPyHandler]:
-    """
-    Ensure ZosPy is connected, attempting reconnection if needed.
-
-    Returns:
-        ZosPyHandler if connected, None if connection failed.
-    """
+async def _ensure_connected() -> Optional[ZosPyHandler]:
+    """Ensure ZosPy is connected, attempting reconnection if needed. Caller MUST hold _zospy_lock."""
     global zospy_handler
     if zospy_handler is None:
-        zospy_handler = _reconnect_zospy()
+        zospy_handler = await _reconnect_zospy()
     return zospy_handler
 
 
-def _handle_zospy_error(operation_name: str, error: Exception) -> None:
+async def _handle_zospy_error(operation_name: str, error: Exception) -> None:
     """Handle errors from ZosPy operations, reconnecting only when the connection is dead."""
     global zospy_handler
 
     if isinstance(error, ZosPyError):
         logger.error(f"{operation_name} ZosPyError: {error}")
-        zospy_handler = _reconnect_zospy()
+        zospy_handler = await _reconnect_zospy()
         return
 
     # Generic exception (COM/analysis). Only reconnect if the connection died;
@@ -197,7 +196,7 @@ def _handle_zospy_error(operation_name: str, error: Exception) -> None:
         logger.info(f"{operation_name}: connection still alive, not reconnecting")
     else:
         logger.warning(f"{operation_name}: connection dead, reconnecting...")
-        zospy_handler = _reconnect_zospy()
+        zospy_handler = await _reconnect_zospy()
 
 
 async def verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
@@ -232,7 +231,7 @@ async def _run_endpoint(
     """
     with timed_operation(logger, endpoint_name):
         async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
-            if _ensure_connected() is None:
+            if await _ensure_connected() is None:
                 error_msg = f"{NOT_CONNECTED_ERROR}: {_last_connection_error}" if _last_connection_error else NOT_CONNECTED_ERROR
                 return response_cls(success=False, error=error_msg)
 
@@ -257,7 +256,7 @@ async def _run_endpoint(
                     if k not in ("success", "error") and k in model_fields
                 })
             except Exception as e:
-                _handle_zospy_error(endpoint_name, e)
+                await _handle_zospy_error(endpoint_name, e)
                 return response_cls(success=False, error=str(e))
 
 
@@ -818,7 +817,7 @@ async def load_system(request: SystemRequest, _: None = Depends(verify_api_key))
     """Load an optical system into OpticStudio from zmx_content."""
     with timed_operation(logger, "/load-system"):
         async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
-            if _ensure_connected() is None:
+            if await _ensure_connected() is None:
                 error_msg = f"{NOT_CONNECTED_ERROR}: {_last_connection_error}" if _last_connection_error else NOT_CONNECTED_ERROR
                 return LoadSystemResponse(success=False, error=error_msg)
 
@@ -830,7 +829,7 @@ async def load_system(request: SystemRequest, _: None = Depends(verify_api_key))
                     efl=result.get("efl"),
                 )
             except Exception as e:
-                _handle_zospy_error("Load system", e)
+                await _handle_zospy_error("Load system", e)
                 return LoadSystemResponse(success=False, error=str(e))
 
 
@@ -1285,7 +1284,7 @@ async def get_operand_catalog(
     """
     with timed_operation(logger, "/operand-catalog"):
         async with timed_lock_acquire(_zospy_lock, logger, name="zospy"):
-            if _ensure_connected() is None:
+            if await _ensure_connected() is None:
                 error_msg = f"{NOT_CONNECTED_ERROR}: {_last_connection_error}" if _last_connection_error else NOT_CONNECTED_ERROR
                 return OperandCatalogResponse(success=False, error=error_msg)
 
@@ -1305,7 +1304,7 @@ async def get_operand_catalog(
                     if k not in ("success", "error") and k in model_fields
                 })
             except Exception as e:
-                _handle_zospy_error("/operand-catalog", e)
+                await _handle_zospy_error("/operand-catalog", e)
                 return OperandCatalogResponse(success=False, error=str(e))
 
 
