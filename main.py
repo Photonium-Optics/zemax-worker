@@ -754,7 +754,7 @@ async def health_check() -> HealthResponse:
         )
     except asyncio.CancelledError:
         # wait_for may have acquired the lock before cancellation propagated
-        if _zospy_lock.locked():
+        if lock_acquired:
             _zospy_lock.release()
         raise
 
