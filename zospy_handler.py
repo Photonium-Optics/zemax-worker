@@ -2116,7 +2116,7 @@ class ZosPyHandler:
                 idm = self._zp.constants.Analysis.AnalysisIDM
                 analysis = self._zp.analyses.new_analysis(
                     self.oss,
-                    idm.RmsField,
+                    idm.RMSField,
                     settings_first=True,
                 )
 
@@ -2533,9 +2533,19 @@ class ZosPyHandler:
 
         for row_index, row in enumerate(operand_rows):
             code = row.get("operand_code", "")
-            params = row.get("params", [])
+            params = list(row.get("params", []))
             target = float(row.get("target", 0))
             weight = float(row.get("weight", 1))
+
+            # Resolve semantic pseudo-codes to real Zemax operands
+            if code == "BFD_SEMANTIC":
+                # Back focal distance = TTHI from last glass surface to image surface
+                # Int1 = last surface before image, Int2 = image surface
+                num_surf = self.oss.LDE.NumberOfSurfaces
+                image_surf = num_surf - 1  # 0-based, image is last
+                last_before_image = image_surf - 1
+                code = "TTHI"
+                params = [last_before_image, image_surf, None, None, None, None]
 
             # Resolve operand type enum
             try:
@@ -3144,8 +3154,10 @@ class ZosPyHandler:
                 except Exception:
                     pass  # Use default algorithm
 
-            opt_tool.RunAndWaitForCompletion()
-            opt_tool.Close()
+            try:
+                opt_tool.RunAndWaitForCompletion()
+            finally:
+                opt_tool.Close()
 
         except Exception as e:
             logger.error(f"Optimization run failed: {e}")
@@ -3228,7 +3240,10 @@ class ZosPyHandler:
 
         try:
             num_surfaces = lde.NumberOfSurfaces
-            for surf_idx in range(num_surfaces):
+            # Start at surface 1 (skip object surface 0).
+            # Return surf_idx as-is (1-based Zemax LDE index) — the analysis
+            # service's surface_patcher converts to 0-based LLM index.
+            for surf_idx in range(1, num_surfaces):
                 try:
                     surf = lde.GetSurfaceAt(surf_idx)
 

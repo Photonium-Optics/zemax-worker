@@ -79,12 +79,11 @@ zospy_handler: Optional[ZosPyHandler] = None
 _last_connection_error: Optional[str] = None
 
 # Reconnect backoff: prevents rapid reconnect loops that starve the license.
-# After a failed reconnect, we wait increasingly longer before trying again.
-_RECONNECT_BACKOFF_BASE = 3.0  # seconds — base wait between reconnect attempts
-_RECONNECT_BACKOFF_MAX = 60.0  # seconds — max backoff cap
-_RECONNECT_COM_RELEASE_DELAY = 2.0  # seconds — wait after close() for COM cleanup
-_reconnect_failures = 0  # consecutive reconnect failures
-_last_reconnect_attempt: float = 0.0  # monotonic timestamp of last attempt
+_RECONNECT_BACKOFF_BASE = 3.0   # seconds
+_RECONNECT_BACKOFF_MAX = 60.0   # seconds
+_RECONNECT_COM_RELEASE_DELAY = 2.0  # seconds to wait after close() for COM cleanup
+_reconnect_failures = 0
+_last_reconnect_attempt: float = 0.0
 
 # Async lock - serializes ZosPy operations within this process
 # Each uvicorn worker process has its own lock and OpticStudio connection
@@ -106,51 +105,40 @@ def _init_zospy() -> Optional[ZosPyHandler]:
 
 
 def _is_connection_alive() -> bool:
-    """
-    Lightweight probe to check if the OpticStudio COM connection is still alive.
-
-    Returns True if zospy_handler exists and can communicate with OpticStudio.
-    Returns False if the connection is dead (COM error, process crashed, etc.).
-    """
+    """Check if the OpticStudio COM connection is still responsive."""
     if zospy_handler is None:
         return False
     try:
-        # get_version() accesses self.oss.Application.ZemaxVersion via COM.
-        # If the connection is dead, this will throw.
-        version = zospy_handler.get_version()
-        return version != "Unknown"
+        return zospy_handler.get_version() != "Unknown"
     except Exception:
         return False
 
 
-def _reconnect_zospy() -> Optional[ZosPyHandler]:
-    """
-    Attempt to reconnect to OpticStudio after a failure.
+def _backoff_delay() -> float:
+    """Compute the current exponential backoff delay in seconds."""
+    return min(
+        _RECONNECT_BACKOFF_BASE * (2 ** (_reconnect_failures - 1)),
+        _RECONNECT_BACKOFF_MAX,
+    )
 
-    Includes backoff to prevent rapid reconnect loops that exhaust license seats.
-    After close(), waits for COM to release the license before reconnecting.
-    """
+
+def _reconnect_zospy() -> Optional[ZosPyHandler]:
+    """Attempt to reconnect to OpticStudio with exponential backoff."""
     global zospy_handler, _reconnect_failures, _last_reconnect_attempt
 
-    # Backoff: if we've failed recently, don't try again too soon.
     now = time.monotonic()
     if _reconnect_failures > 0:
-        backoff = min(
-            _RECONNECT_BACKOFF_BASE * (2 ** (_reconnect_failures - 1)),
-            _RECONNECT_BACKOFF_MAX,
-        )
+        backoff = _backoff_delay()
         elapsed = now - _last_reconnect_attempt
         if elapsed < backoff:
-            remaining = backoff - elapsed
             logger.warning(
-                f"Reconnect backoff: {remaining:.1f}s remaining "
-                f"(attempt {_reconnect_failures}, backoff {backoff:.0f}s)"
+                f"Reconnect backoff: {backoff - elapsed:.1f}s remaining "
+                f"(attempt {_reconnect_failures})"
             )
             return None
 
-    _last_reconnect_attempt = time.monotonic()
+    _last_reconnect_attempt = now
 
-    # Clean up existing connection if any
     if zospy_handler:
         try:
             zospy_handler.close()
@@ -158,9 +146,8 @@ def _reconnect_zospy() -> Optional[ZosPyHandler]:
             pass
         zospy_handler = None
 
-        # Wait for COM to release the license seat. Without this delay,
-        # the new connect() races with Windows COM reference counting and
-        # sees the seat as still occupied → "Licence is not valid for API".
+        # Wait for COM to release the license seat before reconnecting,
+        # otherwise the new connect() sees it as still occupied.
         logger.info(
             f"Waiting {_RECONNECT_COM_RELEASE_DELAY}s for COM license release..."
         )
@@ -170,12 +157,12 @@ def _reconnect_zospy() -> Optional[ZosPyHandler]:
     zospy_handler = _init_zospy()
 
     if zospy_handler is not None:
-        _reconnect_failures = 0  # Reset on success
+        _reconnect_failures = 0
     else:
         _reconnect_failures += 1
         logger.warning(
             f"Reconnect failed (attempt {_reconnect_failures}, "
-            f"next backoff {min(_RECONNECT_BACKOFF_BASE * (2 ** (_reconnect_failures - 1)), _RECONNECT_BACKOFF_MAX):.0f}s)"
+            f"next backoff {_backoff_delay():.0f}s)"
         )
 
     return zospy_handler
@@ -195,32 +182,22 @@ def _ensure_connected() -> Optional[ZosPyHandler]:
 
 
 def _handle_zospy_error(operation_name: str, error: Exception) -> None:
-    """
-    Handle errors from ZosPy operations.
-
-    Only triggers reconnection if the connection is actually dead.
-    Transient analysis errors (bad surface data, unsupported config, etc.)
-    are logged but do NOT destroy the existing working connection.
-    """
+    """Handle errors from ZosPy operations, reconnecting only when the connection is dead."""
     global zospy_handler
 
     if isinstance(error, ZosPyError):
         logger.error(f"{operation_name} ZosPyError: {error}")
-        # ZosPyError can come from init failures or file-not-found — always reconnect
         zospy_handler = _reconnect_zospy()
+        return
+
+    # Generic exception (COM/analysis). Only reconnect if the connection died;
+    # transient analysis errors should not destroy a working connection.
+    logger.error(f"{operation_name} failed: {error}")
+    if _is_connection_alive():
+        logger.info(f"{operation_name}: connection still alive, not reconnecting")
     else:
-        # Generic Exception from COM/analysis. Check if connection is still alive
-        # before destroying it — most analysis errors are transient.
-        logger.error(f"{operation_name} failed: {error}")
-        if not _is_connection_alive():
-            logger.warning(
-                f"{operation_name}: connection dead after error, reconnecting..."
-            )
-            zospy_handler = _reconnect_zospy()
-        else:
-            logger.info(
-                f"{operation_name}: connection still alive, not reconnecting"
-            )
+        logger.warning(f"{operation_name}: connection dead, reconnecting...")
+        zospy_handler = _reconnect_zospy()
 
 
 async def verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
