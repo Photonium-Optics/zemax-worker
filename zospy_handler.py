@@ -3169,22 +3169,14 @@ class ZosPyHandler:
                 pass
         if sampling is not None:
             sample_value = SAMPLING_ENUM_MAP.get(sampling, 2)
-            if hasattr(settings, 'SampleSize'):
-                try:
-                    settings.SampleSize = sample_value
-                except Exception:
-                    pass
-            # Huygens analyses use PupilSampleSize/ImageSampleSize instead of SampleSize
-            if hasattr(settings, 'PupilSampleSize'):
-                try:
-                    settings.PupilSampleSize = sample_value
-                except Exception:
-                    pass
-            if hasattr(settings, 'ImageSampleSize'):
-                try:
-                    settings.ImageSampleSize = sample_value
-                except Exception:
-                    pass
+            # SampleSize is the standard attribute; Huygens analyses use
+            # PupilSampleSize/ImageSampleSize instead.
+            for attr in ('SampleSize', 'PupilSampleSize', 'ImageSampleSize'):
+                if hasattr(settings, attr):
+                    try:
+                        setattr(settings, attr, sample_value)
+                    except Exception:
+                        pass
 
     def _get_fno(self) -> Optional[float]:
         """
@@ -4788,7 +4780,6 @@ class ZosPyHandler:
             image_b64 = None
             array_shape = None
             array_dtype = None
-            result_beam_params = {}
 
             try:
                 pop_analysis = self._zp.analyses.physicaloptics.physical_optics_propagation.PhysicalOpticsPropagation(
@@ -4830,6 +4821,13 @@ class ZosPyHandler:
                             field_index=field_index,
                             wavelength_index=wavelength_index,
                         )
+                        # POP uses XSampling/YSampling instead of the generic SampleSize
+                        for attr, val in (('XSampling', x_sampling), ('YSampling', y_sampling)):
+                            if hasattr(settings, attr):
+                                try:
+                                    setattr(settings, attr, val)
+                                except Exception:
+                                    pass
 
                         pop_start2 = time.perf_counter()
                         try:
@@ -4874,7 +4872,7 @@ class ZosPyHandler:
                 "image_format": "numpy_array",
                 "array_shape": array_shape,
                 "array_dtype": array_dtype,
-                "beam_params": result_beam_params,
+                "beam_params": beam_params,
                 "wavelength_um": wavelength_um,
                 "field_x": field_x,
                 "field_y": field_y,
