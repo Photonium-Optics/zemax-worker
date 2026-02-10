@@ -2008,7 +2008,7 @@ class ZosPyHandler:
                         # Try to get data series
                         try:
                             num_series = results.NumberOfDataSeries
-                            logger.debug(f"MTF field {fi}: {num_series} data series")
+                            logger.info(f"MTF field {fi}: {num_series} data series")
                             unclassified = []
                             for si in range(num_series):
                                 series = results.GetDataSeries(si)
@@ -2018,7 +2018,7 @@ class ZosPyHandler:
                                 desc = str(series.Description) if hasattr(series, 'Description') else ""
                                 desc_lower = desc.lower()
                                 n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
-                                logger.debug(f"MTF field {fi} series {si}: desc='{desc}', points={n_points}")
+                                logger.info(f"MTF field {fi} series {si}: desc='{desc}', points={n_points}")
 
                                 # Skip diffraction limit series before extracting points
                                 if "diffrac" in desc_lower or "limit" in desc_lower:
@@ -2035,13 +2035,25 @@ class ZosPyHandler:
                                         series_x.append(x_val)
                                         series_y.append(y_val)
 
-                                # Classify series by description prefix:
-                                # ZosPy uses "TS ..." for tangential, "SS ..." for sagittal
-                                if desc_lower.startswith(("ts ", "ts,", "tangential")):
+                                # Classify series by description — match flexibly:
+                                # OpticStudio uses "TS ..." for tangential, "SS ..." for sagittal
+                                # but may also use full words or other prefixes depending on version
+                                is_tangential = (
+                                    desc_lower.startswith(("ts ", "ts,", "ts."))
+                                    or "tangential" in desc_lower
+                                    or desc_lower.startswith("t ")
+                                )
+                                is_sagittal = (
+                                    desc_lower.startswith(("ss ", "ss,", "ss."))
+                                    or "sagittal" in desc_lower
+                                    or desc_lower.startswith("s ")
+                                )
+
+                                if is_tangential and not tangential:
                                     tangential = series_y
                                     if not freq_data:
                                         freq_data = series_x
-                                elif desc_lower.startswith(("ss ", "ss,", "sagittal")):
+                                elif is_sagittal and not sagittal:
                                     sagittal = series_y
                                     if not freq_data:
                                         freq_data = series_x
@@ -4196,19 +4208,87 @@ class ZosPyHandler:
             coefficients_str = f"1-{maximum_term}"
 
             # Run ZernikeCoefficientsVsField using the new-style ZOSPy API
-            zernike_vs_field = self._zp.analyses.wavefront.ZernikeCoefficientsVsField(
-                coefficients=coefficients_str,
-                wavelength=wavelength_index,
-                sampling=sampling,
-                field_density=field_density,
-            )
-
-            zernike_start = time.perf_counter()
+            # ZosPy's parser can fail on certain input combinations in some versions,
+            # so we fall back to the raw new_analysis API if needed.
+            zernike_result = None
             try:
-                zernike_result = zernike_vs_field.run(self.oss)
-            finally:
-                zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
-                log_timing(logger, "ZernikeCoefficientsVsField.run", zernike_elapsed_ms)
+                zernike_vs_field = self._zp.analyses.wavefront.ZernikeCoefficientsVsField(
+                    coefficients=coefficients_str,
+                    wavelength=wavelength_index,
+                    sampling=sampling,
+                    field_density=field_density,
+                )
+
+                zernike_start = time.perf_counter()
+                try:
+                    zernike_result = zernike_vs_field.run(self.oss)
+                finally:
+                    zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
+                    log_timing(logger, "ZernikeCoefficientsVsField.run", zernike_elapsed_ms)
+            except Exception as wrapper_err:
+                logger.warning(f"ZernikeCoefficientsVsField wrapper failed ({wrapper_err}), falling back to new_analysis API")
+                # Fallback: use raw new_analysis API
+                idm = self._zp.constants.Analysis.AnalysisIDM
+                analysis = self._zp.analyses.new_analysis(
+                    self.oss, idm.ZernikeCoefficientsVsField, settings_first=True,
+                )
+                try:
+                    settings = analysis.Settings
+                    if hasattr(settings, 'MaximumNumberOfTerms'):
+                        settings.MaximumNumberOfTerms = maximum_term
+                    if hasattr(settings, 'Wavelength'):
+                        settings.Wavelength.SetWavelengthNumber(wavelength_index)
+                    if hasattr(settings, 'FieldDensity'):
+                        settings.FieldDensity = field_density
+
+                    zernike_start = time.perf_counter()
+                    try:
+                        analysis.ApplyAndWaitForCompletion()
+                    finally:
+                        zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
+                        log_timing(logger, "ZernikeCoefficientsVsField.run (fallback)", zernike_elapsed_ms)
+
+                    # Extract text-based data from the analysis results
+                    results = analysis.Results
+                    import pandas as pd
+
+                    # Build DataFrame from the grid results
+                    rows = []
+                    if results is not None and hasattr(results, 'NumberOfDataSeries'):
+                        num_series = results.NumberOfDataSeries
+                        logger.info(f"ZernikeVsField fallback: {num_series} data series")
+                        for si in range(num_series):
+                            series = results.GetDataSeries(si)
+                            if series is None:
+                                continue
+                            desc = str(series.Description) if hasattr(series, 'Description') else f"Z{si+1}"
+                            n_pts = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
+                            x_vals = []
+                            y_vals = []
+                            for pi in range(n_pts):
+                                pt = series.GetDataPoint(pi)
+                                if pt is not None:
+                                    x_vals.append(_extract_value(pt.X if hasattr(pt, 'X') else pt[0]))
+                                    y_vals.append(_extract_value(pt.Y if hasattr(pt, 'Y') else pt[1]))
+                            if x_vals:
+                                for xi, (x, y) in enumerate(zip(x_vals, y_vals)):
+                                    if xi >= len(rows):
+                                        rows.append({"field": x})
+                                    rows[xi][desc] = y
+
+                    if rows:
+                        df_fallback = pd.DataFrame(rows).set_index("field")
+                        # Create a mock result object
+                        class _MockResult:
+                            data = df_fallback
+                        zernike_result = _MockResult()
+                    else:
+                        return {"success": False, "error": "ZernikeCoefficientsVsField fallback returned no data series"}
+                finally:
+                    try:
+                        analysis.Close()
+                    except Exception:
+                        pass
 
             # Extract data from the result DataFrame
             if not hasattr(zernike_result, 'data') or zernike_result.data is None:
@@ -5065,7 +5145,18 @@ class ZosPyHandler:
             finally:
                 log_timing(logger, "RayFan.run", (time.perf_counter() - t0) * 1000)
 
-            df = rfr.to_dataframe()
+            # RayFanResult has to_dataframe() in newer ZosPy, but the worker
+            # may return a generic AnalysisResult with .data as a DataFrame.
+            if hasattr(rfr, 'to_dataframe'):
+                df = rfr.to_dataframe()
+            elif hasattr(rfr, 'data') and rfr.data is not None:
+                import pandas as pd
+                if isinstance(rfr.data, pd.DataFrame):
+                    df = rfr.data
+                else:
+                    return {"success": False, "error": f"RayFan result data is {type(rfr.data).__name__}, expected DataFrame"}
+            else:
+                return {"success": False, "error": "RayFan result has no data attribute"}
             logger.debug(f"RayFan df cols={list(df.columns)}, shape={df.shape}")
             if df.empty:
                 return {"success": False, "error": "RayFan returned empty data"}
