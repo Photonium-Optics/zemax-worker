@@ -2140,7 +2140,8 @@ class ZosPyHandler:
                     return value
 
                 # Data = SpotRadius (RMS spot radius)
-                data_type = _get_enum_value(rms_consts.DataType, 'SpotRadius')
+                # DataType lives under RMSField sub-namespace, not directly under RMS
+                data_type = _get_enum_value(rms_consts.RMSField.DataType, 'SpotRadius')
                 if data_type is not None:
                     _set_setting('Data', data_type, 'Data type')
 
