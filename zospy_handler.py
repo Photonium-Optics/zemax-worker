@@ -520,6 +520,63 @@ class ZosPyHandler:
             logger.error(f"get_paraxial failed: {e}")
             return {"success": False, "error": str(e)}
 
+    def get_cardinal_points(self) -> dict[str, Any]:
+        """
+        Get cardinal points of the optical system.
+
+        Reports principal planes, nodal points, focal points, anti-principal
+        planes, and anti-nodal planes for both object and image space.
+
+        Returns:
+            Dict with success flag and cardinal points data.
+        """
+        try:
+            result_obj = self._zp.analyses.reports.CardinalPoints().run(self.oss)
+            data = result_obj.data
+
+            # Build a flat list of cardinal point entries
+            cardinal_points = []
+            spec = data.cardinal_points
+
+            # Each attribute of CardinalPointSpecification is a CardinalPoint
+            # with .object (Object Space) and .image (Image Space) values.
+            point_names = [
+                ("Focal Length", spec.focal_length),
+                ("Focal Planes", spec.focal_planes),
+                ("Principal Planes", spec.principal_planes),
+                ("Anti-Principal Planes", spec.anti_principal_planes),
+                ("Nodal Planes", spec.nodal_planes),
+                ("Anti-Nodal Planes", spec.anti_nodal_planes),
+            ]
+
+            for name, point in point_names:
+                cardinal_points.append({
+                    "name": f"{name} (Object)",
+                    "value": float(point.object) if point.object is not None else None,
+                    "units": str(data.lens_units) if data.lens_units else "mm",
+                })
+                cardinal_points.append({
+                    "name": f"{name} (Image)",
+                    "value": float(point.image) if point.image is not None else None,
+                    "units": str(data.lens_units) if data.lens_units else "mm",
+                })
+
+            result = {
+                "success": True,
+                "cardinal_points": cardinal_points,
+                "starting_surface": data.starting_surface,
+                "ending_surface": data.ending_surface,
+                "wavelength": float(data.wavelength) if data.wavelength is not None else None,
+                "orientation": str(data.orientation) if data.orientation else None,
+                "lens_units": str(data.lens_units) if data.lens_units else "mm",
+            }
+            _log_raw_output("/cardinal-points", result)
+            return result
+
+        except Exception as e:
+            logger.error(f"get_cardinal_points failed: {e}")
+            return {"success": False, "error": str(e)}
+
     def get_cross_section(
         self,
         number_of_rays: int = DEFAULT_NUM_CROSS_SECTION_RAYS,
@@ -2061,6 +2118,457 @@ class ZosPyHandler:
         except Exception as e:
             return {"success": False, "error": f"MTF analysis failed: {e}"}
 
+    def get_huygens_mtf(
+        self,
+        field_index: int = 0,
+        wavelength_index: int = 1,
+        sampling: str = "64x64",
+        maximum_frequency: float = 0.0,
+    ) -> dict[str, Any]:
+        """
+        Get Huygens MTF data using ZosPy's Huygens MTF analysis.
+
+        More accurate than FFT MTF for systems with significant aberrations
+        or tilted/decentered elements.
+
+        This is a "dumb executor" — returns raw frequency/modulation data.
+        Image rendering happens on the Mac side.
+
+        Args:
+            field_index: Field index (0 = all fields, 1+ = specific field, 1-indexed)
+            wavelength_index: Wavelength index (1-indexed)
+            sampling: Pupil sampling grid (e.g., '64x64', '128x128')
+            maximum_frequency: Maximum spatial frequency (cycles/mm). 0 = auto (150).
+
+        Returns:
+            On success: {
+                "success": True,
+                "frequency": [...],
+                "fields": [{"field_index": int, "field_x": float, "field_y": float,
+                            "tangential": [...], "sagittal": [...]}],
+                "diffraction_limit": [...],
+                "cutoff_frequency": float,
+                "wavelength_um": float,
+            }
+            On error: {"success": False, "error": "..."}
+        """
+        try:
+            fields = self.oss.SystemData.Fields
+            num_fields = fields.NumberOfFields
+            wavelengths = self.oss.SystemData.Wavelengths
+
+            if wavelength_index > wavelengths.NumberOfWavelengths:
+                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
+
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+
+            # Determine which fields to analyze
+            if field_index == 0:
+                field_indices = list(range(1, num_fields + 1))
+            else:
+                if field_index > num_fields:
+                    return {"success": False, "error": f"Field index {field_index} out of range (max: {num_fields})"}
+                field_indices = [field_index]
+
+            # Get F/# for diffraction limit calculation
+            fno = self._get_fno()
+            if fno is None or fno <= 0:
+                fno = 5.0  # Fallback
+
+            # Calculate cutoff frequency: fc = 1 / (wavelength_mm * fno)
+            wavelength_mm = wavelength_um / 1000.0
+            cutoff_frequency = 1.0 / (wavelength_mm * fno)
+
+            all_fields_data = []
+            frequency = None
+
+            for fi in field_indices:
+                field = fields.GetField(fi)
+                field_x = _extract_value(field.X)
+                field_y = _extract_value(field.Y)
+
+                analysis = None
+                try:
+                    # Use new_analysis with HuygensMtf
+                    idm = self._zp.constants.Analysis.AnalysisIDM
+                    analysis = self._zp.analyses.new_analysis(
+                        self.oss,
+                        idm.HuygensMtf,
+                        settings_first=True,
+                    )
+
+                    # Configure settings
+                    settings = analysis.Settings
+                    self._configure_analysis_settings(
+                        settings,
+                        field_index=fi,
+                        wavelength_index=wavelength_index,
+                        sampling=sampling,
+                    )
+                    # Set maximum frequency if specified
+                    if maximum_frequency > 0 and hasattr(settings, 'MaximumFrequency'):
+                        try:
+                            settings.MaximumFrequency = maximum_frequency
+                        except Exception:
+                            pass
+
+                    mtf_start = time.perf_counter()
+                    try:
+                        analysis.ApplyAndWaitForCompletion()
+                    finally:
+                        mtf_elapsed_ms = (time.perf_counter() - mtf_start) * 1000
+                        log_timing(logger, f"HuygensMtf.run (field={fi})", mtf_elapsed_ms)
+
+                    # Extract data from results (same structure as FFT MTF)
+                    results = analysis.Results
+                    tangential = []
+                    sagittal = []
+                    freq_data = []
+
+                    if results is not None:
+                        try:
+                            num_series = results.NumberOfDataSeries
+                            logger.debug(f"Huygens MTF field {fi}: {num_series} data series")
+                            unclassified = []
+                            for si in range(num_series):
+                                series = results.GetDataSeries(si)
+                                if series is None:
+                                    continue
+
+                                desc = str(series.Description) if hasattr(series, 'Description') else ""
+                                desc_lower = desc.lower()
+                                n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
+                                logger.debug(f"Huygens MTF field {fi} series {si}: desc='{desc}', points={n_points}")
+
+                                # Skip diffraction limit series before extracting points
+                                if "diffrac" in desc_lower or "limit" in desc_lower:
+                                    logger.debug(f"Huygens MTF field {fi} series {si}: skipping (diffraction limit)")
+                                    continue
+
+                                series_x = []
+                                series_y = []
+                                for pi in range(n_points):
+                                    pt = series.GetDataPoint(pi)
+                                    if pt is not None:
+                                        x_val = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
+                                        y_val = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
+                                        series_x.append(x_val)
+                                        series_y.append(y_val)
+
+                                # Classify series by description prefix
+                                if desc_lower.startswith(("ts ", "ts,", "tangential")):
+                                    tangential = series_y
+                                    if not freq_data:
+                                        freq_data = series_x
+                                elif desc_lower.startswith(("ss ", "ss,", "sagittal")):
+                                    sagittal = series_y
+                                    if not freq_data:
+                                        freq_data = series_x
+                                else:
+                                    unclassified.append((series_x, series_y))
+
+                            # Fallback: assign unclassified series to missing slots
+                            if unclassified and (not tangential or not sagittal):
+                                logger.info(f"Huygens MTF field {fi}: using positional fallback for {len(unclassified)} unclassified series")
+                                idx = 0
+                                if not tangential and idx < len(unclassified):
+                                    x, tangential = unclassified[idx]
+                                    if not freq_data:
+                                        freq_data = x
+                                    idx += 1
+                                if not sagittal and idx < len(unclassified):
+                                    _, sagittal = unclassified[idx]
+                        except Exception as e:
+                            logger.warning(f"Huygens MTF: Could not extract data series for field {fi}: {e}")
+
+                    if frequency is None and freq_data:
+                        frequency = freq_data
+
+                    all_fields_data.append({
+                        "field_index": fi - 1,
+                        "field_x": field_x,
+                        "field_y": field_y,
+                        "tangential": tangential,
+                        "sagittal": sagittal,
+                    })
+
+                except Exception as e:
+                    logger.warning(f"Huygens MTF analysis failed for field {fi}: {e}")
+                    all_fields_data.append({
+                        "field_index": fi - 1,
+                        "field_x": field_x,
+                        "field_y": field_y,
+                        "tangential": [],
+                        "sagittal": [],
+                    })
+                finally:
+                    if analysis is not None:
+                        try:
+                            analysis.Close()
+                        except Exception:
+                            pass
+
+            # Generate frequency array if not obtained from analysis
+            if frequency is None or len(frequency) == 0:
+                max_freq = maximum_frequency if maximum_frequency > 0 else cutoff_frequency
+                frequency = list(np.linspace(0, max_freq, 64))
+
+            # Compute diffraction limit
+            freq_arr = np.array(frequency)
+            fn = np.clip(freq_arr / cutoff_frequency, 0.0, 1.0)
+            dl = np.where(
+                fn >= 1.0,
+                0.0,
+                (2.0 / np.pi) * (np.arccos(fn) - fn * np.sqrt(1.0 - fn * fn)),
+            )
+            diffraction_limit = dl.tolist()
+
+            result = {
+                "success": True,
+                "frequency": freq_arr.tolist(),
+                "fields": all_fields_data,
+                "diffraction_limit": diffraction_limit,
+                "cutoff_frequency": float(cutoff_frequency),
+                "wavelength_um": float(wavelength_um),
+            }
+            _log_raw_output("/huygens-mtf", result)
+            return result
+
+        except Exception as e:
+            return {"success": False, "error": f"Huygens MTF analysis failed: {e}"}
+
+    def get_through_focus_mtf(
+        self,
+        sampling: str = "64x64",
+        delta_focus: float = 0.1,
+        frequency: float = 0.0,
+        number_of_steps: int = 5,
+        field_index: int = 0,
+        wavelength_index: int = 1,
+    ) -> dict[str, Any]:
+        """
+        Get Through Focus MTF data using ZosPy's FFTThroughFocusMTF analysis.
+
+        Shows how MTF varies at different focus positions. Critical for
+        understanding depth of focus and finding best focus.
+
+        Args:
+            sampling: Pupil sampling grid (e.g., '64x64', '128x128')
+            delta_focus: Focus step size in mm
+            frequency: Spatial frequency in cycles/mm (0 = use default)
+            number_of_steps: Number of steps in each direction from focus (total = 2*steps+1)
+            field_index: Field index (0 = all fields, 1+ = specific field, 1-indexed)
+            wavelength_index: Wavelength index (1-indexed)
+
+        Returns:
+            On success: {
+                "success": True,
+                "focus_positions": [...],
+                "fields": [{"field_index": int, "field_x": float, "field_y": float,
+                            "tangential": [...], "sagittal": [...]}],
+                "best_focus": {"position": float, "mtf_value": float},
+                "frequency": float,
+                "wavelength_um": float,
+                "delta_focus": float,
+            }
+            On error: {"success": False, "error": "..."}
+        """
+        try:
+            fields = self.oss.SystemData.Fields
+            num_fields = fields.NumberOfFields
+            wavelengths = self.oss.SystemData.Wavelengths
+
+            if wavelength_index > wavelengths.NumberOfWavelengths:
+                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
+
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+
+            # Determine which fields to analyze
+            if field_index == 0:
+                field_indices = list(range(1, num_fields + 1))
+            else:
+                if field_index > num_fields:
+                    return {"success": False, "error": f"Field index {field_index} out of range (max: {num_fields})"}
+                field_indices = [field_index]
+
+            all_fields_data = []
+            focus_positions = None
+            best_focus_pos = 0.0
+            best_focus_mtf = 0.0
+
+            for fi in field_indices:
+                field = fields.GetField(fi)
+                field_x = _extract_value(field.X)
+                field_y = _extract_value(field.Y)
+
+                analysis = None
+                try:
+                    # Use new_analysis with FftThroughFocusMtf
+                    idm = self._zp.constants.Analysis.AnalysisIDM
+                    analysis = self._zp.analyses.new_analysis(
+                        self.oss,
+                        idm.FftThroughFocusMtf,
+                        settings_first=True,
+                    )
+
+                    # Configure settings
+                    settings = analysis.Settings
+                    self._configure_analysis_settings(
+                        settings,
+                        field_index=fi,
+                        wavelength_index=wavelength_index,
+                        sampling=sampling,
+                    )
+
+                    # Set through-focus specific settings
+                    if hasattr(settings, 'DeltaFocus'):
+                        try:
+                            settings.DeltaFocus = delta_focus
+                        except Exception:
+                            pass
+
+                    if frequency > 0 and hasattr(settings, 'Frequency'):
+                        try:
+                            settings.Frequency = frequency
+                        except Exception:
+                            pass
+
+                    if hasattr(settings, 'NumberOfSteps'):
+                        try:
+                            settings.NumberOfSteps = number_of_steps
+                        except Exception:
+                            pass
+
+                    mtf_start = time.perf_counter()
+                    try:
+                        analysis.ApplyAndWaitForCompletion()
+                    finally:
+                        mtf_elapsed_ms = (time.perf_counter() - mtf_start) * 1000
+                        log_timing(logger, f"FFTThroughFocusMtf.run (field={fi})", mtf_elapsed_ms)
+
+                    # Extract data from results
+                    results = analysis.Results
+                    tangential = []
+                    sagittal = []
+                    focus_data = []
+
+                    if results is not None:
+                        try:
+                            num_series = results.NumberOfDataSeries
+                            logger.debug(f"TF-MTF field {fi}: {num_series} data series")
+                            unclassified = []
+                            for si in range(num_series):
+                                series = results.GetDataSeries(si)
+                                if series is None:
+                                    continue
+
+                                desc = str(series.Description) if hasattr(series, 'Description') else ""
+                                desc_lower = desc.lower()
+                                n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
+                                logger.debug(f"TF-MTF field {fi} series {si}: desc='{desc}', points={n_points}")
+
+                                series_x = []
+                                series_y = []
+                                for pi in range(n_points):
+                                    pt = series.GetDataPoint(pi)
+                                    if pt is not None:
+                                        x_val = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
+                                        y_val = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
+                                        series_x.append(x_val)
+                                        series_y.append(y_val)
+
+                                # Classify by description: TS=tangential, SS=sagittal
+                                if desc_lower.startswith(("ts ", "ts,", "tangential")):
+                                    tangential = series_y
+                                    if not focus_data:
+                                        focus_data = series_x
+                                elif desc_lower.startswith(("ss ", "ss,", "sagittal")):
+                                    sagittal = series_y
+                                    if not focus_data:
+                                        focus_data = series_x
+                                else:
+                                    unclassified.append((series_x, series_y))
+
+                            # Fallback: assign unclassified series to missing slots
+                            if unclassified and (not tangential or not sagittal):
+                                logger.info(f"TF-MTF field {fi}: using positional fallback for {len(unclassified)} unclassified series")
+                                idx = 0
+                                if not tangential and idx < len(unclassified):
+                                    x, tangential = unclassified[idx]
+                                    if not focus_data:
+                                        focus_data = x
+                                    idx += 1
+                                if not sagittal and idx < len(unclassified):
+                                    _, sagittal = unclassified[idx]
+                        except Exception as e:
+                            logger.warning(f"TF-MTF: Could not extract data series for field {fi}: {e}")
+
+                    if focus_positions is None and focus_data:
+                        focus_positions = focus_data
+
+                    # Track best focus (highest average of T+S)
+                    if tangential and sagittal:
+                        for i_pt in range(min(len(tangential), len(sagittal))):
+                            avg_mtf = (tangential[i_pt] + sagittal[i_pt]) / 2.0
+                            if avg_mtf > best_focus_mtf and focus_data:
+                                best_focus_mtf = avg_mtf
+                                best_focus_pos = focus_data[i_pt] if i_pt < len(focus_data) else 0.0
+                    elif tangential:
+                        for i_pt, val in enumerate(tangential):
+                            if val > best_focus_mtf and focus_data:
+                                best_focus_mtf = val
+                                best_focus_pos = focus_data[i_pt] if i_pt < len(focus_data) else 0.0
+
+                    all_fields_data.append({
+                        "field_index": fi - 1,  # Convert to 0-indexed
+                        "field_x": field_x,
+                        "field_y": field_y,
+                        "tangential": tangential,
+                        "sagittal": sagittal,
+                    })
+
+                except Exception as e:
+                    logger.warning(f"TF-MTF analysis failed for field {fi}: {e}")
+                    all_fields_data.append({
+                        "field_index": fi - 1,
+                        "field_x": field_x,
+                        "field_y": field_y,
+                        "tangential": [],
+                        "sagittal": [],
+                    })
+                finally:
+                    if analysis is not None:
+                        try:
+                            analysis.Close()
+                        except Exception:
+                            pass
+
+            # Generate focus positions if not obtained from analysis
+            if focus_positions is None or len(focus_positions) == 0:
+                focus_positions = list(np.linspace(
+                    -number_of_steps * delta_focus,
+                    number_of_steps * delta_focus,
+                    2 * number_of_steps + 1,
+                ))
+
+            result = {
+                "success": True,
+                "focus_positions": [float(x) for x in focus_positions],
+                "fields": all_fields_data,
+                "best_focus": {
+                    "position": float(best_focus_pos),
+                    "mtf_value": float(best_focus_mtf),
+                },
+                "frequency": float(frequency),
+                "wavelength_um": float(wavelength_um),
+                "delta_focus": float(delta_focus),
+            }
+            _log_raw_output("/through-focus-mtf", result)
+            return result
+
+        except Exception as e:
+            return {"success": False, "error": f"Through Focus MTF analysis failed: {e}"}
+
     def get_rms_vs_field(
         self,
         ray_density: int = 5,
@@ -2484,6 +2992,158 @@ class ZosPyHandler:
 
         except Exception as e:
             return {"success": False, "error": f"PSF analysis failed: {e}"}
+
+    def get_huygens_psf(
+        self,
+        field_index: int = 1,
+        wavelength_index: int = 1,
+        sampling: str = "64x64",
+    ) -> dict[str, Any]:
+        """
+        Get Huygens PSF data using ZOS-API's HuygensPsf analysis.
+
+        More accurate than FFT PSF for highly aberrated systems because it uses
+        direct integration of the Huygens wavelet at each point on the image surface.
+
+        Returns the same structure as get_psf() so the Mac side can reuse
+        the same render_psf_to_png renderer.
+
+        Args:
+            field_index: Field index (1-indexed)
+            wavelength_index: Wavelength index (1-indexed)
+            sampling: Pupil sampling grid (e.g., '64x64', '128x128')
+
+        Returns:
+            On success: {
+                "success": True,
+                "image": str (base64 numpy array),
+                "image_format": "numpy_array",
+                "array_shape": [h, w],
+                "array_dtype": str,
+                "strehl_ratio": float or None,
+                "psf_peak": float or None,
+                "wavelength_um": float,
+                "field_x": float,
+                "field_y": float,
+            }
+            On error: {"success": False, "error": "..."}
+        """
+        try:
+            # Validate field and wavelength indices
+            fields = self.oss.SystemData.Fields
+            if field_index > fields.NumberOfFields:
+                return {"success": False, "error": f"Field index {field_index} out of range (max: {fields.NumberOfFields})"}
+
+            wavelengths = self.oss.SystemData.Wavelengths
+            if wavelength_index > wavelengths.NumberOfWavelengths:
+                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
+
+            field = fields.GetField(field_index)
+            field_x = _extract_value(field.X)
+            field_y = _extract_value(field.Y)
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+
+            # Run Huygens PSF analysis
+            idm = self._zp.constants.Analysis.AnalysisIDM
+            analysis = self._zp.analyses.new_analysis(
+                self.oss,
+                idm.HuygensPsf,
+                settings_first=True,
+            )
+
+            try:
+                # Configure settings
+                settings = analysis.Settings
+                self._configure_analysis_settings(
+                    settings,
+                    field_index=field_index,
+                    wavelength_index=wavelength_index,
+                    sampling=sampling,
+                )
+
+                huygens_start = time.perf_counter()
+                try:
+                    analysis.ApplyAndWaitForCompletion()
+                finally:
+                    huygens_elapsed_ms = (time.perf_counter() - huygens_start) * 1000
+                    log_timing(logger, "HuygensPsf.run", huygens_elapsed_ms)
+
+                # Extract results
+                results = analysis.Results
+                image_b64 = None
+                array_shape = None
+                array_dtype = None
+                psf_peak = None
+                strehl_ratio = None
+
+                if results is not None:
+                    # Extract 2D PSF data grid
+                    try:
+                        num_grids = results.NumberOfDataGrids
+                        if num_grids > 0:
+                            grid = results.GetDataGrid(0)
+                            if grid is not None:
+                                nx = grid.Nx if hasattr(grid, 'Nx') else 0
+                                ny = grid.Ny if hasattr(grid, 'Ny') else 0
+
+                                if nx > 0 and ny > 0:
+                                    arr = np.zeros((ny, nx), dtype=np.float64)
+                                    for yi in range(ny):
+                                        for xi in range(nx):
+                                            val = _extract_value(grid.Z(xi, yi))
+                                            arr[yi, xi] = val
+
+                                    psf_peak = float(np.max(arr))
+                                    image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                                    array_shape = list(arr.shape)
+                                    array_dtype = str(arr.dtype)
+                                    logger.info(f"Huygens PSF data extracted: shape={arr.shape}, peak={psf_peak:.6f}")
+                    except Exception as e:
+                        logger.warning(f"Huygens PSF: Could not extract data grid: {e}")
+
+                    # Extract Strehl ratio from header text
+                    try:
+                        header_text = results.HeaderData.Lines if hasattr(results, 'HeaderData') else ""
+                        if hasattr(header_text, '__iter__'):
+                            for line in header_text:
+                                line_str = str(line).lower()
+                                if "strehl" in line_str:
+                                    parts = line_str.split(":")
+                                    if len(parts) > 1:
+                                        val_str = parts[-1].strip()
+                                        try:
+                                            strehl_ratio = float(val_str)
+                                        except ValueError:
+                                            pass
+                                    break
+                    except Exception as e:
+                        logger.debug(f"Huygens PSF: Could not extract Strehl ratio from header: {e}")
+            finally:
+                try:
+                    analysis.Close()
+                except Exception:
+                    pass
+
+            if image_b64 is None:
+                return {"success": False, "error": "Huygens PSF analysis did not produce data"}
+
+            result = {
+                "success": True,
+                "image": image_b64,
+                "image_format": "numpy_array",
+                "array_shape": array_shape,
+                "array_dtype": array_dtype,
+                "strehl_ratio": strehl_ratio,
+                "psf_peak": psf_peak,
+                "wavelength_um": float(wavelength_um),
+                "field_x": field_x,
+                "field_y": field_y,
+            }
+            _log_raw_output("/huygens-psf", result)
+            return result
+
+        except Exception as e:
+            return {"success": False, "error": f"Huygens PSF analysis failed: {e}"}
 
     def _configure_analysis_settings(
         self,
@@ -3353,6 +4013,1197 @@ class ZosPyHandler:
             logger.warning(f"Error extracting variable states: {e}")
 
         return variable_states
+
+    def get_zernike_vs_field(
+        self,
+        maximum_term: int = 37,
+        wavelength_index: int = 1,
+        sampling: str = "64x64",
+        field_density: int = 20,
+    ) -> dict[str, Any]:
+        """
+        Get Zernike Coefficients vs Field using ZOSPy's ZernikeCoefficientsVsField analysis.
+
+        Returns how each Zernike coefficient varies across field positions.
+
+        Args:
+            maximum_term: Maximum Zernike term number (default 37)
+            wavelength_index: Wavelength index (1-indexed)
+            sampling: Pupil sampling grid (e.g., '64x64')
+            field_density: Number of field sample points (default 20)
+
+        Returns:
+            On success: {
+                "success": True,
+                "field_positions": [...],
+                "coefficients": { "4": [values_per_field], "5": [...], ... },
+                "wavelength_um": float,
+                "field_unit": str,
+            }
+            On error: {"success": False, "error": "..."}
+        """
+        try:
+            # Validate wavelength index
+            wavelengths = self.oss.SystemData.Wavelengths
+            if wavelength_index > wavelengths.NumberOfWavelengths:
+                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+
+            # Determine field unit from system
+            fields = self.oss.SystemData.Fields
+            try:
+                ft = fields.GetFieldType()
+                field_type_str = getattr(ft, 'name', str(ft).split(".")[-1])
+            except Exception:
+                field_type_str = ""
+            field_unit = "deg" if "angle" in field_type_str.lower() else "mm"
+
+            # Build coefficients range string: "1-N"
+            coefficients_str = f"1-{maximum_term}"
+
+            # Run ZernikeCoefficientsVsField using the new-style ZOSPy API
+            zernike_vs_field = self._zp.analyses.wavefront.ZernikeCoefficientsVsField(
+                coefficients=coefficients_str,
+                wavelength=wavelength_index,
+                sampling=sampling,
+                field_density=field_density,
+            )
+
+            zernike_start = time.perf_counter()
+            try:
+                zernike_result = zernike_vs_field.run(self.oss)
+            finally:
+                zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
+                log_timing(logger, "ZernikeCoefficientsVsField.run", zernike_elapsed_ms)
+
+            # Extract data from the result DataFrame
+            if not hasattr(zernike_result, 'data') or zernike_result.data is None:
+                return {"success": False, "error": "ZernikeCoefficientsVsField returned no data"}
+
+            df = zernike_result.data
+            logger.info(f"ZernikeVsField: DataFrame columns={list(df.columns)}, shape={df.shape}")
+
+            # The DataFrame has field positions as rows and Zernike terms as columns
+            field_positions = []
+            coefficients_dict = {}
+
+            if df is not None and len(df) > 0:
+                # Try to get field positions from the DataFrame index
+                try:
+                    field_positions = [float(v) for v in df.index.tolist()]
+                except (ValueError, TypeError):
+                    # If index is not numeric, use sequential indices
+                    field_positions = list(range(len(df)))
+
+                # Extract coefficient columns - they should be numeric term numbers
+                for col in df.columns:
+                    try:
+                        term_num = int(col)
+                        values = [float(v) if not (isinstance(v, float) and (v != v)) else 0.0
+                                  for v in df[col].tolist()]
+                        coefficients_dict[str(term_num)] = values
+                    except (ValueError, TypeError):
+                        # Skip non-numeric columns (e.g., metadata)
+                        logger.debug(f"ZernikeVsField: Skipping non-numeric column '{col}'")
+
+            if not field_positions or not coefficients_dict:
+                return {"success": False, "error": "No Zernike vs field data could be extracted"}
+
+            result = {
+                "success": True,
+                "field_positions": field_positions,
+                "coefficients": coefficients_dict,
+                "wavelength_um": float(wavelength_um),
+                "field_unit": field_unit,
+            }
+            _log_raw_output("/zernike-vs-field", result)
+            return result
+
+        except Exception as e:
+            logger.error(f"get_zernike_vs_field failed: {e}", exc_info=True)
+            return {"success": False, "error": f"ZernikeCoefficientsVsField analysis failed: {e}"}
+
+    def get_zernike_standard_coefficients(
+        self,
+        field_index: int = 1,
+        wavelength_index: int = 1,
+        sampling: str = "64x64",
+        maximum_term: int = 37,
+        surface: str = "Image",
+    ) -> dict[str, Any]:
+        """
+        Get Zernike Standard Coefficients decomposition of the wavefront.
+
+        Returns individual Zernike polynomial coefficients (Z1-Z37+), P-V wavefront
+        error, RMS wavefront error, and Strehl ratio.
+
+        Note: System must be pre-loaded via load_zmx_file().
+
+        Args:
+            field_index: Field index (1-indexed)
+            wavelength_index: Wavelength index (1-indexed)
+            sampling: Pupil sampling grid (e.g., '64x64', '128x128')
+            maximum_term: Maximum Zernike term number (default 37)
+            surface: Surface to analyze (default "Image")
+
+        Returns:
+            On success: dict with coefficients, P-V, RMS, Strehl, etc.
+            On error: {"success": False, "error": "..."}
+        """
+        try:
+            # Validate field index
+            fields = self.oss.SystemData.Fields
+            if field_index > fields.NumberOfFields:
+                return {"success": False, "error": f"Field index {field_index} out of range (max: {fields.NumberOfFields})"}
+
+            field = fields.GetField(field_index)
+            field_x = _extract_value(field.X)
+            field_y = _extract_value(field.Y)
+
+            # Validate wavelength index
+            wavelengths = self.oss.SystemData.Wavelengths
+            if wavelength_index > wavelengths.NumberOfWavelengths:
+                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
+
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+
+            # Run ZernikeStandardCoefficients analysis
+            zernike_analysis = self._zp.analyses.wavefront.ZernikeStandardCoefficients(
+                sampling=sampling,
+                maximum_term=maximum_term,
+                wavelength=wavelength_index,
+                field=field_index,
+                reference_opd_to_vertex=False,
+                surface=surface,
+            )
+
+            zernike_start = time.perf_counter()
+            try:
+                zernike_result = zernike_analysis.run(self.oss)
+            finally:
+                zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
+                log_timing(logger, "ZernikeStandardCoefficients.run (full)", zernike_elapsed_ms)
+
+            if not hasattr(zernike_result, 'data') or zernike_result.data is None:
+                return {"success": False, "error": "ZernikeStandardCoefficients returned no data"}
+
+            zdata = zernike_result.data
+
+            # Extract P-V wavefront error
+            pv_to_chief = _extract_value(getattr(zdata, 'peak_to_valley_to_chief', None))
+            pv_to_centroid = _extract_value(getattr(zdata, 'peak_to_valley_to_centroid', None))
+
+            # Extract RMS and Strehl from integration data
+            rms_to_chief = None
+            rms_to_centroid = None
+            strehl_ratio = None
+
+            if hasattr(zdata, 'from_integration_of_the_rays'):
+                integration = zdata.from_integration_of_the_rays
+                rms_to_chief = _extract_value(getattr(integration, 'rms_to_chief', None))
+                rms_to_centroid = _extract_value(getattr(integration, 'rms_to_centroid', None))
+                strehl_ratio = _extract_value(getattr(integration, 'strehl_ratio', None))
+
+            # Extract individual Zernike coefficients
+            coefficients = []
+            if hasattr(zdata, 'coefficients') and zdata.coefficients:
+                for term, coeff in zdata.coefficients.items():
+                    try:
+                        coefficients.append({
+                            "term": int(term),
+                            "value": float(coeff.value),
+                            "formula": str(coeff.formula) if hasattr(coeff, 'formula') else "",
+                        })
+                    except (ValueError, TypeError, AttributeError) as e:
+                        logger.debug(f"Skipping Zernike term {term}: {e}")
+
+            if not coefficients:
+                return {"success": False, "error": "No Zernike coefficients extracted"}
+
+            result = {
+                "success": True,
+                "coefficients": coefficients,
+                "pv_to_chief": pv_to_chief,
+                "pv_to_centroid": pv_to_centroid,
+                "rms_to_chief": rms_to_chief,
+                "rms_to_centroid": rms_to_centroid,
+                "strehl_ratio": strehl_ratio,
+                "surface": str(surface),
+                "field_x": field_x,
+                "field_y": field_y,
+                "field_index": field_index,
+                "wavelength_index": wavelength_index,
+                "wavelength_um": wavelength_um,
+                "maximum_term": maximum_term,
+            }
+
+            _log_raw_output("get_zernike_standard_coefficients", result)
+
+            return result
+
+        except Exception as e:
+            logger.error(f"get_zernike_standard_coefficients failed: {e}")
+            return {"success": False, "error": str(e)}
+
+
+    def get_surface_data_report(self) -> dict[str, Any]:
+        """
+        Get Surface Data Report from OpticStudio.
+
+        Iterates over every surface in the system and runs the ZosPy SurfaceData
+        analysis to collect edge thickness, center thickness, material name,
+        refractive index, and surface power for each surface.
+
+        Note: System must be pre-loaded via load_zmx_file().
+
+        Returns:
+            On success: {
+                "success": True,
+                "surfaces": [...],
+                "paraxial": {...},
+            }
+            On error: {"success": False, "error": "..."}
+        """
+        try:
+            zp = self._zp
+            num_surfaces = self.oss.LDE.NumberOfSurfaces
+            surfaces = []
+
+            for surf_idx in range(num_surfaces):
+                entry: dict[str, Any] = {
+                    "surface_number": surf_idx,
+                    "surface_type": "Standard",
+                    "radius": 0.0,
+                    "thickness": 0.0,
+                    "edge_thickness": 0.0,
+                    "material": "",
+                    "refractive_index": 0.0,
+                    "surface_power": 0.0,
+                }
+
+                # Read basic LDE data for this surface
+                try:
+                    lde_surf = self.oss.LDE.GetSurfaceAt(surf_idx)
+                    entry["radius"] = _extract_value(lde_surf.Radius, 0.0)
+                    entry["thickness"] = _extract_value(lde_surf.Thickness, 0.0)
+
+                    # Get surface type name
+                    try:
+                        type_name = str(lde_surf.TypeName) if hasattr(lde_surf, 'TypeName') else "Standard"
+                        entry["surface_type"] = type_name
+                    except Exception:
+                        pass
+
+                    # Get material name from LDE
+                    try:
+                        mat_cell = lde_surf.MaterialCell
+                        if hasattr(mat_cell, 'Value') and mat_cell.Value:
+                            entry["material"] = str(mat_cell.Value)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.debug(f"Surface {surf_idx} LDE read error: {e}")
+
+                # Run ZosPy SurfaceData analysis for this surface
+                try:
+                    sd_analysis = zp.analyses.reports.SurfaceData(surface=surf_idx)
+                    sd_start = time.perf_counter()
+                    try:
+                        sd_result = sd_analysis.run(self.oss)
+                    finally:
+                        sd_elapsed = (time.perf_counter() - sd_start) * 1000
+                        if surf_idx == 0:
+                            log_timing(logger, f"SurfaceData.run(surf={surf_idx})", sd_elapsed)
+
+                    if sd_result and hasattr(sd_result, 'data') and sd_result.data is not None:
+                        data = sd_result.data
+
+                        # Edge thickness
+                        if hasattr(data, 'edge_thickness') and data.edge_thickness is not None:
+                            et = data.edge_thickness
+                            # EdgeThickness has .y and .x — use .y (tangential plane)
+                            if hasattr(et, 'y'):
+                                entry["edge_thickness"] = _extract_value(et.y, 0.0)
+                            elif hasattr(et, 'x'):
+                                entry["edge_thickness"] = _extract_value(et.x, 0.0)
+
+                        # Thickness override from analysis if available
+                        if hasattr(data, 'thickness') and data.thickness is not None:
+                            entry["thickness"] = _extract_value(data.thickness, entry["thickness"])
+
+                        # Material and refractive index
+                        if hasattr(data, 'material') and data.material is not None:
+                            mat_data = data.material
+
+                            # Glass name
+                            if hasattr(mat_data, 'glass') and mat_data.glass is not None:
+                                glass = mat_data.glass
+                                if isinstance(glass, str):
+                                    if glass and not entry["material"]:
+                                        entry["material"] = glass
+                                elif hasattr(glass, 'name'):
+                                    entry["material"] = str(glass.name)
+                                else:
+                                    glass_str = str(glass)
+                                    if glass_str and not entry["material"]:
+                                        entry["material"] = glass_str
+
+                            # Refractive index — take first wavelength's index
+                            if hasattr(mat_data, 'indices') and mat_data.indices:
+                                try:
+                                    first_idx = mat_data.indices[0]
+                                    if hasattr(first_idx, 'index'):
+                                        entry["refractive_index"] = _extract_value(first_idx.index, 0.0)
+                                    elif hasattr(first_idx, 'value'):
+                                        entry["refractive_index"] = _extract_value(first_idx.value, 0.0)
+                                except (IndexError, TypeError):
+                                    pass
+
+                        # Surface power (in air)
+                        if hasattr(data, 'surface_powers') and data.surface_powers is not None:
+                            sp = data.surface_powers
+                            # Prefer "in_air" power
+                            power_src = getattr(sp, 'in_air', None) or getattr(sp, 'as_situated', None)
+                            if power_src is not None:
+                                if hasattr(power_src, 'power') and power_src.power is not None:
+                                    power_val = power_src.power
+                                    if isinstance(power_val, dict):
+                                        for v in power_val.values():
+                                            entry["surface_power"] = _extract_value(v, 0.0)
+                                            break
+                                    else:
+                                        entry["surface_power"] = _extract_value(power_val, 0.0)
+                                elif hasattr(power_src, 'efl') and power_src.efl is not None:
+                                    efl_val = power_src.efl
+                                    if isinstance(efl_val, dict):
+                                        for v in efl_val.values():
+                                            efl_num = _extract_value(v, 0.0)
+                                            if efl_num != 0.0:
+                                                entry["surface_power"] = 1.0 / efl_num
+                                            break
+                                    else:
+                                        efl_num = _extract_value(efl_val, 0.0)
+                                        if efl_num != 0.0:
+                                            entry["surface_power"] = 1.0 / efl_num
+
+                except Exception as e:
+                    logger.debug(f"SurfaceData analysis for surface {surf_idx} failed: {e}")
+
+                surfaces.append(entry)
+
+            # Get paraxial data
+            paraxial = self.get_paraxial_data()
+
+            result = {
+                "success": True,
+                "surfaces": surfaces,
+                "paraxial": paraxial,
+            }
+            _log_raw_output("/surface-data-report", result)
+            return result
+
+        except Exception as e:
+            logger.error(f"get_surface_data_report failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    def get_surface_curvature(
+        self,
+        surface: int = 1,
+        sampling: str = "65x65",
+        show_as: str = "Surface",
+        data: str = "TangentialCurvature",
+        remove: str = "None_",
+    ) -> dict[str, Any]:
+        """
+        Get surface curvature map using ZosPy's Curvature analysis.
+
+        This is a "dumb executor" - returns raw numpy array data only.
+        Curvature map image rendering happens on Mac side.
+
+        Note: System must be pre-loaded via load_zmx_file().
+
+        Args:
+            surface: Surface number to analyze (1-indexed)
+            sampling: Grid sampling resolution (e.g., '65x65', '129x129')
+            show_as: Display format ('Surface', 'Contour', 'GreyScale', etc.)
+            data: Curvature data type ('TangentialCurvature', 'SagittalCurvature',
+                  'X_Curvature', 'Y_Curvature')
+            remove: Removal option ('None_', 'BaseROC', 'BestFitSphere')
+
+        Returns:
+            On success: {
+                "success": True,
+                "image": str (base64 numpy array),
+                "image_format": "numpy_array",
+                "array_shape": [h, w],
+                "array_dtype": str,
+                "min_curvature": float,
+                "max_curvature": float,
+                "mean_curvature": float,
+                "surface_number": int,
+                "data_type": str,
+            }
+            On error: {"success": False, "error": "..."}
+        """
+        try:
+            # Validate surface number
+            num_surfaces = self.oss.LDE.NumberOfSurfaces
+            if surface < 1 or surface >= num_surfaces:
+                return {
+                    "success": False,
+                    "error": f"Surface {surface} out of range (1 to {num_surfaces - 1})",
+                }
+
+            # Run Curvature analysis
+            curvature_analysis = self._zp.analyses.surface.Curvature(
+                surface=surface,
+                sampling=sampling,
+                show_as=show_as,
+                data=data,
+                remove=remove,
+            )
+
+            curv_start = time.perf_counter()
+            try:
+                curvature_result = curvature_analysis.run(self.oss, oncomplete="Release")
+            finally:
+                curv_elapsed_ms = (time.perf_counter() - curv_start) * 1000
+                log_timing(logger, "Curvature.run", curv_elapsed_ms)
+
+            # Extract grid data as numpy array
+            image_b64 = None
+            array_shape = None
+            array_dtype = None
+            min_curvature = None
+            max_curvature = None
+            mean_curvature = None
+
+            if hasattr(curvature_result, 'data') and curvature_result.data is not None:
+                curv_data = curvature_result.data
+                if hasattr(curv_data, 'values'):
+                    arr = np.array(curv_data.values, dtype=np.float64)
+                else:
+                    arr = np.array(curv_data, dtype=np.float64)
+
+                if arr.ndim >= 2:
+                    # Compute statistics on valid (non-NaN) values
+                    valid_mask = ~np.isnan(arr)
+                    if np.any(valid_mask):
+                        min_curvature = float(np.nanmin(arr))
+                        max_curvature = float(np.nanmax(arr))
+                        mean_curvature = float(np.nanmean(arr))
+
+                    image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                    array_shape = list(arr.shape)
+                    array_dtype = str(arr.dtype)
+                    logger.info(
+                        f"Curvature map generated: shape={arr.shape}, "
+                        f"dtype={arr.dtype}, min={min_curvature}, max={max_curvature}"
+                    )
+
+            if image_b64 is None:
+                return {
+                    "success": False,
+                    "error": "Curvature analysis returned no grid data",
+                }
+
+            result = {
+                "success": True,
+                "image": image_b64,
+                "image_format": "numpy_array",
+                "array_shape": array_shape,
+                "array_dtype": array_dtype,
+                "min_curvature": min_curvature,
+                "max_curvature": max_curvature,
+                "mean_curvature": mean_curvature,
+                "surface_number": surface,
+                "data_type": data,
+            }
+            _log_raw_output("/surface-curvature", result)
+            return result
+
+        except Exception as e:
+            logger.error(f"get_surface_curvature failed: {e}")
+            return {"success": False, "error": f"Surface curvature analysis failed: {e}"}
+
+    # =========================================================================
+    # Geometric Image Analysis
+    # =========================================================================
+
+    def get_geometric_image_analysis(
+        self,
+        field_size: float = 0.0,
+        image_size: float = 50.0,
+        rays_x_1000: int = 10,
+        number_of_pixels: int = 100,
+        field: int = 1,
+        wavelength: str | int = "All",
+    ) -> dict[str, Any]:
+        """
+        Run Geometric Image Analysis to simulate how an extended scene looks
+        through the optical system.
+
+        Uses ZosPy's GeometricImageAnalysis from the extendedscene module.
+        Returns the simulated image as a base64-encoded numpy array, plus
+        paraxial metadata.
+
+        This is a "dumb executor" -- returns raw 2D intensity grid as base64 numpy.
+        Image rendering happens on the Mac side.
+
+        Note: System must be pre-loaded via load_zmx_file().
+
+        Args:
+            field_size: Image width in field coordinates (0 = auto)
+            image_size: Detector size in lens units
+            rays_x_1000: Approximate ray count in thousands (1-100)
+            number_of_pixels: Pixels across image width (10-1000)
+            field: Field number (1-indexed)
+            wavelength: Wavelength selection ('All' or wavelength number)
+
+        Returns:
+            On success: {
+                "success": True,
+                "image": str (base64 numpy array),
+                "image_format": "numpy_array",
+                "array_shape": [h, w],
+                "array_dtype": str,
+                "field_size": float,
+                "image_size": float,
+                "rays_x_1000": int,
+                "number_of_pixels": int,
+                "paraxial": dict,
+            }
+            On error: {"success": False, "error": "..."}
+        """
+        try:
+            from zospy.analyses.extendedscene.geometric_image_analysis import GeometricImageAnalysis
+
+            logger.info(
+                f"[GEO_IMAGE] Starting: field_size={field_size}, image_size={image_size}, "
+                f"rays_x_1000={rays_x_1000}, number_of_pixels={number_of_pixels}, "
+                f"field={field}, wavelength={wavelength}"
+            )
+
+            # Create and run the analysis
+            analysis = GeometricImageAnalysis(
+                field_size=field_size,
+                image_size=image_size,
+                rays_x_1000=rays_x_1000,
+                number_of_pixels=number_of_pixels,
+                field=field,
+                wavelength=wavelength,
+                show_as="Surface",
+                source="Uniform",
+                file="LETTERF.IMA",
+                remove_vignetting_factors=True,
+            )
+
+            geo_start = time.perf_counter()
+            try:
+                result = analysis.run(self.oss)
+            finally:
+                geo_elapsed_ms = (time.perf_counter() - geo_start) * 1000
+                log_timing(logger, "GeometricImageAnalysis.run", geo_elapsed_ms)
+
+            # Extract the image data grid
+            image_b64 = None
+            array_shape = None
+            array_dtype = None
+
+            if result is not None:
+                try:
+                    # ZosPy GeometricImageAnalysis returns a DataFrame or None.
+                    # Try get_data_grid first (available on analysis wrapper),
+                    # then fall back to the result DataFrame directly.
+                    grid_data = None
+
+                    if hasattr(analysis, 'get_data_grid'):
+                        grid_data = analysis.get_data_grid()
+
+                    if grid_data is not None and hasattr(grid_data, 'values'):
+                        arr = np.array(grid_data.values, dtype=np.float64)
+                    elif hasattr(result, 'values'):
+                        arr = np.array(result.values, dtype=np.float64)
+                    elif isinstance(result, np.ndarray):
+                        arr = result.astype(np.float64)
+                    else:
+                        logger.warning(f"[GEO_IMAGE] Unexpected result type: {type(result)}")
+                        return {"success": False, "error": f"Unexpected result type: {type(result)}"}
+
+                    if arr.size == 0:
+                        return {"success": False, "error": "Geometric Image Analysis returned empty data"}
+
+                    logger.info(f"[GEO_IMAGE] Extracted image: shape={arr.shape}, min={arr.min():.4f}, max={arr.max():.4f}")
+
+                    image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                    array_shape = list(arr.shape)
+                    array_dtype = str(arr.dtype)
+
+                except Exception as e:
+                    logger.warning(f"[GEO_IMAGE] Could not extract data grid: {e}")
+                    return {"success": False, "error": f"Failed to extract image data: {e}"}
+            else:
+                return {"success": False, "error": "Geometric Image Analysis returned None"}
+
+            # Get paraxial data
+            paraxial = self._get_paraxial_from_lde()
+
+            result_dict = {
+                "success": True,
+                "image": image_b64,
+                "image_format": "numpy_array",
+                "array_shape": array_shape,
+                "array_dtype": array_dtype,
+                "field_size": field_size,
+                "image_size": image_size,
+                "rays_x_1000": rays_x_1000,
+                "number_of_pixels": number_of_pixels,
+                "paraxial": paraxial,
+            }
+            _log_raw_output("/geometric-image-analysis", result_dict)
+            return result_dict
+
+        except ImportError as e:
+            logger.error(f"[GEO_IMAGE] GeometricImageAnalysis not available: {e}")
+            return {
+                "success": False,
+                "error": "GeometricImageAnalysis requires ZosPy >= 1.3.0 with extendedscene support",
+            }
+        except Exception as e:
+            logger.error(f"[GEO_IMAGE] Failed: {e}")
+            return {"success": False, "error": f"Geometric Image Analysis failed: {e}"}
+
+
+    # =========================================================================
+    # Physical Optics Propagation
+    # =========================================================================
+
+    def get_physical_optics_propagation(
+        self,
+        field_index: int = 1,
+        wavelength_index: int = 1,
+        beam_type: str = "GaussianWaist",
+        waist_x: Optional[float] = None,
+        waist_y: Optional[float] = None,
+        x_sampling: int = 64,
+        y_sampling: int = 64,
+        x_width: float = 4.0,
+        y_width: float = 4.0,
+        start_surface: int = 1,
+        end_surface: str = "Image",
+        use_polarization: bool = False,
+        data_type: str = "Irradiance",
+    ) -> dict[str, Any]:
+        """
+        Run Physical Optics Propagation (POP) analysis.
+
+        This is a "dumb executor" -- returns raw 2D beam profile grid as base64 numpy
+        plus beam parameters. Image rendering happens on the Mac side.
+        """
+        try:
+            # Validate field and wavelength indices
+            fields = self.oss.SystemData.Fields
+            if field_index > fields.NumberOfFields:
+                return {"success": False, "error": f"Field index {field_index} out of range (max: {fields.NumberOfFields})"}
+
+            wavelengths = self.oss.SystemData.Wavelengths
+            if wavelength_index > wavelengths.NumberOfWavelengths:
+                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
+
+            field = fields.GetField(field_index)
+            field_x = _extract_value(field.X)
+            field_y = _extract_value(field.Y)
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+
+            # Build beam parameter dict via ZosPy helper
+            beam_params = {}
+            try:
+                beam_params = self._zp.analyses.physicaloptics.physical_optics_propagation.create_beam_parameter_dict(
+                    self.oss, beam_type=beam_type,
+                )
+            except Exception as e:
+                logger.warning(f"create_beam_parameter_dict failed (beam_type={beam_type}): {e}")
+
+            # Override waist sizes if provided
+            if waist_x is not None:
+                matched = False
+                for key in list(beam_params.keys()):
+                    if "waist" in key.lower() and ("x" in key.lower() or "size" in key.lower()):
+                        beam_params[key] = waist_x
+                        matched = True
+                        break
+                if not matched and "Waist X" in beam_params:
+                    beam_params["Waist X"] = waist_x
+
+            if waist_y is not None:
+                matched = False
+                for key in list(beam_params.keys()):
+                    if "waist" in key.lower() and "y" in key.lower():
+                        beam_params[key] = waist_y
+                        matched = True
+                        break
+                if not matched and "Waist Y" in beam_params:
+                    beam_params["Waist Y"] = waist_y
+
+            logger.info(f"POP beam_params: {beam_params}")
+
+            # Build POP settings
+            pop_kwargs = {
+                "field": field_index,
+                "wavelength": wavelength_index,
+                "beam_type": beam_type,
+                "x_sampling": x_sampling,
+                "y_sampling": y_sampling,
+                "x_width": x_width,
+                "y_width": y_width,
+                "start_surface": start_surface,
+                "end_surface": end_surface,
+                "use_polarization": use_polarization,
+                "data_type": data_type,
+                "show_as": "FalseColor",
+            }
+
+            if beam_params:
+                pop_kwargs["beam_parameters"] = beam_params
+
+            logger.info(
+                f"POP settings: field={field_index}, wl={wavelength_index}, beam={beam_type}, "
+                f"sampling={x_sampling}x{y_sampling}, width={x_width}x{y_width}"
+            )
+
+            # Try the high-level ZosPy wrapper first
+            image_b64 = None
+            array_shape = None
+            array_dtype = None
+            result_beam_params = {}
+
+            try:
+                pop_analysis = self._zp.analyses.physicaloptics.physical_optics_propagation.PhysicalOpticsPropagation(
+                    **pop_kwargs,
+                )
+
+                pop_start = time.perf_counter()
+                try:
+                    pop_result = pop_analysis.run(self.oss)
+                finally:
+                    pop_elapsed_ms = (time.perf_counter() - pop_start) * 1000
+                    log_timing(logger, "PhysicalOpticsPropagation.run", pop_elapsed_ms)
+
+                if pop_result is not None and hasattr(pop_result, 'data') and pop_result.data is not None:
+                    data = pop_result.data
+                    arr = None
+
+                    # Try .values (numpy ndarray from DataFrame)
+                    if hasattr(data, 'values') and data.values is not None:
+                        try:
+                            arr = data.values
+                            if isinstance(arr, np.ndarray) and arr.size > 0:
+                                arr = arr.astype(np.float64)
+                        except Exception:
+                            arr = None
+
+                    # Try to_numpy() for DataFrame
+                    if arr is None and hasattr(data, 'to_numpy'):
+                        try:
+                            arr = data.to_numpy().astype(np.float64)
+                        except Exception:
+                            arr = None
+
+                    # Direct ndarray
+                    if arr is None and isinstance(data, np.ndarray):
+                        arr = data.astype(np.float64)
+
+                    if arr is not None and arr.size > 0:
+                        image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                        array_shape = list(arr.shape)
+                        array_dtype = str(arr.dtype)
+                        logger.info(f"POP: Extracted data array shape={arr.shape}")
+
+                # Extract metadata
+                if pop_result is not None and hasattr(pop_result, 'metadata'):
+                    try:
+                        meta = pop_result.metadata
+                        if meta is not None:
+                            for attr_name in dir(meta):
+                                if not attr_name.startswith('_'):
+                                    try:
+                                        val = getattr(meta, attr_name)
+                                        if isinstance(val, (int, float, str, bool)):
+                                            result_beam_params[attr_name] = val
+                                    except Exception:
+                                        pass
+                    except Exception as e:
+                        logger.warning(f"POP: Failed to extract metadata: {e}")
+
+            except Exception as e:
+                logger.warning(f"POP high-level wrapper failed: {e}, trying raw API")
+
+            # Fallback: use raw ZOSAPI DataGrid approach
+            if image_b64 is None:
+                try:
+                    idm = self._zp.constants.Analysis.AnalysisIDM
+                    analysis = self._zp.analyses.new_analysis(
+                        self.oss,
+                        idm.PhysicalOpticsPropagation,
+                        settings_first=True,
+                    )
+
+                    try:
+                        settings = analysis.Settings
+                        self._configure_analysis_settings(
+                            settings,
+                            field_index=field_index,
+                            wavelength_index=wavelength_index,
+                        )
+
+                        pop_start2 = time.perf_counter()
+                        try:
+                            analysis.ApplyAndWaitForCompletion()
+                        finally:
+                            pop_elapsed2_ms = (time.perf_counter() - pop_start2) * 1000
+                            log_timing(logger, "POP.raw_api.run", pop_elapsed2_ms)
+
+                        results = analysis.Results
+                        if results is not None:
+                            num_grids = results.NumberOfDataGrids
+                            if num_grids > 0:
+                                grid = results.GetDataGrid(0)
+                                if grid is not None:
+                                    nx = grid.Nx if hasattr(grid, 'Nx') else 0
+                                    ny = grid.Ny if hasattr(grid, 'Ny') else 0
+                                    if nx > 0 and ny > 0:
+                                        arr = np.zeros((ny, nx), dtype=np.float64)
+                                        for yi in range(ny):
+                                            for xi in range(nx):
+                                                val = _extract_value(grid.Z(xi, yi))
+                                                arr[yi, xi] = val
+
+                                        image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                                        array_shape = list(arr.shape)
+                                        array_dtype = str(arr.dtype)
+                                        logger.info(f"POP: Extracted from DataGrid shape={arr.shape}")
+                    finally:
+                        try:
+                            analysis.Close()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.warning(f"POP: Raw API fallback failed: {e}")
+
+            if image_b64 is None:
+                return {"success": False, "error": "Physical Optics Propagation returned no beam profile data"}
+
+            result = {
+                "success": True,
+                "image": image_b64,
+                "image_format": "numpy_array",
+                "array_shape": array_shape,
+                "array_dtype": array_dtype,
+                "beam_params": result_beam_params,
+                "wavelength_um": wavelength_um,
+                "field_x": field_x,
+                "field_y": field_y,
+                "data_type": data_type,
+            }
+
+            _log_raw_output("get_physical_optics_propagation", result)
+
+            return result
+
+        except Exception as e:
+            logger.error(f"get_physical_optics_propagation failed: {e}")
+            return {"success": False, "error": str(e)}
+
+
+    def get_ray_fan(
+        self,
+        field_index: int = 0,
+        wavelength_index: int = 0,
+        plot_scale: float = 0.0,
+        number_of_rays: int = 20,
+    ) -> dict[str, Any]:
+        """
+        Get Ray Fan (Ray Aberration) data using ZosPy's RayFan analysis.
+
+        Returns raw pupil/aberration data per field. Image rendering on Mac side.
+
+        Args:
+            field_index: 0 = all fields, 1+ = specific field (1-indexed)
+            wavelength_index: 0 = all wavelengths, 1+ = specific (1-indexed)
+            plot_scale: Max vertical scale; 0 = auto
+            number_of_rays: Rays traced on each side of origin
+        """
+        try:
+            sys_fields = self.oss.SystemData.Fields
+            num_fields = sys_fields.NumberOfFields
+            sys_wl = self.oss.SystemData.Wavelengths
+            num_wl = sys_wl.NumberOfWavelengths
+
+            field_arg = "All" if field_index == 0 else field_index
+            if field_index > 0 and field_index > num_fields:
+                return {"success": False, "error": f"Field index {field_index} out of range (max: {num_fields})"}
+
+            wl_arg = "All" if wavelength_index == 0 else wavelength_index
+            if wavelength_index > 0 and wavelength_index > num_wl:
+                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {num_wl})"}
+
+            logger.info(f"RayFan: field={field_arg}, wl={wl_arg}, rays={number_of_rays}")
+
+            from zospy.analyses.raysandspots import RayFan
+            analysis = RayFan(
+                plot_scale=plot_scale,
+                number_of_rays=number_of_rays,
+                field=field_arg,
+                wavelength=wl_arg,
+            )
+
+            t0 = time.perf_counter()
+            try:
+                rfr = analysis.run(self.oss)
+            finally:
+                log_timing(logger, "RayFan.run", (time.perf_counter() - t0) * 1000)
+
+            df = rfr.to_dataframe()
+            logger.debug(f"RayFan df cols={list(df.columns)}, shape={df.shape}")
+            if df.empty:
+                return {"success": False, "error": "RayFan returned empty data"}
+
+            all_fans = []
+            max_ab = 0.0
+            meta = {"Direction", "Field Number", "FieldX", "FieldY", "Pupil", "Wavelength"}
+            vcols = [c for c in df.columns if c not in meta]
+            vcol = vcols[0] if vcols else df.columns[-1]
+
+            gcols = []
+            if "Field Number" in df.columns:
+                gcols.append("Field Number")
+            if "Wavelength" in df.columns:
+                gcols.append("Wavelength")
+            if not gcols:
+                return {"success": False, "error": "RayFan DataFrame missing expected columns"}
+
+            for gk, gdf in df.groupby(gcols, sort=True):
+                if isinstance(gk, tuple):
+                    fnum = int(gk[0]) if len(gk) > 0 else 1
+                    wval = float(gk[1]) if len(gk) > 1 else 0.0
+                else:
+                    fnum = int(gk)
+                    wval = 0.0
+
+                fx = float(gdf["FieldX"].iloc[0]) if "FieldX" in gdf.columns else 0.0
+                fy = float(gdf["FieldY"].iloc[0]) if "FieldY" in gdf.columns else 0.0
+
+                wi = 0
+                if wval > 0:
+                    for k in range(1, num_wl + 1):
+                        if abs(_extract_value(sys_wl.GetWavelength(k).Wavelength, 0.0) - wval) < 1e-6:
+                            wi = k
+                            break
+
+                hd = "Direction" in gdf.columns
+                tdf = gdf[gdf["Direction"] == "Tangential"] if hd else gdf
+                sdf = gdf[gdf["Direction"] == "Sagittal"] if hd else gdf
+
+                tpy = tdf["Pupil"].tolist() if not tdf.empty and "Pupil" in tdf.columns else []
+                tey = tdf[vcol].tolist() if not tdf.empty and vcol in tdf.columns else []
+                spx = sdf["Pupil"].tolist() if not sdf.empty and "Pupil" in sdf.columns else []
+                sex = sdf[vcol].tolist() if not sdf.empty and vcol in sdf.columns else []
+
+                for arr in (tey, sex):
+                    vld = [abs(v) for v in arr if not math.isnan(v)]
+                    if vld:
+                        max_ab = max(max_ab, max(vld))
+
+                tey = [0.0 if math.isnan(v) else v for v in tey]
+                sex = [0.0 if math.isnan(v) else v for v in sex]
+
+                all_fans.append({
+                    "field_index": fnum - 1,
+                    "field_x": fx, "field_y": fy,
+                    "wavelength_um": wval, "wavelength_index": wi,
+                    "tangential_py": tpy, "tangential_ey": tey,
+                    "sagittal_px": spx, "sagittal_ex": sex,
+                })
+
+            result = {
+                "success": True, "fans": all_fans,
+                "max_aberration": float(max_ab),
+                "num_fields": num_fields, "num_wavelengths": num_wl,
+            }
+            _log_raw_output("/ray-fan", result)
+            return result
+
+        except Exception as e:
+            logger.error(f"RayFan failed: {e}", exc_info=True)
+            return {"success": False, "error": f"Ray Fan analysis failed: {e}"}
+
+    # =========================================================================
+    # Polarization Analyses
+    # =========================================================================
+
+    def get_polarization_pupil_map(
+        self,
+        field_index: int = 1,
+        wavelength_index: int = 1,
+        surface: str = "Image",
+        sampling: str = "11x11",
+        jx: float = 1.0,
+        jy: float = 0.0,
+        x_phase: float = 0.0,
+        y_phase: float = 0.0,
+    ) -> dict[str, Any]:
+        """Get Polarization Pupil Map data via ZosPy PolarizationPupilMap wrapper."""
+        try:
+            fields = self.oss.SystemData.Fields
+            if field_index > fields.NumberOfFields:
+                return {"success": False, "error": f"Field index {field_index} out of range (max: {fields.NumberOfFields})"}
+            field = fields.GetField(field_index)
+            field_x = _extract_value(field.X)
+            field_y = _extract_value(field.Y)
+
+            wavelengths = self.oss.SystemData.Wavelengths
+            if wavelength_index > wavelengths.NumberOfWavelengths:
+                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+
+            ppm_analysis = self._zp.analyses.polarization.PolarizationPupilMap(
+                jx=jx, jy=jy, x_phase=x_phase, y_phase=y_phase,
+                wavelength=wavelength_index, field=field_index,
+                surface=surface, sampling=sampling,
+            )
+            ppm_start = time.perf_counter()
+            try:
+                ppm_result = ppm_analysis.run(self.oss)
+            finally:
+                log_timing(logger, "PolarizationPupilMap.run", (time.perf_counter() - ppm_start) * 1000)
+
+            if ppm_result is None or not hasattr(ppm_result, 'data') or ppm_result.data is None:
+                return {"success": False, "error": "PolarizationPupilMap returned no data"}
+            data = ppm_result.data
+
+            transmission = _extract_value(data.transmission) if hasattr(data, 'transmission') else None
+
+            pupil_map_data, pupil_map_columns, pupil_map_shape = [], [], []
+            if hasattr(data, 'pupil_map') and data.pupil_map is not None:
+                df = data.pupil_map
+                try:
+                    pupil_map_data = df.values.tolist()
+                    pupil_map_columns = list(df.columns)
+                    pupil_map_shape = list(df.shape)
+                    logger.info(f"PolarizationPupilMap: columns={pupil_map_columns}, shape={df.shape}")
+                except Exception as e:
+                    logger.warning(f"PolarizationPupilMap: Could not extract DataFrame: {e}")
+
+            result = {
+                "success": True,
+                "pupil_map": pupil_map_data,
+                "pupil_map_columns": pupil_map_columns,
+                "pupil_map_shape": pupil_map_shape,
+                "transmission": transmission,
+                "x_field": _extract_value(getattr(data, 'x_field', None)),
+                "y_field": _extract_value(getattr(data, 'y_field', None)),
+                "x_phase": _extract_value(getattr(data, 'x_phase', None)),
+                "y_phase": _extract_value(getattr(data, 'y_phase', None)),
+                "field_x": field_x, "field_y": field_y,
+                "field_index": field_index, "wavelength_index": wavelength_index,
+                "wavelength_um": wavelength_um, "surface": str(surface),
+                "sampling": sampling, "jx": jx, "jy": jy,
+                "input_x_phase": x_phase, "input_y_phase": y_phase,
+            }
+            _log_raw_output("get_polarization_pupil_map", result)
+            return result
+        except Exception as e:
+            logger.error(f"get_polarization_pupil_map failed: {e}")
+            return {"success": False, "error": str(e)}
+
+    def get_polarization_transmission(
+        self,
+        sampling: str = "32x32",
+        unpolarized: bool = False,
+        jx: float = 1.0,
+        jy: float = 0.0,
+        x_phase: float = 0.0,
+        y_phase: float = 0.0,
+    ) -> dict[str, Any]:
+        """Get Polarization Transmission data via ZosPy PolarizationTransmission wrapper."""
+        try:
+            fields = self.oss.SystemData.Fields
+            num_fields = fields.NumberOfFields
+            wavelengths = self.oss.SystemData.Wavelengths
+            num_wavelengths = wavelengths.NumberOfWavelengths
+
+            field_info = []
+            for i in range(1, num_fields + 1):
+                f = fields.GetField(i)
+                field_info.append({"index": i, "x": _extract_value(f.X), "y": _extract_value(f.Y)})
+
+            wavelength_info = []
+            for i in range(1, num_wavelengths + 1):
+                wl = wavelengths.GetWavelength(i)
+                wavelength_info.append({"index": i, "um": _extract_value(wl.Wavelength, 0.5876)})
+
+            pt_analysis = self._zp.analyses.polarization.PolarizationTransmission(
+                sampling=sampling, unpolarized=unpolarized,
+                jx=jx, jy=jy, x_phase=x_phase, y_phase=y_phase,
+            )
+            pt_start = time.perf_counter()
+            try:
+                pt_result = pt_analysis.run(self.oss)
+            finally:
+                log_timing(logger, "PolarizationTransmission.run", (time.perf_counter() - pt_start) * 1000)
+
+            if pt_result is None or not hasattr(pt_result, 'data') or pt_result.data is None:
+                return {"success": False, "error": "PolarizationTransmission returned no data"}
+            data = pt_result.data
+
+            field_transmissions = []
+            if hasattr(data, 'field_transmissions') and data.field_transmissions:
+                for ft in data.field_transmissions:
+                    ft_entry = {
+                        "field_pos": _extract_value(getattr(ft, 'field_pos', None)),
+                        "total_transmission": _extract_value(getattr(ft, 'total_transmission', None)),
+                    }
+                    if hasattr(ft, 'transmissions') and ft.transmissions:
+                        try:
+                            ft_entry["transmissions"] = {str(k): float(v) for k, v in ft.transmissions.items()}
+                        except Exception as e:
+                            logger.warning(f"Could not extract field transmission details: {e}")
+                    field_transmissions.append(ft_entry)
+
+            chief_ray_transmissions = []
+            if hasattr(data, 'chief_ray_transmissions') and data.chief_ray_transmissions:
+                for crt in data.chief_ray_transmissions:
+                    crt_entry = {"field_pos": _extract_value(getattr(crt, 'field_pos', None))}
+                    if hasattr(crt, 'wavelength') and crt.wavelength:
+                        crt_entry["wavelength"] = {str(k): _extract_value(v) for k, v in crt.wavelength.items()}
+                    if hasattr(crt, 'transmissions') and crt.transmissions is not None:
+                        try:
+                            df = crt.transmissions
+                            crt_entry["transmissions_data"] = df.values.tolist()
+                            crt_entry["transmissions_columns"] = list(df.columns)
+                        except Exception as e:
+                            logger.warning(f"Could not extract chief ray transmission DataFrame: {e}")
+                    chief_ray_transmissions.append(crt_entry)
+
+            result = {
+                "success": True,
+                "field_transmissions": field_transmissions,
+                "chief_ray_transmissions": chief_ray_transmissions,
+                "x_field": float(data.x_field) if getattr(data, 'x_field', None) is not None else None,
+                "y_field": float(data.y_field) if getattr(data, 'y_field', None) is not None else None,
+                "x_phase": float(data.x_phase) if getattr(data, 'x_phase', None) is not None else None,
+                "y_phase": float(data.y_phase) if getattr(data, 'y_phase', None) is not None else None,
+                "grid_size": str(getattr(data, 'grid_size', sampling)),
+                "num_fields": num_fields, "num_wavelengths": num_wavelengths,
+                "field_info": field_info, "wavelength_info": wavelength_info,
+                "unpolarized": unpolarized, "jx": jx, "jy": jy,
+                "input_x_phase": x_phase, "input_y_phase": y_phase,
+            }
+            _log_raw_output("get_polarization_transmission", result)
+            return result
+        except Exception as e:
+            logger.error(f"get_polarization_transmission failed: {e}")
+            return {"success": False, "error": str(e)}
 
 
 class ZosPyError(Exception):

@@ -648,6 +648,48 @@ class MTFResponse(BaseModel):
     error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 
+class HuygensMTFRequest(BaseModel):
+    """Huygens MTF analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    field_index: int = Field(default=0, ge=0, description="Field index (0 = all fields, 1+ = specific field, 1-indexed)")
+    wavelength_index: int = Field(default=1, ge=1, description="Wavelength index (1-indexed)")
+    sampling: str = Field(default="64x64", description="Pupil sampling grid")
+    maximum_frequency: float = Field(default=0.0, ge=0, description="Maximum spatial frequency (cycles/mm). 0 = auto.")
+
+
+
+
+class RayFanRequest(BaseModel):
+    """Ray Fan analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    field_index: int = Field(default=0, ge=0, description="Field index (0 = all fields, 1+ = specific field, 1-indexed)")
+    wavelength_index: int = Field(default=0, ge=0, description="Wavelength index (0 = all wavelengths, 1+ = specific, 1-indexed)")
+    plot_scale: float = Field(default=0.0, ge=0, description="Maximum vertical scale for plots; 0 = auto")
+    number_of_rays: int = Field(default=20, ge=5, le=100, description="Number of rays traced on each side of origin")
+
+
+class RayFanFieldData(BaseModel):
+    """Ray fan data for a single field/wavelength combination."""
+    field_index: int = Field(description="0-indexed field number")
+    field_x: float = Field(description="Field X coordinate")
+    field_y: float = Field(description="Field Y coordinate")
+    wavelength_um: float = Field(default=0.0, description="Wavelength in micrometers")
+    wavelength_index: int = Field(default=0, description="Wavelength index")
+    tangential_py: list[float] = Field(default_factory=list, description="Tangential pupil Y coordinates")
+    tangential_ey: list[float] = Field(default_factory=list, description="Tangential aberration EY values")
+    sagittal_px: list[float] = Field(default_factory=list, description="Sagittal pupil X coordinates")
+    sagittal_ex: list[float] = Field(default_factory=list, description="Sagittal aberration EX values")
+
+
+class RayFanResponse(BaseModel):
+    """Ray Fan analysis response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    fans: Optional[list[RayFanFieldData]] = Field(default=None, description="Per-field/wavelength fan data")
+    max_aberration: Optional[float] = Field(default=None, description="Maximum aberration value")
+    num_fields: int = Field(default=0, description="Number of fields in the system")
+    num_wavelengths: int = Field(default=0, description="Number of wavelengths")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
 class PSFRequest(BaseModel):
     """PSF analysis request."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
@@ -668,6 +710,32 @@ class PSFResponse(BaseModel):
     wavelength_um: Optional[float] = Field(default=None, description="Wavelength in micrometers")
     field_x: Optional[float] = Field(default=None, description="Field X coordinate")
     field_y: Optional[float] = Field(default=None, description="Field Y coordinate")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
+class GeometricImageRequest(BaseModel):
+    """Geometric Image Analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    field_size: float = Field(default=0.0, ge=0, description="Image width in field coordinates (0 = auto)")
+    image_size: float = Field(default=50.0, gt=0, description="Detector size in lens units")
+    rays_x_1000: int = Field(default=10, ge=1, le=100, description="Approximate ray count in thousands")
+    number_of_pixels: int = Field(default=100, ge=10, le=1000, description="Pixels across image width")
+    field: int = Field(default=1, ge=1, description="Field number (1-indexed)")
+    wavelength: str = Field(default="All", description="Wavelength: 'All' or wavelength number")
+
+
+class GeometricImageResponse(BaseModel):
+    """Geometric Image Analysis response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    image: Optional[str] = Field(default=None, description="Base64-encoded numpy array bytes")
+    image_format: Optional[str] = Field(default=None, description="Image format: 'numpy_array'")
+    array_shape: Optional[list[int]] = Field(default=None, description="Shape for numpy array reconstruction")
+    array_dtype: Optional[str] = Field(default=None, description="Dtype for numpy array reconstruction")
+    field_size: Optional[float] = Field(default=None, description="Field size used")
+    image_size: Optional[float] = Field(default=None, description="Image size used")
+    rays_x_1000: Optional[int] = Field(default=None, description="Rays x 1000 used")
+    number_of_pixels: Optional[int] = Field(default=None, description="Number of pixels used")
+    paraxial: Optional[dict[str, Any]] = Field(default=None, description="Paraxial properties")
     error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 
@@ -781,6 +849,14 @@ class ParaxialResponse(BaseModel):
     field_unit: Optional[str] = Field(default=None, description="Field unit (e.g. deg)")
     image_height: Optional[float] = Field(default=None, description="Paraxial image height (mm)")
     error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
+class SurfaceDataReportResponse(BaseModel):
+    """Surface Data Report response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    surfaces: Optional[list[dict[str, Any]]] = Field(default=None, description="Per-surface data (edge thickness, material, refractive index, power)")
+    paraxial: Optional[dict[str, Any]] = Field(default=None, description="Paraxial properties")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 
 # =============================================================================
@@ -1138,6 +1214,97 @@ async def apply_optimization_wizard(
     )
 
 
+class ZernikeCoefficientsRequest(BaseModel):
+    """Zernike Standard Coefficients analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    field_index: int = Field(default=1, ge=1, description="Field index (1-indexed)")
+    wavelength_index: int = Field(default=1, ge=1, description="Wavelength index (1-indexed)")
+    sampling: str = Field(default="64x64", description="Pupil sampling grid (e.g., '64x64', '128x128')")
+    maximum_term: int = Field(default=37, ge=1, le=231, description="Maximum Zernike term number")
+
+
+class ZernikeCoefficientsDetailResponse(BaseModel):
+    """Zernike Standard Coefficients response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    coefficients: Optional[list[dict[str, Any]]] = Field(default=None, description="List of {term, value, formula} dicts")
+    pv_to_chief: Optional[float] = Field(default=None, description="P-V wavefront error to chief ray (waves)")
+    pv_to_centroid: Optional[float] = Field(default=None, description="P-V wavefront error to centroid (waves)")
+    rms_to_chief: Optional[float] = Field(default=None, description="RMS wavefront error to chief ray (waves)")
+    rms_to_centroid: Optional[float] = Field(default=None, description="RMS wavefront error to centroid (waves)")
+    strehl_ratio: Optional[float] = Field(default=None, description="Strehl ratio (0-1)")
+    surface: Optional[str] = Field(default=None, description="Analysis surface")
+    field_x: Optional[float] = Field(default=None, description="Field X coordinate")
+    field_y: Optional[float] = Field(default=None, description="Field Y coordinate")
+    field_index: Optional[int] = Field(default=None, description="Field index used")
+    wavelength_index: Optional[int] = Field(default=None, description="Wavelength index used")
+    wavelength_um: Optional[float] = Field(default=None, description="Wavelength in micrometers")
+    maximum_term: Optional[int] = Field(default=None, description="Maximum Zernike term computed")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
+@app.post("/zernike-standard-coefficients", response_model=ZernikeCoefficientsDetailResponse)
+async def get_zernike_standard_coefficients(
+    request: ZernikeCoefficientsRequest,
+    _: None = Depends(verify_api_key),
+) -> ZernikeCoefficientsDetailResponse:
+    """
+    Get Zernike Standard Coefficients decomposition of the wavefront.
+
+    Returns individual Zernike polynomial terms (Z1-Z37+), P-V and RMS wavefront
+    error, and Strehl ratio.
+    """
+    return await _run_endpoint(
+        "/zernike-standard-coefficients", ZernikeCoefficientsDetailResponse, request,
+        lambda: zospy_handler.get_zernike_standard_coefficients(
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
+            sampling=request.sampling,
+            maximum_term=request.maximum_term,
+        ),
+    )
+
+
+class ZernikeVsFieldRequest(BaseModel):
+    """Zernike Coefficients vs Field analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    maximum_term: int = Field(default=37, ge=1, le=231, description="Maximum Zernike term number")
+    wavelength_index: int = Field(default=1, ge=1, description="Wavelength index (1-indexed)")
+    sampling: str = Field(default="64x64", description="Pupil sampling grid (e.g., '64x64', '128x128')")
+    field_density: int = Field(default=20, ge=5, le=100, description="Number of field sample points")
+
+
+class ZernikeVsFieldResponse(BaseModel):
+    """Zernike Coefficients vs Field response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    field_positions: Optional[list[float]] = Field(default=None, description="Field position values")
+    coefficients: Optional[dict[str, list[float]]] = Field(default=None, description="Dict mapping term number (str) to list of coefficient values per field")
+    wavelength_um: Optional[float] = Field(default=None, description="Wavelength in micrometers")
+    field_unit: Optional[str] = Field(default=None, description="Field coordinate unit (e.g. deg, mm)")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
+@app.post("/zernike-vs-field", response_model=ZernikeVsFieldResponse)
+async def get_zernike_vs_field(
+    request: ZernikeVsFieldRequest,
+    _: None = Depends(verify_api_key),
+) -> ZernikeVsFieldResponse:
+    """
+    Get Zernike Coefficients vs Field analysis.
+
+    Returns how each Zernike polynomial coefficient varies across field positions.
+    Critical for understanding field-dependent aberrations.
+    """
+    return await _run_endpoint(
+        "/zernike-vs-field", ZernikeVsFieldResponse, request,
+        lambda: zospy_handler.get_zernike_vs_field(
+            maximum_term=request.maximum_term,
+            wavelength_index=request.wavelength_index,
+            sampling=request.sampling,
+            field_density=request.field_density,
+        ),
+    )
+
+
 class RmsVsFieldRequest(BaseModel):
     """RMS vs Field analysis request."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
@@ -1205,6 +1372,113 @@ async def get_mtf(
     )
 
 
+
+@app.post("/ray-fan", response_model=RayFanResponse)
+async def get_ray_fan(
+    request: RayFanRequest,
+    _: None = Depends(verify_api_key),
+) -> RayFanResponse:
+    """
+    Get Ray Fan (Ray Aberration) data.
+
+    Returns raw pupil/aberration data for tangential and sagittal fans.
+    Image rendering happens on the Mac analysis service side.
+    """
+    return await _run_endpoint(
+        "/ray-fan", RayFanResponse, request,
+        lambda: zospy_handler.get_ray_fan(
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
+            plot_scale=request.plot_scale,
+            number_of_rays=request.number_of_rays,
+        ),
+    )
+
+
+@app.post("/huygens-mtf", response_model=MTFResponse)
+async def get_huygens_mtf(
+    request: HuygensMTFRequest,
+    _: None = Depends(verify_api_key),
+) -> MTFResponse:
+    """
+    Get Huygens MTF data. More accurate than FFT MTF for systems with
+    significant aberrations or tilted/decentered elements.
+
+    Returns raw frequency/modulation data. Image rendering happens on Mac side.
+    """
+    return await _run_endpoint(
+        "/huygens-mtf", MTFResponse, request,
+        lambda: zospy_handler.get_huygens_mtf(
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
+            sampling=request.sampling,
+            maximum_frequency=request.maximum_frequency,
+        ),
+    )
+
+
+class ThroughFocusMTFRequest(BaseModel):
+    """Through Focus MTF analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    field_index: int = Field(default=0, ge=0, description="Field index (0 = all fields, 1+ = specific field, 1-indexed)")
+    wavelength_index: int = Field(default=1, ge=1, description="Wavelength index (1-indexed)")
+    sampling: str = Field(default="64x64", description="Pupil sampling grid")
+    delta_focus: float = Field(default=0.1, gt=0, description="Focus step size in mm")
+    frequency: float = Field(default=0.0, ge=0, description="Spatial frequency (cycles/mm). 0 = default.")
+    number_of_steps: int = Field(default=5, ge=1, le=50, description="Number of steps in each direction from focus")
+
+
+class ThroughFocusMTFFieldData(BaseModel):
+    """Through Focus MTF data for a single field point."""
+    field_index: int = Field(description="0-indexed field number")
+    field_x: float = Field(description="Field X coordinate")
+    field_y: float = Field(description="Field Y coordinate")
+    tangential: list[float] = Field(default_factory=list, description="Tangential MTF values at each focus position")
+    sagittal: list[float] = Field(default_factory=list, description="Sagittal MTF values at each focus position")
+
+
+class BestFocusData(BaseModel):
+    """Best focus position data."""
+    position: float = Field(description="Best focus position (mm)")
+    mtf_value: float = Field(description="MTF value at best focus")
+
+
+class ThroughFocusMTFResponse(BaseModel):
+    """Through Focus MTF analysis response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    focus_positions: Optional[list[float]] = Field(default=None, description="Defocus positions (mm)")
+    fields: Optional[list[ThroughFocusMTFFieldData]] = Field(default=None, description="Per-field MTF data")
+    best_focus: Optional[BestFocusData] = Field(default=None, description="Best focus position and MTF value")
+    frequency: Optional[float] = Field(default=None, description="Spatial frequency (cycles/mm)")
+    wavelength_um: Optional[float] = Field(default=None, description="Wavelength in micrometers")
+    delta_focus: Optional[float] = Field(default=None, description="Focus step size (mm)")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
+@app.post("/through-focus-mtf", response_model=ThroughFocusMTFResponse)
+async def get_through_focus_mtf(
+    request: ThroughFocusMTFRequest,
+    _: None = Depends(verify_api_key),
+) -> ThroughFocusMTFResponse:
+    """
+    Get Through Focus MTF data using FFT Through Focus MTF analysis.
+
+    Shows how MTF varies at different focus positions. Returns raw data;
+    image rendering happens on Mac side.
+    """
+    return await _run_endpoint(
+        "/through-focus-mtf", ThroughFocusMTFResponse, request,
+        lambda: zospy_handler.get_through_focus_mtf(
+            sampling=request.sampling,
+            delta_focus=request.delta_focus,
+            frequency=request.frequency,
+            number_of_steps=request.number_of_steps,
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
+        ),
+    )
+
+
 @app.post("/psf", response_model=PSFResponse)
 async def get_psf(
     request: PSFRequest,
@@ -1225,12 +1499,117 @@ async def get_psf(
     )
 
 
+@app.post("/geometric-image-analysis", response_model=GeometricImageResponse)
+async def get_geometric_image_analysis(
+    request: GeometricImageRequest,
+    _: None = Depends(verify_api_key),
+) -> GeometricImageResponse:
+    """
+    Run Geometric Image Analysis to simulate how an extended scene looks
+    through the optical system.
+
+    Returns raw 2D intensity grid as numpy array. Image rendering happens on Mac side.
+    """
+    # Parse wavelength: could be "All" or a number string
+    wavelength: str | int = request.wavelength
+    try:
+        wavelength = int(request.wavelength)
+    except (ValueError, TypeError):
+        pass
+
+    return await _run_endpoint(
+        "/geometric-image-analysis", GeometricImageResponse, request,
+        lambda: zospy_handler.get_geometric_image_analysis(
+            field_size=request.field_size,
+            image_size=request.image_size,
+            rays_x_1000=request.rays_x_1000,
+            number_of_pixels=request.number_of_pixels,
+            field=request.field,
+            wavelength=wavelength,
+        ),
+    )
+
+
+class HuygensPSFRequest(BaseModel):
+    """Huygens PSF analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    field_index: int = Field(default=1, ge=1, description="Field index (1-indexed)")
+    wavelength_index: int = Field(default=1, ge=1, description="Wavelength index (1-indexed)")
+    sampling: str = Field(default="64x64", description="Pupil sampling grid")
+
+
+@app.post("/huygens-psf", response_model=PSFResponse)
+async def get_huygens_psf(
+    request: HuygensPSFRequest,
+    _: None = Depends(verify_api_key),
+) -> PSFResponse:
+    """
+    Get Huygens PSF (Point Spread Function) data.
+
+    More accurate than FFT PSF for highly aberrated systems.
+    Returns raw 2D intensity grid as numpy array. Image rendering happens on Mac side.
+    """
+    return await _run_endpoint(
+        "/huygens-psf", PSFResponse, request,
+        lambda: zospy_handler.get_huygens_psf(
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
+            sampling=request.sampling,
+        ),
+    )
+
+
 @app.post("/paraxial", response_model=ParaxialResponse)
 async def get_paraxial(request: SystemRequest, _: None = Depends(verify_api_key)) -> ParaxialResponse:
     """Get comprehensive first-order (paraxial) optical properties."""
     return await _run_endpoint(
         "/paraxial", ParaxialResponse, request,
         lambda: zospy_handler.get_paraxial(),
+    )
+
+
+@app.post("/surface-data-report", response_model=SurfaceDataReportResponse)
+async def get_surface_data_report(
+    request: SystemRequest,
+    _: None = Depends(verify_api_key),
+) -> SurfaceDataReportResponse:
+    """
+    Get Surface Data Report for every surface in the system.
+
+    Returns per-surface: edge thickness, center thickness, material,
+    refractive index, and surface power. Essential for manufacturability checks.
+    """
+    return await _run_endpoint(
+        "/surface-data-report", SurfaceDataReportResponse, request,
+        lambda: zospy_handler.get_surface_data_report(),
+    )
+
+
+class CardinalPointEntry(BaseModel):
+    """Single cardinal point entry."""
+    name: str = Field(description="Cardinal point name (e.g. 'Focal Length (Object)')")
+    value: Optional[float] = Field(default=None, description="Cardinal point value")
+    units: str = Field(default="mm", description="Units")
+
+
+class CardinalPointsResponse(BaseModel):
+    """Cardinal points analysis response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    cardinal_points: Optional[list[CardinalPointEntry]] = Field(default=None, description="List of cardinal point entries")
+    starting_surface: Optional[int] = Field(default=None, description="Starting surface number")
+    ending_surface: Optional[int] = Field(default=None, description="Ending surface number")
+    wavelength: Optional[float] = Field(default=None, description="Analysis wavelength")
+    orientation: Optional[str] = Field(default=None, description="Analysis orientation (Y-Z or X-Z)")
+    lens_units: Optional[str] = Field(default=None, description="Lens units (e.g. mm)")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
+@app.post("/cardinal-points", response_model=CardinalPointsResponse)
+async def get_cardinal_points(request: SystemRequest, _: None = Depends(verify_api_key)) -> CardinalPointsResponse:
+    """Get cardinal points of the optical system."""
+    return await _run_endpoint(
+        "/cardinal-points", CardinalPointsResponse, request,
+        lambda: zospy_handler.get_cardinal_points(),
     )
 
 
@@ -1372,6 +1751,245 @@ async def get_operand_catalog(
             except Exception as e:
                 await _handle_zospy_error("/operand-catalog", e)
                 return OperandCatalogResponse(success=False, error=str(e))
+
+
+class SurfaceCurvatureRequest(BaseModel):
+    """Surface Curvature analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    surface: int = Field(default=1, ge=1, description="Surface number (1-indexed)")
+    sampling: str = Field(default="65x65", description="Grid sampling resolution (e.g., '65x65', '129x129')")
+    show_as: str = Field(default="Surface", description="Display format: Surface, Contour, GreyScale, etc.")
+    data: str = Field(default="TangentialCurvature", description="Curvature data type: TangentialCurvature, SagittalCurvature, X_Curvature, Y_Curvature")
+    remove: str = Field(default="None_", description="Removal option: None_, BaseROC, BestFitSphere")
+
+
+class SurfaceCurvatureResponse(BaseModel):
+    """Surface Curvature analysis response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    image: Optional[str] = Field(default=None, description="Base64-encoded numpy array bytes")
+    image_format: Optional[str] = Field(default=None, description="Image format: 'numpy_array'")
+    array_shape: Optional[list[int]] = Field(default=None, description="Shape for numpy array reconstruction")
+    array_dtype: Optional[str] = Field(default=None, description="Dtype for numpy array reconstruction")
+    min_curvature: Optional[float] = Field(default=None, description="Minimum curvature value")
+    max_curvature: Optional[float] = Field(default=None, description="Maximum curvature value")
+    mean_curvature: Optional[float] = Field(default=None, description="Mean curvature value")
+    surface_number: Optional[int] = Field(default=None, description="Surface number analyzed")
+    data_type: Optional[str] = Field(default=None, description="Curvature data type used")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
+@app.post("/surface-curvature", response_model=SurfaceCurvatureResponse)
+async def get_surface_curvature(
+    request: SurfaceCurvatureRequest,
+    _: None = Depends(verify_api_key),
+) -> SurfaceCurvatureResponse:
+    """
+    Get surface curvature map for a specific surface.
+
+    Returns raw curvature grid data as a numpy array. Image rendering
+    happens on the Mac analysis service side.
+    """
+    return await _run_endpoint(
+        "/surface-curvature", SurfaceCurvatureResponse, request,
+        lambda: zospy_handler.get_surface_curvature(
+            surface=request.surface,
+            sampling=request.sampling,
+            show_as=request.show_as,
+            data=request.data,
+            remove=request.remove,
+        ),
+    )
+
+
+# =============================================================================
+# Physical Optics Propagation
+# =============================================================================
+
+
+class PhysicalOpticsPropagationRequest(BaseModel):
+    """Physical Optics Propagation (POP) analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    field_index: int = Field(default=1, ge=1, description="Field index (1-indexed)")
+    wavelength_index: int = Field(default=1, ge=1, description="Wavelength index (1-indexed)")
+    beam_type: str = Field(default="GaussianWaist", description="Beam type (GaussianWaist, GaussianAngle, TopHat, etc.)")
+    waist_x: Optional[float] = Field(default=None, description="Beam waist X (mm)")
+    waist_y: Optional[float] = Field(default=None, description="Beam waist Y (mm)")
+    x_sampling: int = Field(default=64, description="X sampling points (power of 2)")
+    y_sampling: int = Field(default=64, description="Y sampling points (power of 2)")
+    x_width: float = Field(default=4.0, description="X display width (mm)")
+    y_width: float = Field(default=4.0, description="Y display width (mm)")
+    start_surface: int = Field(default=1, description="Start surface (1-indexed)")
+    end_surface: str = Field(default="Image", description="End surface ('Image' or surface index)")
+    use_polarization: bool = Field(default=False, description="Use polarization")
+    data_type: str = Field(default="Irradiance", description="Data type: Irradiance or Phase")
+
+
+class PhysicalOpticsPropagationResponse(BaseModel):
+    """Physical Optics Propagation (POP) analysis response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    image: Optional[str] = Field(default=None, description="Base64-encoded numpy array bytes")
+    image_format: Optional[str] = Field(default=None, description="Image format: 'numpy_array'")
+    array_shape: Optional[list[int]] = Field(default=None, description="Shape for numpy array reconstruction")
+    array_dtype: Optional[str] = Field(default=None, description="Dtype for numpy array reconstruction")
+    beam_params: Optional[dict[str, Any]] = Field(default=None, description="Propagated beam parameters")
+    wavelength_um: Optional[float] = Field(default=None, description="Wavelength in micrometers")
+    field_x: Optional[float] = Field(default=None, description="Field X coordinate")
+    field_y: Optional[float] = Field(default=None, description="Field Y coordinate")
+    data_type: Optional[str] = Field(default=None, description="Data type used (Irradiance, Phase)")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
+@app.post("/physical-optics-propagation", response_model=PhysicalOpticsPropagationResponse)
+async def get_physical_optics_propagation(
+    request: PhysicalOpticsPropagationRequest,
+    _: None = Depends(verify_api_key),
+) -> PhysicalOpticsPropagationResponse:
+    """
+    Run Physical Optics Propagation (POP) analysis.
+
+    Returns raw 2D beam profile as numpy array. Image rendering happens on Mac side.
+    """
+    # Parse end_surface: if numeric string, convert to int for the handler
+    end_surface = request.end_surface
+    try:
+        end_surface_val = int(end_surface)
+    except (ValueError, TypeError):
+        end_surface_val = end_surface
+
+    return await _run_endpoint(
+        "/physical-optics-propagation", PhysicalOpticsPropagationResponse, request,
+        lambda: zospy_handler.get_physical_optics_propagation(
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
+            beam_type=request.beam_type,
+            waist_x=request.waist_x,
+            waist_y=request.waist_y,
+            x_sampling=request.x_sampling,
+            y_sampling=request.y_sampling,
+            x_width=request.x_width,
+            y_width=request.y_width,
+            start_surface=request.start_surface,
+            end_surface=end_surface_val,
+            use_polarization=request.use_polarization,
+            data_type=request.data_type,
+        ),
+    )
+
+
+# =============================================================================
+# Polarization Analyses
+# =============================================================================
+
+
+class PolarizationPupilMapRequest(BaseModel):
+    """Polarization Pupil Map analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    field_index: int = Field(default=1, ge=1, description="Field index (1-indexed)")
+    wavelength_index: int = Field(default=1, ge=1, description="Wavelength index (1-indexed)")
+    surface: str = Field(default="Image", description="Target surface ('Image' or integer)")
+    sampling: str = Field(default="11x11", description="Pupil sampling grid")
+    jx: float = Field(default=1.0, description="Jones vector X-component")
+    jy: float = Field(default=0.0, description="Jones vector Y-component")
+    x_phase: float = Field(default=0.0, description="X-component phase (degrees)")
+    y_phase: float = Field(default=0.0, description="Y-component phase (degrees)")
+
+
+class PolarizationPupilMapResponse(BaseModel):
+    """Polarization Pupil Map analysis response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    pupil_map: Optional[list[list[float]]] = Field(default=None, description="2D pupil map data rows")
+    pupil_map_columns: Optional[list[str]] = Field(default=None, description="Column names for the pupil map")
+    pupil_map_shape: Optional[list[int]] = Field(default=None, description="Shape of the pupil map [rows, cols]")
+    transmission: Optional[float] = Field(default=None, description="Total transmission")
+    x_field: Optional[float] = Field(default=None, description="Resulting X electric field")
+    y_field: Optional[float] = Field(default=None, description="Resulting Y electric field")
+    x_phase: Optional[float] = Field(default=None, description="Resulting X phase (degrees)")
+    y_phase: Optional[float] = Field(default=None, description="Resulting Y phase (degrees)")
+    field_x: Optional[float] = Field(default=None, description="Field X coordinate")
+    field_y: Optional[float] = Field(default=None, description="Field Y coordinate")
+    field_index: Optional[int] = Field(default=None, description="Field index used")
+    wavelength_index: Optional[int] = Field(default=None, description="Wavelength index used")
+    wavelength_um: Optional[float] = Field(default=None, description="Wavelength in micrometers")
+    surface: Optional[str] = Field(default=None, description="Surface analyzed")
+    sampling: Optional[str] = Field(default=None, description="Sampling grid used")
+    jx: Optional[float] = Field(default=None, description="Input Jones vector X")
+    jy: Optional[float] = Field(default=None, description="Input Jones vector Y")
+    input_x_phase: Optional[float] = Field(default=None, description="Input X phase")
+    input_y_phase: Optional[float] = Field(default=None, description="Input Y phase")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
+@app.post("/polarization-pupil-map", response_model=PolarizationPupilMapResponse)
+async def get_polarization_pupil_map(
+    request: PolarizationPupilMapRequest,
+    _: None = Depends(verify_api_key),
+) -> PolarizationPupilMapResponse:
+    """Get Polarization Pupil Map showing polarization state across the pupil."""
+    return await _run_endpoint(
+        "/polarization-pupil-map", PolarizationPupilMapResponse, request,
+        lambda: zospy_handler.get_polarization_pupil_map(
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
+            surface=request.surface,
+            sampling=request.sampling,
+            jx=request.jx,
+            jy=request.jy,
+            x_phase=request.x_phase,
+            y_phase=request.y_phase,
+        ),
+    )
+
+
+class PolarizationTransmissionRequest(BaseModel):
+    """Polarization Transmission analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    sampling: str = Field(default="32x32", description="Pupil sampling grid")
+    unpolarized: bool = Field(default=False, description="Use unpolarized light")
+    jx: float = Field(default=1.0, description="Jones vector X-component")
+    jy: float = Field(default=0.0, description="Jones vector Y-component")
+    x_phase: float = Field(default=0.0, description="X-component phase (degrees)")
+    y_phase: float = Field(default=0.0, description="Y-component phase (degrees)")
+
+
+class PolarizationTransmissionResponse(BaseModel):
+    """Polarization Transmission analysis response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    field_transmissions: Optional[list[dict]] = Field(default=None, description="Per-field transmission data")
+    chief_ray_transmissions: Optional[list[dict]] = Field(default=None, description="Per-field chief ray transmission data")
+    x_field: Optional[float] = Field(default=None, description="Resulting X electric field")
+    y_field: Optional[float] = Field(default=None, description="Resulting Y electric field")
+    x_phase: Optional[float] = Field(default=None, description="Resulting X phase")
+    y_phase: Optional[float] = Field(default=None, description="Resulting Y phase")
+    grid_size: Optional[str] = Field(default=None, description="Grid size used")
+    num_fields: Optional[int] = Field(default=None, description="Number of fields in system")
+    num_wavelengths: Optional[int] = Field(default=None, description="Number of wavelengths in system")
+    field_info: Optional[list[dict]] = Field(default=None, description="Field position info")
+    wavelength_info: Optional[list[dict]] = Field(default=None, description="Wavelength info")
+    unpolarized: Optional[bool] = Field(default=None, description="Whether unpolarized mode was used")
+    jx: Optional[float] = Field(default=None, description="Input Jones vector X")
+    jy: Optional[float] = Field(default=None, description="Input Jones vector Y")
+    input_x_phase: Optional[float] = Field(default=None, description="Input X phase")
+    input_y_phase: Optional[float] = Field(default=None, description="Input Y phase")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
+@app.post("/polarization-transmission", response_model=PolarizationTransmissionResponse)
+async def get_polarization_transmission(
+    request: PolarizationTransmissionRequest,
+    _: None = Depends(verify_api_key),
+) -> PolarizationTransmissionResponse:
+    """Get Polarization Transmission showing transmission vs field with polarization effects."""
+    return await _run_endpoint(
+        "/polarization-transmission", PolarizationTransmissionResponse, request,
+        lambda: zospy_handler.get_polarization_transmission(
+            sampling=request.sampling,
+            unpolarized=request.unpolarized,
+            jx=request.jx,
+            jy=request.jy,
+            x_phase=request.x_phase,
+            y_phase=request.y_phase,
+        ),
+    )
 
 
 if __name__ == "__main__":
