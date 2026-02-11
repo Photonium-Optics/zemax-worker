@@ -107,6 +107,7 @@ def _init_zospy() -> Optional[ZosPyHandler]:
     global _last_connection_error
     record_connect_attempt(mode="standalone")
     record_license_seat_info()
+    handler = None
     try:
         handler = ZosPyHandler()
         version = handler.get_version()
@@ -115,6 +116,12 @@ def _init_zospy() -> Optional[ZosPyHandler]:
         _last_connection_error = None
         return handler
     except Exception as e:
+        # Clean up partially-constructed handler to avoid orphaned OpticStudio processes
+        if handler is not None:
+            try:
+                handler.close()
+            except Exception:
+                pass
         tb = _tb_mod.format_exc()
         logger.error(f"Failed to initialize ZosPy: {e}")
         record_connect_failure(error=str(e), tb=tb)
