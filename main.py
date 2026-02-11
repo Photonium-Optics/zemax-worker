@@ -208,11 +208,7 @@ async def _handle_zospy_error(operation_name: str, error: Exception) -> None:
     on a zombie OpticStudio, deadlocking the worker under _zospy_lock.
     """
     error_type = type(error).__name__
-    if isinstance(error, ZosPyError):
-        logger.error(f"{operation_name} ZosPyError: {error}")
-    else:
-        logger.error(f"{operation_name} failed: {error}")
-
+    logger.error(f"{operation_name} {error_type}: {error}")
     logger.warning(f"{operation_name}: reconnecting after {error_type}...")
     record_reconnect_triggered(
         reason=f"{error_type} in {operation_name}: {error}",
@@ -1997,7 +1993,7 @@ def _kill_orphaned_opticstudio() -> int:
     All OpticStudio instances on this machine are headless API instances
     (standalone mode), so it's safe to kill them all at startup.
 
-    Returns the number of processes killed.
+    Returns the number of processes targeted for cleanup.
     """
     try:
         import psutil
@@ -2036,10 +2032,13 @@ def _kill_orphaned_opticstudio() -> int:
         except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
             logger.warning(f"Could not force-kill PID {proc.pid}: {e}")
 
-    killed = len(gone) + len(alive)
-    logger.info(f"Cleaned up {killed} orphaned process(es), waiting 3s for license release...")
+    logger.info(
+        f"Cleaned up {len(targets)} orphaned process(es) "
+        f"({len(gone)} terminated, {len(alive)} force-killed), "
+        f"waiting 3s for license release..."
+    )
     time.sleep(3)
-    return killed
+    return len(targets)
 
 
 if __name__ == "__main__":

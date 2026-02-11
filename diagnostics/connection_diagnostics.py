@@ -13,9 +13,7 @@ import json
 import logging
 import os
 import time
-import traceback
 from collections import deque
-from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -124,41 +122,34 @@ def record_license_seat_info() -> dict[str, Any]:
 
     is_windows = platform.system() == "Windows"
 
-    # Check for OpticStudio processes
+    # Check for OpticStudio / ZOSAPI / Python processes via tasklist
     if is_windows:
-        try:
-            import subprocess
+        import subprocess
+
+        def _count_tasklist(image_name: str) -> list[str]:
+            """Run tasklist for a given IMAGENAME and return matching CSV lines."""
             result = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq OpticStudio.exe", "/FO", "CSV", "/NH"],
+                ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"],
                 capture_output=True, text=True, timeout=5,
             )
-            lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip() and "OpticStudio" in l]
+            keyword = image_name.split(".")[0]
+            return [l.strip() for l in result.stdout.strip().split("\n")
+                    if l.strip() and keyword.lower() in l.lower()]
+
+        try:
+            lines = _count_tasklist("OpticStudio.exe")
             info["opticstudio_processes"] = len(lines)
             info["opticstudio_pids"] = [l.split(",")[1].strip('"') for l in lines] if lines else []
         except Exception as e:
             info["opticstudio_process_check_error"] = str(e)
 
-        # Check for ZOSAPI processes
         try:
-            import subprocess
-            result = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq ZOSAPI.exe", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=5,
-            )
-            lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip() and "ZOSAPI" in l]
-            info["zosapi_processes"] = len(lines)
+            info["zosapi_processes"] = len(_count_tasklist("ZOSAPI.exe"))
         except Exception:
             pass
 
-        # Count ALL python processes (each uvicorn worker is a python process)
         try:
-            import subprocess
-            result = subprocess.run(
-                ["tasklist", "/FI", "IMAGENAME eq python.exe", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=5,
-            )
-            lines = [l.strip() for l in result.stdout.strip().split("\n") if l.strip() and "python" in l.lower()]
-            info["python_processes"] = len(lines)
+            info["python_processes"] = len(_count_tasklist("python.exe"))
         except Exception:
             pass
     else:
