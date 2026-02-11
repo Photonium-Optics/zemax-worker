@@ -4146,10 +4146,20 @@ class ZosPyHandler:
                     solve = cell.GetSolveData()
                     solve_type = str(solve.Type).split('.')[-1] if solve else ""
                     if solve_type == "Variable":
+                        # Like _extract_value but allows Infinity through
+                        # (flat surfaces have infinite radius in OpticStudio)
+                        raw_val = getattr(surf, value_attr)
+                        val = raw_val.value if hasattr(raw_val, 'value') else raw_val
+                        try:
+                            val = float(val)
+                        except (TypeError, ValueError):
+                            val = 0.0
+                        if np.isnan(val):
+                            val = 0.0
                         variable_states.append({
                             "surface_index": surf_idx,
                             "parameter": param_name,
-                            "value": _extract_value(getattr(surf, value_attr), 0.0),
+                            "value": val,
                             "is_variable": True,
                         })
                 except Exception as e:
