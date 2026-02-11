@@ -109,15 +109,6 @@ def record_reconnect_skipped_backoff(remaining_s: float, attempt: int) -> None:
     )
 
 
-def record_connection_alive_check(alive: bool, check_duration_ms: float) -> None:
-    """Record the result of _is_connection_alive() check."""
-    record_event(
-        "alive_check",
-        alive=alive,
-        check_duration_ms=round(check_duration_ms, 1),
-    )
-
-
 def record_license_seat_info() -> dict[str, Any]:
     """
     Try to gather info about OpticStudio license seat usage.

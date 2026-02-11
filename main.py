@@ -126,7 +126,6 @@ def _init_zospy() -> Optional[ZosPyHandler]:
         return None
 
 
-
 def _backoff_delay() -> float:
     """Compute the current exponential backoff delay in seconds."""
     return min(
@@ -202,26 +201,21 @@ async def _ensure_connected() -> Optional[ZosPyHandler]:
 
 
 async def _handle_zospy_error(operation_name: str, error: Exception) -> None:
-    """Handle errors from ZosPy operations, reconnecting only when the connection is dead."""
-    tb = _tb_mod.format_exc()
+    """Handle errors from ZosPy operations by always reconnecting.
+
+    Previous versions conditionally skipped reconnect if a synchronous
+    get_version() COM call succeeded, but that call could hang forever
+    on a zombie OpticStudio, deadlocking the worker under _zospy_lock.
+    """
+    error_type = type(error).__name__
     if isinstance(error, ZosPyError):
         logger.error(f"{operation_name} ZosPyError: {error}")
-        record_reconnect_triggered(
-            reason=f"ZosPyError in {operation_name}: {error}",
-            reconnect_failures=_reconnect_failures,
-            backoff_s=_backoff_delay() if _reconnect_failures > 0 else 0,
-        )
-        await _reconnect_zospy()
-        return
+    else:
+        logger.error(f"{operation_name} failed: {error}")
 
-    # Generic exception (COM/analysis). Always reconnect — the previous alive
-    # check used a synchronous COM call (get_version) with no timeout, which
-    # could hang forever if OpticStudio was in a zombie state, permanently
-    # deadlocking the worker since _zospy_lock is held.
-    logger.error(f"{operation_name} failed: {error}")
-    logger.warning(f"{operation_name}: reconnecting after {type(error).__name__}...")
+    logger.warning(f"{operation_name}: reconnecting after {error_type}...")
     record_reconnect_triggered(
-        reason=f"{type(error).__name__} in {operation_name}: {error}",
+        reason=f"{error_type} in {operation_name}: {error}",
         reconnect_failures=_reconnect_failures,
         backoff_s=_backoff_delay() if _reconnect_failures > 0 else 0,
     )
@@ -2071,9 +2065,6 @@ if __name__ == "__main__":
     # in /health. This is the canonical way uvicorn children discover the total.
     os.environ["WEB_CONCURRENCY"] = str(num_workers)
 
-    # Kill orphaned OpticStudio processes from previous crashed workers.
-    # All OpticStudio instances on this machine are headless API instances
-    # (standalone mode), so it's safe to kill them all before workers connect.
     _kill_orphaned_opticstudio()
 
     uvicorn.run(
