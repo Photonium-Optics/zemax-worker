@@ -47,7 +47,7 @@ from diagnostics.connection_diagnostics import (
     record_connect_attempt, record_connect_success, record_connect_failure,
     record_disconnect, record_operation_start, record_operation_success,
     record_operation_error, record_reconnect_triggered, record_reconnect_skipped_backoff,
-    record_connection_alive_check, record_license_seat_info, get_diagnostic_report,
+    record_license_seat_info, get_diagnostic_report,
 )
 import traceback as _tb_mod
 
@@ -125,22 +125,6 @@ def _init_zospy() -> Optional[ZosPyHandler]:
         _last_connection_error = str(e)
         return None
 
-
-def _is_connection_alive() -> bool:
-    """Check if the OpticStudio COM connection is still responsive."""
-    if zospy_handler is None:
-        record_connection_alive_check(alive=False, check_duration_ms=0)
-        return False
-    t0 = time.monotonic()
-    try:
-        alive = zospy_handler.get_version() != "Unknown"
-        dur = (time.monotonic() - t0) * 1000
-        record_connection_alive_check(alive=alive, check_duration_ms=dur)
-        return alive
-    except Exception:
-        dur = (time.monotonic() - t0) * 1000
-        record_connection_alive_check(alive=False, check_duration_ms=dur)
-        return False
 
 
 def _backoff_delay() -> float:
@@ -230,19 +214,18 @@ async def _handle_zospy_error(operation_name: str, error: Exception) -> None:
         await _reconnect_zospy()
         return
 
-    # Generic exception (COM/analysis). Only reconnect if the connection died;
-    # transient analysis errors should not destroy a working connection.
+    # Generic exception (COM/analysis). Always reconnect — the previous alive
+    # check used a synchronous COM call (get_version) with no timeout, which
+    # could hang forever if OpticStudio was in a zombie state, permanently
+    # deadlocking the worker since _zospy_lock is held.
     logger.error(f"{operation_name} failed: {error}")
-    if _is_connection_alive():
-        logger.info(f"{operation_name}: connection still alive, not reconnecting")
-    else:
-        logger.warning(f"{operation_name}: connection dead, reconnecting...")
-        record_reconnect_triggered(
-            reason=f"connection_dead after {type(error).__name__} in {operation_name}: {error}",
-            reconnect_failures=_reconnect_failures,
-            backoff_s=_backoff_delay() if _reconnect_failures > 0 else 0,
-        )
-        await _reconnect_zospy()
+    logger.warning(f"{operation_name}: reconnecting after {type(error).__name__}...")
+    record_reconnect_triggered(
+        reason=f"{type(error).__name__} in {operation_name}: {error}",
+        reconnect_failures=_reconnect_failures,
+        backoff_s=_backoff_delay() if _reconnect_failures > 0 else 0,
+    )
+    await _reconnect_zospy()
 
 
 def _not_connected_error() -> str:
@@ -2013,6 +1996,58 @@ async def get_polarization_transmission(
     )
 
 
+def _kill_orphaned_opticstudio() -> int:
+    """Kill orphaned OpticStudio/ZOSAPI processes from previous crashed workers.
+
+    Called once from __main__ before uvicorn.run() spawns workers.
+    All OpticStudio instances on this machine are headless API instances
+    (standalone mode), so it's safe to kill them all at startup.
+
+    Returns the number of processes killed.
+    """
+    try:
+        import psutil
+    except ImportError:
+        logger.warning("psutil not installed — skipping orphan cleanup")
+        return 0
+
+    targets = []
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            name = (proc.info['name'] or '').lower()
+            if name in ('opticstudio.exe', 'zosapi.exe'):
+                targets.append(proc)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    if not targets:
+        return 0
+
+    logger.warning(
+        f"Found {len(targets)} orphaned OpticStudio/ZOSAPI process(es), "
+        f"killing: {[(p.pid, p.info['name']) for p in targets]}"
+    )
+
+    for proc in targets:
+        try:
+            proc.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+            logger.warning(f"Could not terminate PID {proc.pid}: {e}")
+
+    gone, alive = psutil.wait_procs(targets, timeout=5)
+
+    for proc in alive:
+        try:
+            proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+            logger.warning(f"Could not force-kill PID {proc.pid}: {e}")
+
+    killed = len(gone) + len(alive)
+    logger.info(f"Cleaned up {killed} orphaned process(es), waiting 3s for license release...")
+    time.sleep(3)
+    return killed
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -2035,6 +2070,11 @@ if __name__ == "__main__":
     # Set WEB_CONCURRENCY so child processes report the correct worker_count
     # in /health. This is the canonical way uvicorn children discover the total.
     os.environ["WEB_CONCURRENCY"] = str(num_workers)
+
+    # Kill orphaned OpticStudio processes from previous crashed workers.
+    # All OpticStudio instances on this machine are headless API instances
+    # (standalone mode), so it's safe to kill them all before workers connect.
+    _kill_orphaned_opticstudio()
 
     uvicorn.run(
         "main:app",
