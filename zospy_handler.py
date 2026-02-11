@@ -344,11 +344,7 @@ class ZosPyHandler:
         except Exception as e:
             # Clean up the OpticStudio process that ZOS() may have launched,
             # otherwise it becomes an orphan consuming a license seat.
-            if hasattr(self, 'zos') and self.zos:
-                try:
-                    self.zos.disconnect()
-                except Exception:
-                    pass
+            self.close()
             raise ZosPyError(f"Failed to initialize ZosPy: {e}")
 
     def close(self) -> None:
