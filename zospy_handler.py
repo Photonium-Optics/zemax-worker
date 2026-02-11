@@ -3846,7 +3846,7 @@ class ZosPyHandler:
         aliases = {"DLS": "DampedLeastSquares"}
         attr_name = aliases.get(algorithm, algorithm)
         fallback = "DampedLeastSquares"
-        return ZOSPyHandler._resolve_enum(alg_enum, attr_name, fallback, "Algorithm")
+        return ZosPyHandler._resolve_enum(alg_enum, attr_name, fallback, "Algorithm")
 
     @staticmethod
     def _resolve_cycles(zp_module, cycles: int | None):
@@ -3866,7 +3866,7 @@ class ZosPyHandler:
             50: "Fixed_50_Cycles",
         }
         attr_name = mapping.get(cycles, fallback)
-        return ZOSPyHandler._resolve_enum(cycles_enum, attr_name, fallback, "Cycles")
+        return ZosPyHandler._resolve_enum(cycles_enum, attr_name, fallback, "Cycles")
 
     @staticmethod
     def _resolve_save_count(zp_module, num_to_save: int | None):
@@ -3886,7 +3886,7 @@ class ZosPyHandler:
         }
         closest = min(mapping.keys(), key=lambda k: abs(k - num_to_save))
         attr_name = mapping[closest]
-        return ZOSPyHandler._resolve_enum(save_enum, attr_name, fallback, "SaveCount")
+        return ZosPyHandler._resolve_enum(save_enum, attr_name, fallback, "SaveCount")
 
     @staticmethod
     def _read_systems_evaluated(opt_tool) -> int | None:
