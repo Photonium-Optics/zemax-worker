@@ -3856,10 +3856,10 @@ class ZosPyHandler:
         if cycles is None:
             return getattr(cycles_enum, "Automatic", None)
         mapping = {
-            1: "Fixed_1",
-            5: "Fixed_5",
-            10: "Fixed_10",
-            50: "Fixed_50",
+            1: "Fixed_1_Cycle",
+            5: "Fixed_5_Cycles",
+            10: "Fixed_10_Cycles",
+            50: "Fixed_50_Cycles",
         }
         attr_name = mapping.get(cycles)
         if attr_name:
