@@ -118,7 +118,10 @@ def _init_zospy() -> Optional[ZosPyHandler]:
     except Exception as e:
         # Clean up partially-constructed handler to avoid orphaned OpticStudio processes
         if handler is not None:
-            handler.close()
+            try:
+                handler.close()
+            except Exception as close_err:
+                logger.warning(f"Failed to close handler during init cleanup: {close_err}")
         tb = _tb_mod.format_exc()
         logger.error(f"Failed to initialize ZosPy: {e}")
         record_connect_failure(error=str(e), tb=tb)
@@ -2026,15 +2029,19 @@ def _kill_orphaned_opticstudio() -> int:
 
     gone, alive = psutil.wait_procs(targets, timeout=5)
 
+    kill_failed = 0
     for proc in alive:
         try:
             proc.kill()
         except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+            kill_failed += 1
             logger.warning(f"Could not force-kill PID {proc.pid}: {e}")
 
+    killed = len(alive) - kill_failed
     logger.info(
         f"Cleaned up {len(targets)} orphaned process(es) "
-        f"({len(gone)} terminated, {len(alive)} force-killed), "
+        f"({len(gone)} terminated, {killed} force-killed"
+        f"{f', {kill_failed} failed' if kill_failed else ''}), "
         f"waiting 3s for license release..."
     )
     time.sleep(3)
