@@ -4148,10 +4148,11 @@ class ZosPyHandler:
                     solve = cell.GetSolveData()
                     solve_type = str(solve.Type).split('.')[-1] if solve else ""
                     if solve_type == "Variable":
-                        # Radius can be Infinity (flat surfaces in OpticStudio)
+                        # Radius and thickness can be Infinity in OpticStudio
+                        # (flat surfaces, afocal systems / infinite conjugates)
                         val = _extract_value(
                             getattr(surf, value_attr), 0.0,
-                            allow_inf=(param_name == "radius"),
+                            allow_inf=(param_name in ("radius", "thickness")),
                         )
                         variable_states.append({
                             "surface_index": surf_idx,
