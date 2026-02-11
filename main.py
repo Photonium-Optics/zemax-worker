@@ -1673,10 +1673,8 @@ async def run_optimization(
                 error=result.get("error", "Optimization failed"),
             )
 
-        variable_states = None
-        raw_states = result.get("variable_states")
-        if raw_states:
-            variable_states = [VariableState(**vs) for vs in raw_states]
+        raw_states = result.get("variable_states") or []
+        variable_states = [VariableState(**vs) for vs in raw_states]
 
         return RunOptimizationResponse(
             success=True,
