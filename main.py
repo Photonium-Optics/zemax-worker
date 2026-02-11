@@ -730,6 +730,7 @@ class MeritFunctionOperandRow(BaseModel):
     params: list[Optional[float]] = Field(default_factory=list, max_length=6, description="Up to 6 parameter values [Int1, Int2, Hx, Hy, Px, Py]")
     target: float = Field(default=0, description="Target value")
     weight: float = Field(default=1, description="Weight")
+    comment: Optional[str] = Field(default=None, description="Comment text (for BLNK section header rows)")
 
 
 class MeritFunctionRequest(BaseModel):
@@ -747,6 +748,7 @@ class EvaluatedOperandRow(BaseModel):
     weight: float = Field(description="Weight")
     contribution: Optional[float] = Field(default=None, description="Contribution to total merit")
     error: Optional[str] = Field(default=None, description="Per-row error message")
+    comment: Optional[str] = Field(default=None, description="Comment text (for BLNK section header rows)")
 
 
 class MeritFunctionResponse(BaseModel):
@@ -809,6 +811,7 @@ class WizardGeneratedRow(BaseModel):
     weight: float = Field(default=0, description="Weight")
     value: Optional[float] = Field(default=None, description="Computed value after wizard apply")
     contribution: Optional[float] = Field(default=None, description="Contribution to total merit")
+    comment: Optional[str] = Field(default=None, description="Comment text (for BLNK section header rows)")
 
 
 class OptimizationWizardResponse(BaseModel):

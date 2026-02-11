@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import re
 import tempfile
 import time
 from typing import Any, Literal, Optional
@@ -251,6 +252,69 @@ def _extract_value(obj: Any, default: float = 0.0, allow_inf: bool = False) -> f
         return result
     except (TypeError, ValueError):
         return default
+
+
+def _extract_dataframe(result: Any, label: str = "Analysis") -> Optional["pd.DataFrame"]:
+    """
+    Extract a pandas DataFrame from a ZOSPy AnalysisResult or typed result object.
+
+    ZOSPy run() returns an AnalysisResult wrapper whose .data holds a typed result
+    (e.g. RayFanResult) with to_dataframe(), or sometimes a raw DataFrame directly.
+    This helper walks the wrapper chain: result.data.to_dataframe() > result.data
+    (if DataFrame) > result.data.data > result.to_dataframe().
+
+    Returns None if no DataFrame can be extracted.
+    """
+    import pandas as pd
+
+    # Unwrap AnalysisResult.data if present
+    data = getattr(result, 'data', None)
+    if data is not None:
+        if hasattr(data, 'to_dataframe'):
+            return data.to_dataframe()
+        if isinstance(data, pd.DataFrame):
+            return data
+        # Some typed results nest the DataFrame one level deeper
+        nested = getattr(data, 'data', None)
+        if isinstance(nested, pd.DataFrame):
+            return nested
+        logger.debug(f"{label}: .data is {type(data).__name__}, not extractable")
+        return None
+
+    # Direct to_dataframe() on the result itself
+    if hasattr(result, 'to_dataframe'):
+        return result.to_dataframe()
+
+    return None
+
+
+def _parse_zernike_term_number(col: Any) -> Optional[int]:
+    """
+    Parse a Zernike term number from a column name.
+
+    Handles pure integers ("1", "37"), Z-prefixed names ("Z1", "Z 4", "Z04"),
+    and case-insensitive variants.
+
+    Returns the term number as int, or None if the column is not a Zernike term.
+    """
+    try:
+        return int(col)
+    except (ValueError, TypeError):
+        m = re.match(r'^Z\s*(\d+)$', str(col), re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _read_comment_cell(op: Any, comment_column: Any) -> Optional[str]:
+    """Read the Comment cell from an MFE operand, returning stripped text or None."""
+    try:
+        raw = op.GetOperandCell(comment_column).Value
+        if raw and str(raw).strip():
+            return str(raw).strip()
+    except Exception:
+        pass
+    return None
 
 
 def _get_column_value(row: Any, column_names: list[str], default: Any = None) -> Any:
@@ -3337,6 +3401,15 @@ class ZosPyHandler:
                 op.Target = float(target)
                 op.Weight = float(weight)
 
+                # Set Comment cell for BLNK section headers
+                comment = row.get("comment")
+                if comment and code == "BLNK":
+                    try:
+                        comment_cell = op.GetOperandCell(mfe_cols.Comment)
+                        comment_cell.Value = str(comment)
+                    except Exception:
+                        pass
+
                 # Set parameter cells
                 # Slots 0-1 (Int1, Int2) -> IntegerValue
                 # Slots 2-5 (Hx, Hy, Px, Py) -> DoubleValue
@@ -3369,6 +3442,7 @@ class ZosPyHandler:
                     "weight": weight,
                     "contribution": None,
                     "error": f"Error configuring {code}: {e}",
+                    "comment": row.get("comment"),
                 })
                 continue
 
@@ -3412,6 +3486,7 @@ class ZosPyHandler:
                     "weight": float(row.get("weight", 1)),
                     "contribution": contribution,
                     "error": None,
+                    "comment": row.get("comment"),
                 })
             except Exception as e:
                 logger.warning(f"Error reading MFE row {mfe_row_num}: {e}")
@@ -3657,6 +3732,7 @@ class ZosPyHandler:
                         "weight": _extract_value(op.Weight, 0.0),
                         "value": _extract_value(op.Value, None),
                         "contribution": _extract_value(op.Contribution, None),
+                        "comment": _read_comment_cell(op, mfe_cols.Comment),
                     })
                 except Exception as e:
                     logger.warning(f"Error reading wizard MFE row {i}: {e}")
@@ -3668,6 +3744,7 @@ class ZosPyHandler:
                         "weight": 0.0,
                         "value": None,
                         "contribution": None,
+                        "comment": None,
                     })
 
         except Exception as e:
@@ -4076,6 +4153,7 @@ class ZosPyHandler:
                         "weight": _extract_value(op.Weight, 0.0),
                         "value": _extract_value(op.Value, None),
                         "contribution": _extract_value(op.Contribution, None),
+                        "comment": _read_comment_cell(op, mfe_cols.Comment),
                     })
                 except Exception as e:
                     logger.warning(f"Error reading post-opt MFE row {i}: {e}")
@@ -4193,6 +4271,110 @@ class ZosPyHandler:
 
         return variable_states
 
+    def _run_zernike_vs_field_fallback(
+        self,
+        maximum_term: int,
+        wavelength_index: int,
+        field_density: int,
+    ) -> Optional["pd.DataFrame"]:
+        """
+        Run ZernikeCoefficientsVsField via the raw new_analysis API.
+
+        Used as a fallback when the ZOSPy wrapper fails. Extracts data from
+        either data series (graph-type) or data grids, and returns a DataFrame
+        with field positions as the index and Zernike terms as columns.
+
+        Returns None if no data could be extracted.
+        """
+        import pandas as pd
+
+        idm = self._zp.constants.Analysis.AnalysisIDM
+        analysis = self._zp.analyses.new_analysis(
+            self.oss, idm.ZernikeCoefficientsVsField, settings_first=True,
+        )
+        try:
+            settings = analysis.Settings
+            if hasattr(settings, 'MaximumNumberOfTerms'):
+                settings.MaximumNumberOfTerms = maximum_term
+            elif hasattr(settings, 'MaximumTerm'):
+                settings.MaximumTerm = maximum_term
+            if hasattr(settings, 'Wavelength'):
+                settings.Wavelength.SetWavelengthNumber(wavelength_index)
+            if hasattr(settings, 'FieldDensity'):
+                settings.FieldDensity = field_density
+
+            zernike_start = time.perf_counter()
+            try:
+                analysis.ApplyAndWaitForCompletion()
+            finally:
+                elapsed_ms = (time.perf_counter() - zernike_start) * 1000
+                log_timing(logger, "ZernikeCoefficientsVsField.run (fallback)", elapsed_ms)
+
+            results = analysis.Results
+            rows = self._extract_zernike_fallback_rows(results)
+            if not rows:
+                return None
+            return pd.DataFrame(rows).set_index("field")
+        finally:
+            try:
+                analysis.Close()
+            except Exception:
+                pass
+
+    def _extract_zernike_fallback_rows(self, results: Any) -> list[dict]:
+        """
+        Extract row dicts from ZOS-API analysis results for ZernikeVsField.
+
+        Tries data series first (graph-type result), then data grids.
+        Each row dict has a "field" key plus Zernike term keys.
+        """
+        if results is None:
+            return []
+
+        # Try data series extraction (graph-type result)
+        rows: list[dict] = []
+        if hasattr(results, 'NumberOfDataSeries'):
+            num_series = results.NumberOfDataSeries
+            logger.info(f"ZernikeVsField fallback: {num_series} data series")
+            for si in range(num_series):
+                series = results.GetDataSeries(si)
+                if series is None:
+                    continue
+                desc = str(series.Description) if hasattr(series, 'Description') else f"Z{si+1}"
+                n_pts = getattr(series, 'NumberOfPoints', 0)
+                for pi in range(n_pts):
+                    pt = series.GetDataPoint(pi)
+                    if pt is None:
+                        continue
+                    x = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
+                    y = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
+                    if pi >= len(rows):
+                        rows.append({"field": x})
+                    rows[pi][desc] = y
+
+        # If no data series, try data grids
+        if not rows and hasattr(results, 'NumberOfDataGrids'):
+            num_grids = results.NumberOfDataGrids
+            logger.info(f"ZernikeVsField fallback: {num_grids} data grids (no series)")
+            for gi in range(num_grids):
+                grid = results.GetDataGrid(gi)
+                if grid is None:
+                    continue
+                n_rows = getattr(grid, 'NumberOfRows', 0)
+                n_cols = getattr(grid, 'NumberOfCols', 0)
+                for ri in range(n_rows):
+                    row_data = {}
+                    for ci in range(n_cols):
+                        val = _extract_value(grid.Z(ri, ci))
+                        if ci == 0:
+                            row_data["field"] = val
+                        else:
+                            row_data[f"Z{ci}"] = val
+                    if row_data:
+                        rows.append(row_data)
+
+        return rows
+
     def get_zernike_vs_field(
         self,
         maximum_term: int = 37,
@@ -4260,101 +4442,54 @@ class ZosPyHandler:
                     log_timing(logger, "ZernikeCoefficientsVsField.run", zernike_elapsed_ms)
             except Exception as wrapper_err:
                 logger.warning(f"ZernikeCoefficientsVsField wrapper failed ({wrapper_err}), falling back to new_analysis API")
-                # Fallback: use raw new_analysis API
-                idm = self._zp.constants.Analysis.AnalysisIDM
-                analysis = self._zp.analyses.new_analysis(
-                    self.oss, idm.ZernikeCoefficientsVsField, settings_first=True,
+                zernike_result = self._run_zernike_vs_field_fallback(
+                    maximum_term, wavelength_index, field_density,
                 )
-                try:
-                    settings = analysis.Settings
-                    if hasattr(settings, 'MaximumNumberOfTerms'):
-                        settings.MaximumNumberOfTerms = maximum_term
-                    if hasattr(settings, 'Wavelength'):
-                        settings.Wavelength.SetWavelengthNumber(wavelength_index)
-                    if hasattr(settings, 'FieldDensity'):
-                        settings.FieldDensity = field_density
+                if zernike_result is None:
+                    return {"success": False, "error": "ZernikeCoefficientsVsField fallback returned no data"}
 
-                    zernike_start = time.perf_counter()
-                    try:
-                        analysis.ApplyAndWaitForCompletion()
-                    finally:
-                        zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
-                        log_timing(logger, "ZernikeCoefficientsVsField.run (fallback)", zernike_elapsed_ms)
+            # Extract DataFrame from the result (wrapper path yields AnalysisResult,
+            # fallback path yields a DataFrame directly)
+            import pandas as pd
+            if isinstance(zernike_result, pd.DataFrame):
+                df = zernike_result
+            else:
+                df = _extract_dataframe(zernike_result, "ZernikeCoefficientsVsField")
+                if df is None:
+                    return {"success": False, "error": "ZernikeCoefficientsVsField returned no extractable DataFrame"}
 
-                    # Extract text-based data from the analysis results
-                    results = analysis.Results
-                    import pandas as pd
-
-                    # Build DataFrame from the grid results
-                    rows = []
-                    if results is not None and hasattr(results, 'NumberOfDataSeries'):
-                        num_series = results.NumberOfDataSeries
-                        logger.info(f"ZernikeVsField fallback: {num_series} data series")
-                        for si in range(num_series):
-                            series = results.GetDataSeries(si)
-                            if series is None:
-                                continue
-                            desc = str(series.Description) if hasattr(series, 'Description') else f"Z{si+1}"
-                            n_pts = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
-                            x_vals = []
-                            y_vals = []
-                            for pi in range(n_pts):
-                                pt = series.GetDataPoint(pi)
-                                if pt is not None:
-                                    x_vals.append(_extract_value(pt.X if hasattr(pt, 'X') else pt[0]))
-                                    y_vals.append(_extract_value(pt.Y if hasattr(pt, 'Y') else pt[1]))
-                            if x_vals:
-                                for xi, (x, y) in enumerate(zip(x_vals, y_vals)):
-                                    if xi >= len(rows):
-                                        rows.append({"field": x})
-                                    rows[xi][desc] = y
-
-                    if rows:
-                        df_fallback = pd.DataFrame(rows).set_index("field")
-                        # Create a mock result object
-                        class _MockResult:
-                            data = df_fallback
-                        zernike_result = _MockResult()
-                    else:
-                        return {"success": False, "error": "ZernikeCoefficientsVsField fallback returned no data series"}
-                finally:
-                    try:
-                        analysis.Close()
-                    except Exception:
-                        pass
-
-            # Extract data from the result DataFrame
-            if not hasattr(zernike_result, 'data') or zernike_result.data is None:
-                return {"success": False, "error": "ZernikeCoefficientsVsField returned no data"}
-
-            df = zernike_result.data
             logger.info(f"ZernikeVsField: DataFrame columns={list(df.columns)}, shape={df.shape}")
 
-            # The DataFrame has field positions as rows and Zernike terms as columns
-            field_positions = []
+            if len(df) == 0:
+                return {"success": False, "error": f"No Zernike vs field data extracted (cols={list(df.columns)[:10]})"}
+
+            # Extract field positions from the DataFrame index
+            try:
+                field_positions = [float(v) for v in df.index.tolist()]
+            except (ValueError, TypeError):
+                field_positions = list(range(len(df)))
+
+            # Extract coefficient columns - handle various naming formats:
+            # Pure numbers: "1", "4", "37"
+            # Z-prefixed: "Z1", "Z4", "Z 4", "Z04"
             coefficients_dict = {}
-
-            if df is not None and len(df) > 0:
-                # Try to get field positions from the DataFrame index
-                try:
-                    field_positions = [float(v) for v in df.index.tolist()]
-                except (ValueError, TypeError):
-                    # If index is not numeric, use sequential indices
-                    field_positions = list(range(len(df)))
-
-                # Extract coefficient columns - they should be numeric term numbers
-                for col in df.columns:
-                    try:
-                        term_num = int(col)
-                        values = [float(v) if not (isinstance(v, float) and (v != v)) else 0.0
-                                  for v in df[col].tolist()]
-                        coefficients_dict[str(term_num)] = values
-                    except (ValueError, TypeError):
-                        # Skip non-numeric columns (e.g., metadata)
-                        logger.debug(f"ZernikeVsField: Skipping non-numeric column '{col}'")
+            for col in df.columns:
+                term_num = _parse_zernike_term_number(col)
+                if term_num is not None:
+                    raw = df[col].tolist()
+                    values = []
+                    for v in raw:
+                        try:
+                            f = float(v)
+                            values.append(0.0 if math.isnan(f) else f)
+                        except (ValueError, TypeError):
+                            values.append(0.0)
+                    coefficients_dict[str(term_num)] = values
+                else:
+                    logger.debug(f"ZernikeVsField: Skipping non-Zernike column '{col}'")
 
             if not field_positions or not coefficients_dict:
-                return {"success": False, "error": "No Zernike vs field data could be extracted"}
+                return {"success": False, "error": f"No Zernike vs field data extracted (cols={list(df.columns)[:10]})"}
 
             result = {
                 "success": True,
@@ -5181,18 +5316,11 @@ class ZosPyHandler:
             finally:
                 log_timing(logger, "RayFan.run", (time.perf_counter() - t0) * 1000)
 
-            # RayFanResult has to_dataframe() in newer ZosPy, but the worker
-            # may return a generic AnalysisResult with .data as a DataFrame.
-            if hasattr(rfr, 'to_dataframe'):
-                df = rfr.to_dataframe()
-            elif hasattr(rfr, 'data') and rfr.data is not None:
-                import pandas as pd
-                if isinstance(rfr.data, pd.DataFrame):
-                    df = rfr.data
-                else:
-                    return {"success": False, "error": f"RayFan result data is {type(rfr.data).__name__}, expected DataFrame"}
-            else:
-                return {"success": False, "error": "RayFan result has no data attribute"}
+            # ZOSPy run() returns AnalysisResult wrapper whose .data holds the
+            # typed result (RayFanResult) with to_dataframe(). Handle both patterns.
+            df = _extract_dataframe(rfr, "RayFan")
+            if df is None:
+                return {"success": False, "error": "RayFan result has no extractable DataFrame"}
             logger.debug(f"RayFan df cols={list(df.columns)}, shape={df.shape}")
             if df.empty:
                 return {"success": False, "error": "RayFan returned empty data"}
