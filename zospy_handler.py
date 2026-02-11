@@ -3951,11 +3951,6 @@ class ZosPyHandler:
         # Normalize method
         method = (method or "local").lower()
 
-        # Backward compat: algorithm="Hammer" → method="hammer"
-        if algorithm and algorithm.upper() == "HAMMER":
-            method = "hammer"
-            algorithm = "DLS"
-
         # Step 1: Populate MFE
         if setup_wizard:
             params = wizard_params or {}
@@ -4113,74 +4108,77 @@ class ZosPyHandler:
         """
         Extract current values of all variable parameters from the LDE.
 
-        Iterates all surfaces and checks if radius, thickness, or conic
-        is marked as variable. Returns a list of variable state dicts.
+        Iterates all surfaces and checks if radius, thickness, conic, or
+        aspheric parameters (Par1-Par12) are marked as variable.
 
         Returns:
             List of {surface_index, parameter, value, is_variable}
         """
         lde = self.oss.LDE
-        variable_states = []
+        variable_states: list[dict[str, Any]] = []
 
         try:
             num_surfaces = lde.NumberOfSurfaces
-            # Start at surface 1 (skip object surface 0).
-            # Return surf_idx as-is (1-based Zemax LDE index) -- the analysis
-            # service's surface_patcher converts to 0-based LLM index.
-            for surf_idx in range(1, num_surfaces):
-                try:
-                    surf = lde.GetSurfaceAt(surf_idx)
-
-                    for param_name, (cell_attr, value_attr) in self._VARIABLE_PARAMS.items():
-                        try:
-                            cell = getattr(surf, cell_attr)
-                            if not hasattr(cell, 'GetSolveData'):
-                                continue
-                            solve = cell.GetSolveData()
-                            solve_type = str(solve.Type).split('.')[-1] if solve else ""
-                            if solve_type == "Variable":
-                                variable_states.append({
-                                    "surface_index": surf_idx,
-                                    "parameter": param_name,
-                                    "value": _extract_value(getattr(surf, value_attr), 0.0),
-                                    "is_variable": True,
-                                })
-                        except Exception as e:
-                            logger.warning(
-                                f"Failed to read variable state for surface {surf_idx}, "
-                                f"param '{param_name}': {type(e).__name__}: {e}"
-                            )
-
-                    # Check aspheric parameters (PARM 1-12 via SurfaceColumn.Par1-Par12)
-                    try:
-                        col = zp.constants.Editors.LDE.SurfaceColumn
-                        for par_idx in range(1, 13):
-                            par_attr = f'Par{par_idx}'
-                            if not hasattr(col, par_attr):
-                                break
-                            try:
-                                cell = surf.GetSurfaceCell(getattr(col, par_attr))
-                                if cell is None or not hasattr(cell, 'GetSolveData'):
-                                    continue
-                                solve = cell.GetSolveData()
-                                solve_type = str(solve.Type).split('.')[-1] if solve else ""
-                                if solve_type == "Variable":
-                                    variable_states.append({
-                                        "surface_index": surf_idx,
-                                        "parameter": f"param_{par_idx}",
-                                        "value": _extract_value(cell.DoubleValue, 0.0),
-                                        "is_variable": True,
-                                    })
-                            except Exception:
-                                break  # No more parameters for this surface type
-                    except Exception as e:
-                        logger.debug(f"Error checking aspheric params for surface {surf_idx}: {e}")
-
-                except Exception as e:
-                    logger.debug(f"Error reading surface {surf_idx} variables: {e}")
-
+            surf_col = self._zp.constants.Editors.LDE.SurfaceColumn
         except Exception as e:
-            logger.warning(f"Error extracting variable states: {e}")
+            logger.warning(f"Error accessing LDE for variable extraction: {e}")
+            return variable_states
+
+        # Start at surface 1 (skip object surface 0).
+        # Return surf_idx as-is (Zemax LDE index) -- the analysis
+        # service's surface_patcher uses the same indexing.
+        for surf_idx in range(1, num_surfaces):
+            try:
+                surf = lde.GetSurfaceAt(surf_idx)
+            except Exception as e:
+                logger.debug(f"Error reading surface {surf_idx} variables: {e}")
+                continue
+
+            # Check radius, thickness, conic
+            for param_name, (cell_attr, value_attr) in self._VARIABLE_PARAMS.items():
+                try:
+                    cell = getattr(surf, cell_attr)
+                    if not hasattr(cell, 'GetSolveData'):
+                        continue
+                    solve = cell.GetSolveData()
+                    solve_type = str(solve.Type).split('.')[-1] if solve else ""
+                    if solve_type == "Variable":
+                        variable_states.append({
+                            "surface_index": surf_idx,
+                            "parameter": param_name,
+                            "value": _extract_value(getattr(surf, value_attr), 0.0),
+                            "is_variable": True,
+                        })
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to read variable state for surface {surf_idx}, "
+                        f"param '{param_name}': {type(e).__name__}: {e}"
+                    )
+
+            # Check aspheric parameters (PARM 1-12 via SurfaceColumn.Par1-Par12).
+            # Not all surface types support all 12 params; stop at the first
+            # missing column attribute.
+            for par_idx in range(1, 13):
+                par_attr = f'Par{par_idx}'
+                if not hasattr(surf_col, par_attr):
+                    break
+                try:
+                    cell = surf.GetSurfaceCell(getattr(surf_col, par_attr))
+                    if cell is None or not hasattr(cell, 'GetSolveData'):
+                        continue
+                    solve = cell.GetSolveData()
+                    solve_type = str(solve.Type).split('.')[-1] if solve else ""
+                    if solve_type == "Variable":
+                        variable_states.append({
+                            "surface_index": surf_idx,
+                            "parameter": f"param_{par_idx}",
+                            "value": _extract_value(cell.DoubleValue, 0.0),
+                            "is_variable": True,
+                        })
+                except (AttributeError, TypeError):
+                    break  # Surface type does not support this parameter
+                except Exception as e:
+                    logger.debug(f"Error checking Par{par_idx} for surface {surf_idx}: {e}")
 
         return variable_states
 

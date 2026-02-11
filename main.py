@@ -1622,7 +1622,7 @@ class RunOptimizationRequest(BaseModel):
     """Request to run OpticStudio optimization."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
     method: Literal["local", "global", "hammer"] = Field(default="local", description="Optimization method: local (gradient descent), global (full search), hammer (perturb+refine)")
-    algorithm: Literal["DLS", "Hammer", "OrthogonalDescent", "DLSX", "PSD"] = Field(default="DLS", description="Optimization algorithm")
+    algorithm: Literal["DLS", "OrthogonalDescent", "DLSX", "PSD"] = Field(default="DLS", description="Optimization algorithm (Hammer is a method, not an algorithm)")
     cycles: Optional[int] = Field(default=5, ge=1, le=50, description="Cycles for local optimization (ignored for global/hammer)")
     timeout_seconds: Optional[float] = Field(default=60, ge=5, le=600, description="Time limit in seconds for global/hammer optimization")
     num_to_save: Optional[int] = Field(default=10, ge=1, le=50, description="Number of best solutions to retain (global only)")
