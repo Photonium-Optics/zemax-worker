@@ -4151,6 +4151,31 @@ class ZosPyHandler:
                                 f"param '{param_name}': {type(e).__name__}: {e}"
                             )
 
+                    # Check aspheric parameters (PARM 1-12 via SurfaceColumn.Par1-Par12)
+                    try:
+                        col = zp.constants.Editors.LDE.SurfaceColumn
+                        for par_idx in range(1, 13):
+                            par_attr = f'Par{par_idx}'
+                            if not hasattr(col, par_attr):
+                                break
+                            try:
+                                cell = surf.GetSurfaceCell(getattr(col, par_attr))
+                                if cell is None or not hasattr(cell, 'GetSolveData'):
+                                    continue
+                                solve = cell.GetSolveData()
+                                solve_type = str(solve.Type).split('.')[-1] if solve else ""
+                                if solve_type == "Variable":
+                                    variable_states.append({
+                                        "surface_index": surf_idx,
+                                        "parameter": f"param_{par_idx}",
+                                        "value": _extract_value(cell.DoubleValue, 0.0),
+                                        "is_variable": True,
+                                    })
+                            except Exception:
+                                break  # No more parameters for this surface type
+                    except Exception as e:
+                        logger.debug(f"Error checking aspheric params for surface {surf_idx}: {e}")
+
                 except Exception as e:
                     logger.debug(f"Error reading surface {surf_idx} variables: {e}")
 
