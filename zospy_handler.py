@@ -3829,65 +3829,64 @@ class ZosPyHandler:
     # ── Optimization enum helpers ──────────────────────────────────────
 
     @staticmethod
+    def _resolve_enum(enum_obj, attr_name: str, fallback_name: str, label: str):
+        """Resolve an enum member by name, falling back to a default with a warning."""
+        resolved = getattr(enum_obj, attr_name, None)
+        if resolved is not None:
+            return resolved
+        logger.warning(
+            f"{label} '{attr_name}' not found in enum, falling back to {fallback_name}"
+        )
+        return getattr(enum_obj, fallback_name, None)
+
+    @staticmethod
     def _resolve_algorithm(zp_module, algorithm: str):
         """Map algorithm string to OptimizationAlgorithm enum value."""
         alg_enum = zp_module.constants.Tools.Optimization.OptimizationAlgorithm
-        mapping = {
-            "DLS": "DampedLeastSquares",
-            "DampedLeastSquares": "DampedLeastSquares",
-            "OrthogonalDescent": "OrthogonalDescent",
-            "DLSX": "DLSX",
-            "PSD": "PSD",
-        }
-        attr_name = mapping.get(algorithm, "DampedLeastSquares")
-        resolved = getattr(alg_enum, attr_name, None)
-        if resolved is None:
-            logger.warning(
-                f"Algorithm '{algorithm}' not found in OptimizationAlgorithm enum, "
-                f"falling back to DampedLeastSquares"
-            )
-            resolved = getattr(alg_enum, "DampedLeastSquares")
-        return resolved
+        aliases = {"DLS": "DampedLeastSquares"}
+        attr_name = aliases.get(algorithm, algorithm)
+        fallback = "DampedLeastSquares"
+        return ZOSPyHandler._resolve_enum(alg_enum, attr_name, fallback, "Algorithm")
 
     @staticmethod
     def _resolve_cycles(zp_module, cycles: int | None):
-        """Map cycle count to OptimizationCycles enum value."""
+        """Map cycle count to OptimizationCycles enum value.
+
+        The API only supports specific fixed counts (1, 5, 10, 50).
+        Unrecognized values fall back to Automatic.
+        """
         cycles_enum = zp_module.constants.Tools.Optimization.OptimizationCycles
+        fallback = "Automatic"
         if cycles is None:
-            return getattr(cycles_enum, "Automatic", None)
+            return getattr(cycles_enum, fallback, None)
         mapping = {
             1: "Fixed_1_Cycle",
             5: "Fixed_5_Cycles",
             10: "Fixed_10_Cycles",
             50: "Fixed_50_Cycles",
         }
-        attr_name = mapping.get(cycles)
-        if attr_name:
-            resolved = getattr(cycles_enum, attr_name, None)
-            if resolved is not None:
-                return resolved
-        # For other values, use Automatic (the API doesn't support arbitrary counts)
-        return getattr(cycles_enum, "Automatic", None)
+        attr_name = mapping.get(cycles, fallback)
+        return ZOSPyHandler._resolve_enum(cycles_enum, attr_name, fallback, "Cycles")
 
     @staticmethod
     def _resolve_save_count(zp_module, num_to_save: int | None):
-        """Map save count to OptimizationSaveCount enum value."""
+        """Map save count to OptimizationSaveCount enum value.
+
+        Picks the closest supported value (5, 10, 20, 50).
+        """
         save_enum = zp_module.constants.Tools.Optimization.OptimizationSaveCount
+        fallback = "Save_10"
         if num_to_save is None:
-            return getattr(save_enum, "Save_10", None)
+            return getattr(save_enum, fallback, None)
         mapping = {
             5: "Save_5",
             10: "Save_10",
             20: "Save_20",
             50: "Save_50",
         }
-        # Find closest value
         closest = min(mapping.keys(), key=lambda k: abs(k - num_to_save))
         attr_name = mapping[closest]
-        resolved = getattr(save_enum, attr_name, None)
-        if resolved is None:
-            return getattr(save_enum, "Save_10", None)
-        return resolved
+        return ZOSPyHandler._resolve_enum(save_enum, attr_name, fallback, "SaveCount")
 
     @staticmethod
     def _read_systems_evaluated(opt_tool) -> int | None:
