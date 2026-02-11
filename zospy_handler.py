@@ -3904,8 +3904,8 @@ class ZosPyHandler:
             mf_val = _extract_value(opt_tool.CurrentMeritFunction)
             if mf_val is not None and mf_val > 0:
                 solutions.append(mf_val)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to read CurrentMeritFunction from optimizer: {e}")
         if not solutions:
             try:
                 mf_val = _extract_value(mfe.CalculateMeritFunction())
@@ -4145,8 +4145,11 @@ class ZosPyHandler:
                                     "value": _extract_value(getattr(surf, value_attr), 0.0),
                                     "is_variable": True,
                                 })
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed to read variable state for surface {surf_idx}, "
+                                f"param '{param_name}': {type(e).__name__}: {e}"
+                            )
 
                 except Exception as e:
                     logger.debug(f"Error reading surface {surf_idx} variables: {e}")

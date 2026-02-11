@@ -174,8 +174,8 @@ async def _reconnect_zospy() -> Optional[ZosPyHandler]:
         record_disconnect(reason="reconnect_replacing_existing")
         try:
             zospy_handler.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to close ZosPy handler during reconnect: {e}")
         zospy_handler = None
 
         # Wait for COM to release the license seat before reconnecting,
