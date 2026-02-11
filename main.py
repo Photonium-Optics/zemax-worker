@@ -2029,19 +2029,22 @@ def _kill_orphaned_opticstudio() -> int:
 
     gone, alive = psutil.wait_procs(targets, timeout=5)
 
-    kill_failed = 0
+    force_killed = 0
+    access_denied = 0
     for proc in alive:
         try:
             proc.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-            kill_failed += 1
+            force_killed += 1
+        except psutil.NoSuchProcess:
+            pass  # Already gone — count with terminated
+        except psutil.AccessDenied as e:
+            access_denied += 1
             logger.warning(f"Could not force-kill PID {proc.pid}: {e}")
 
-    killed = len(alive) - kill_failed
     logger.info(
         f"Cleaned up {len(targets)} orphaned process(es) "
-        f"({len(gone)} terminated, {killed} force-killed"
-        f"{f', {kill_failed} failed' if kill_failed else ''}), "
+        f"({len(gone)} terminated, {force_killed} force-killed"
+        f"{f', {access_denied} access denied' if access_denied else ''}), "
         f"waiting 3s for license release..."
     )
     time.sleep(3)

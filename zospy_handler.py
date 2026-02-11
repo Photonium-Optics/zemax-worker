@@ -221,7 +221,7 @@ RAY_ERROR_CODES = {
 }
 
 
-def _extract_value(obj: Any, default: float = 0.0) -> float:
+def _extract_value(obj: Any, default: float = 0.0, allow_inf: bool = False) -> float:
     """
     Extract a numeric value from various ZosPy types.
 
@@ -231,6 +231,7 @@ def _extract_value(obj: Any, default: float = 0.0) -> float:
     Args:
         obj: Value to extract (UnitField, float, int, etc.)
         default: Default value if extraction fails
+        allow_inf: If True, allow Infinity through (e.g. flat surface radius)
 
     Returns:
         Float value extracted from the object
@@ -243,8 +244,9 @@ def _extract_value(obj: Any, default: float = 0.0) -> float:
 
     try:
         result = float(value)
-        # Check for NaN or Infinity (not JSON-serializable)
-        if np.isnan(result) or np.isinf(result):
+        if np.isnan(result):
+            return default
+        if np.isinf(result) and not allow_inf:
             return default
         return result
     except (TypeError, ValueError):
@@ -4146,16 +4148,11 @@ class ZosPyHandler:
                     solve = cell.GetSolveData()
                     solve_type = str(solve.Type).split('.')[-1] if solve else ""
                     if solve_type == "Variable":
-                        # Like _extract_value but allows Infinity through
-                        # (flat surfaces have infinite radius in OpticStudio)
-                        raw_val = getattr(surf, value_attr)
-                        val = raw_val.value if hasattr(raw_val, 'value') else raw_val
-                        try:
-                            val = float(val)
-                        except (TypeError, ValueError):
-                            val = 0.0
-                        if np.isnan(val):
-                            val = 0.0
+                        # Radius can be Infinity (flat surfaces in OpticStudio)
+                        val = _extract_value(
+                            getattr(surf, value_attr), 0.0,
+                            allow_inf=(param_name == "radius"),
+                        )
                         variable_states.append({
                             "surface_index": surf_idx,
                             "parameter": param_name,
