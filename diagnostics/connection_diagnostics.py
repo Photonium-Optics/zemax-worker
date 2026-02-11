@@ -133,13 +133,13 @@ def record_license_seat_info() -> dict[str, Any]:
                 capture_output=True, text=True, timeout=5,
             )
             keyword = image_name.split(".")[0]
-            return [l.strip() for l in result.stdout.strip().split("\n")
-                    if l.strip() and keyword.lower() in l.lower()]
+            return [line.strip() for line in result.stdout.strip().split("\n")
+                    if line.strip() and keyword.lower() in line.lower()]
 
         try:
             lines = _count_tasklist("OpticStudio.exe")
             info["opticstudio_processes"] = len(lines)
-            info["opticstudio_pids"] = [l.split(",")[1].strip('"') for l in lines] if lines else []
+            info["opticstudio_pids"] = [line.split(",")[1].strip('"') for line in lines] if lines else []
         except Exception as e:
             info["opticstudio_process_check_error"] = str(e)
 
