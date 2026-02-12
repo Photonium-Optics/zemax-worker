@@ -1609,9 +1609,7 @@ class RunOptimizationRequest(BaseModel):
     cycles: Optional[int] = Field(default=5, ge=1, le=50, description="Cycles for local optimization (ignored for global/hammer)")
     timeout_seconds: Optional[float] = Field(default=60, ge=5, le=600, description="Time limit in seconds for global/hammer optimization")
     num_to_save: Optional[int] = Field(default=10, ge=1, le=50, description="Number of best solutions to retain (global only)")
-    operand_rows: Optional[list[MeritFunctionOperandRow]] = Field(default=None, description="Explicit MFE operand rows (mutually exclusive with setup_wizard)")
-    setup_wizard: bool = Field(default=False, description="Use SEQ Optimization Wizard to populate MFE")
-    wizard_params: Optional[dict[str, Any]] = Field(default=None, description="Wizard parameters when setup_wizard=True")
+    operand_rows: Optional[list[MeritFunctionOperandRow]] = Field(default=None, description="Explicit MFE operand rows to populate the merit function")
 
 
 class VariableState(BaseModel):
@@ -1645,9 +1643,9 @@ async def run_optimization(
     """
     Run OpticStudio optimization using Local, Global, or Hammer method.
 
-    Loads the system from zmx_content, populates the MFE (via explicit rows
-    or wizard), runs the optimizer, and returns before/after merit values
-    plus variable states from the LDE.
+    Loads the system from zmx_content, populates the MFE with operand rows,
+    runs the optimizer, and returns before/after merit values plus variable
+    states from the LDE.
     """
     def _build_response(result: dict) -> RunOptimizationResponse:
         if not result.get("success"):
@@ -1683,8 +1681,6 @@ async def run_optimization(
             timeout_seconds=request.timeout_seconds,
             num_to_save=request.num_to_save,
             operand_rows=operand_dicts,
-            setup_wizard=request.setup_wizard,
-            wizard_params=request.wizard_params,
         )
 
     return await _run_endpoint(

@@ -4007,8 +4007,6 @@ class ZosPyHandler:
         timeout_seconds: float | None = 60,
         num_to_save: int | None = 10,
         operand_rows: list[dict] | None = None,
-        setup_wizard: bool = False,
-        wizard_params: dict | None = None,
     ) -> dict[str, Any]:
         """
         Run OpticStudio optimization using Local, Global, or Hammer method.
@@ -4019,9 +4017,7 @@ class ZosPyHandler:
             cycles: Cycle count for local optimization (1, 5, 10, 50, or None=auto)
             timeout_seconds: Time limit for global/hammer (they run indefinitely)
             num_to_save: Number of best solutions to retain (global only)
-            operand_rows: Explicit MFE operand rows (if not using wizard)
-            setup_wizard: If True, use SEQOptimizationWizard2 to populate MFE
-            wizard_params: Parameters for the wizard (criterion, rings, etc.)
+            operand_rows: Explicit MFE operand rows
 
         Returns:
             Dict with merit_before, merit_after, cycles_completed,
@@ -4034,25 +4030,14 @@ class ZosPyHandler:
         method = (method or "local").lower()
 
         # Step 1: Populate MFE
-        if setup_wizard:
-            params = wizard_params or {}
-            wizard_result = self.apply_optimization_wizard(**params)
-            if not wizard_result.get("success"):
-                return {
-                    "success": False,
-                    "error": f"Wizard setup failed: {wizard_result.get('error')}",
-                }
-        elif operand_rows:
-            mfe_result = self.evaluate_merit_function(operand_rows)
-            if not mfe_result.get("success"):
-                return {
-                    "success": False,
-                    "error": f"MFE setup failed: {mfe_result.get('error')}",
-                }
-        else:
+        if not operand_rows:
+            return {"success": False, "error": "Must provide operand_rows"}
+
+        mfe_result = self.evaluate_merit_function(operand_rows)
+        if not mfe_result.get("success"):
             return {
                 "success": False,
-                "error": "Must provide either operand_rows or setup_wizard=True",
+                "error": f"MFE setup failed: {mfe_result.get('error')}",
             }
 
         # Step 2: Read initial merit
