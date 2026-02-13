@@ -3468,8 +3468,9 @@ class ZosPyHandler:
                             cell = op.GetOperandCell(col)
                             dt = str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else ''
                             if dt == 'String':
-                                val = cell.Value
-                                params.append(str(val) if val else None)
+                                # String params (e.g. BLNK comment text) are not numeric;
+                                # the text is already captured in the 'comment' field.
+                                params.append(None)
                             else:
                                 raw = float(cell.IntegerValue if dt == 'Integer' else cell.DoubleValue)
                                 params.append(None if (math.isinf(raw) or math.isnan(raw)) else raw)
@@ -3880,8 +3881,9 @@ class ZosPyHandler:
                             cell = op.GetOperandCell(col)
                             dt = str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else ''
                             if dt == 'String':
-                                val = cell.Value
-                                params.append(str(val) if val else None)
+                                # String params (e.g. BLNK comment text) are not numeric;
+                                # the text is already captured in the 'comment' field.
+                                params.append(None)
                             else:
                                 raw = float(cell.IntegerValue if dt == 'Integer' else cell.DoubleValue)
                                 params.append(None if (math.isinf(raw) or math.isnan(raw)) else raw)
