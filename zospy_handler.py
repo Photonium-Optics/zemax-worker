@@ -118,7 +118,6 @@ def _log_raw_output(operation: str, result: dict[str, Any]) -> None:
 
 # Lazy-loaded module references
 _zp = None  # zospy module
-_OpticStudioSystem = None  # zospy.zpcore.OpticStudioSystem class
 _ZOSPY_IMPORT_ATTEMPTED = False
 _ZOSPY_AVAILABLE = False
 
@@ -134,7 +133,7 @@ def _ensure_zospy_imported() -> bool:
     Returns:
         True if ZosPy is available, False otherwise.
     """
-    global _zp, _OpticStudioSystem, _ZOSPY_IMPORT_ATTEMPTED, _ZOSPY_AVAILABLE
+    global _zp, _ZOSPY_IMPORT_ATTEMPTED, _ZOSPY_AVAILABLE
 
     if _ZOSPY_IMPORT_ATTEMPTED:
         return _ZOSPY_AVAILABLE
@@ -144,10 +143,7 @@ def _ensure_zospy_imported() -> bool:
 
     try:
         import zospy as zp_module
-        from zospy.zpcore import OpticStudioSystem as OSS
-
         _zp = zp_module
-        _OpticStudioSystem = OSS
         _ZOSPY_AVAILABLE = True
         logger.info(f"ZosPy {zp_module.__version__} imported successfully")
         return True
@@ -194,8 +190,6 @@ def is_zospy_available() -> bool:
 # When returning data in API responses, convert to 0-based indices.
 
 # Analysis settings
-DEFAULT_SAMPLING = "64x64"
-DEFAULT_MAX_ZERNIKE_TERM = 37
 DEFAULT_NUM_CROSS_SECTION_RAYS = 11
 
 # Mapping from sampling grid strings to OpticStudio SampleSize enum values
@@ -315,38 +309,6 @@ def _read_comment_cell(op: Any, comment_column: Any) -> Optional[str]:
     except Exception:
         pass
     return None
-
-
-def _get_column_value(row: Any, column_names: list[str], default: Any = None) -> Any:
-    """
-    Safely extract a value from a pandas Series or dict-like object.
-
-    ZosPy 2.1.4 uses column names like 'X-coordinate', 'Y-coordinate', 'Z-coordinate'.
-    This helper tries multiple column name patterns for backwards compatibility.
-
-    Args:
-        row: pandas Series or dict-like object
-        column_names: List of column names to try in order
-        default: Default value if no column found
-
-    Returns:
-        Column value or default
-    """
-    for col in column_names:
-        try:
-            if col in row:
-                return row[col]
-        except (KeyError, TypeError):
-            # Some objects may not support 'in' operator
-            pass
-
-        # Fallback to .get() for dict-like objects
-        if hasattr(row, 'get'):
-            val = row.get(col)
-            if val is not None:
-                return val
-
-    return default
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -1009,94 +971,6 @@ class ZosPyHandler:
         """
         return RAY_ERROR_CODES.get(error_code, f"ERROR_{error_code}")
 
-    def get_seidel(self) -> dict[str, Any]:
-        """
-        Get raw Zernike coefficients from OpticStudio.
-
-        This is a "dumb executor" - it tries the ZosPy method once and returns
-        the result or an error. No fallback strategies. The Mac side handles
-        retries and Zernike-to-Seidel conversion.
-
-        Note: System must be pre-loaded via load_zmx_file().
-
-        Returns:
-            On success: {"success": True, "zernike_coefficients": [...], "wavelength_um": float, "num_surfaces": int}
-            On error: {"success": False, "error": "..."}
-        """
-        # Try ZosPy Zernike analysis
-        try:
-            zernike_analysis = self._zp.analyses.wavefront.ZernikeStandardCoefficients(
-                sampling=DEFAULT_SAMPLING,
-                maximum_term=DEFAULT_MAX_ZERNIKE_TERM,
-                wavelength=1,
-                field=1,
-                surface="Image",
-            )
-            zernike_start = time.perf_counter()
-            try:
-                result = zernike_analysis.run(self.oss)
-            finally:
-                zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
-                log_timing(logger, "ZernikeStandardCoefficients.run (seidel)", zernike_elapsed_ms)
-
-            # Extract coefficients from result
-            if not hasattr(result, 'data') or result.data is None:
-                return {"success": False, "error": "ZosPy analysis returned no data"}
-
-            coeff_data = result.data
-            if not hasattr(coeff_data, 'coefficients'):
-                return {"success": False, "error": "ZosPy result has no coefficients attribute"}
-
-            raw_coeffs = coeff_data.coefficients
-            coefficients = []
-
-            if isinstance(raw_coeffs, dict):
-                # Dict keyed by term number
-                if not raw_coeffs:
-                    return {"success": False, "error": "ZosPy returned empty coefficients dict"}
-
-                int_keys = [int(k) for k in raw_coeffs.keys()]
-                max_term = max(int_keys) if int_keys else 0
-
-                for i in range(1, min(max_term + 1, DEFAULT_MAX_ZERNIKE_TERM + 1)):
-                    coeff = raw_coeffs.get(i) or raw_coeffs.get(str(i))
-                    if coeff is not None:
-                        if hasattr(coeff, 'value'):
-                            coefficients.append(float(coeff.value))
-                        else:
-                            coefficients.append(float(coeff))
-                    else:
-                        coefficients.append(0.0)
-            elif hasattr(raw_coeffs, '__iter__'):
-                # Iterable (list-like)
-                for coeff in raw_coeffs:
-                    if hasattr(coeff, 'value'):
-                        coefficients.append(float(coeff.value))
-                    else:
-                        coefficients.append(float(coeff) if coeff is not None else 0.0)
-            else:
-                return {"success": False, "error": f"Unknown coefficients type: {type(raw_coeffs)}"}
-
-            if not coefficients:
-                return {"success": False, "error": "No coefficients extracted from ZosPy result"}
-
-            # Get system info - handle UnitField objects from ZosPy 2.x
-            wl_obj = self.oss.SystemData.Wavelengths.GetWavelength(1).Wavelength
-            wl_um = _extract_value(wl_obj, 0.5876)
-            num_surfaces = self.oss.LDE.NumberOfSurfaces - 1
-
-            result = {
-                "success": True,
-                "zernike_coefficients": coefficients,
-                "wavelength_um": wl_um,
-                "num_surfaces": num_surfaces,
-            }
-            _log_raw_output("/seidel", result)
-            return result
-
-        except Exception as e:
-            return {"success": False, "error": f"ZosPy analysis failed: {e}"}
-
     def get_seidel_native(self) -> dict[str, Any]:
         """
         Get native Seidel text output using OpticStudio's SeidelCoefficients analysis.
@@ -1218,112 +1092,6 @@ class ZosPyHandler:
                 os.remove(temp_path)
             except OSError as e:
                 logger.warning(f"Failed to remove temp file {temp_path}: {e}")
-
-    # NOTE: Seidel text parsing has been moved to the Mac side
-    # (zemax-analysis-service/seidel_text_parser.py).
-    # The worker now returns raw text from get_seidel_native().
-
-    def trace_rays(
-        self,
-        num_rays: int = 7,
-    ) -> dict[str, Any]:
-        """
-        Trace rays through the system and return positions at each surface.
-
-        Note: System must be pre-loaded via load_zmx_file().
-
-        Args:
-            num_rays: Number of rays to trace
-        """
-        # Get system info
-        num_surfaces = self.oss.LDE.NumberOfSurfaces
-        num_fields = self.oss.SystemData.Fields.NumberOfFields
-        num_wavelengths = self.oss.SystemData.Wavelengths.NumberOfWavelengths
-
-        data = []
-
-        trace_start = time.perf_counter()
-        try:
-            # Trace rays for each field and wavelength
-            for fi in range(1, num_fields + 1):
-                for wi in range(1, num_wavelengths + 1):
-                    surfaces_data = []
-
-                # Initialize arrays for each surface
-                for si in range(num_surfaces):
-                    surfaces_data.append({
-                        "y": [],
-                        "z": [],
-                    })
-
-                # Trace fan of rays across pupil
-                for py in np.linspace(-1, 1, num_rays):
-                    try:
-                        # ZosPy SingleRayTrace: px/py are normalized pupil coordinates (-1 to 1)
-                        # hx/hy are normalized field coordinates (not used when field index specified)
-                        # CRITICAL: py must be Python float(), not numpy.float64, for COM interop
-                        ray_trace = self._zp.analyses.raysandspots.SingleRayTrace(
-                            hx=0.0,
-                            hy=0.0,
-                            px=0.0,  # Meridional fan (x=0)
-                            py=float(py),   # Iterate over pupil Y - must be float() for COM
-                            wavelength=wi,
-                            field=fi,
-                        )
-                        result = ray_trace.run(self.oss)
-
-                        # Extract ray positions from result.data.real_ray_trace_data
-                        if hasattr(result, 'data') and result.data is not None:
-                            ray_data = result.data
-                            # Access real_ray_trace_data if available
-                            if hasattr(ray_data, 'real_ray_trace_data'):
-                                df = ray_data.real_ray_trace_data
-                            else:
-                                df = ray_data  # Fallback
-
-                            if hasattr(df, 'iloc'):
-                                for si in range(min(len(df), num_surfaces)):
-                                    row = df.iloc[si]
-                                    # ZosPy 2.1.4 uses 'Y-coordinate', 'Z-coordinate' column names
-                                    # Use _get_column_value helper for safe access
-                                    y_val = _get_column_value(row, ['Y-coordinate', 'Y', 'y'])
-                                    z_val = _get_column_value(row, ['Z-coordinate', 'Z', 'z'])
-                                    surfaces_data[si]["y"].append(y_val)
-                                    surfaces_data[si]["z"].append(z_val)
-                            else:
-                                # Fallback - add None values
-                                for si in range(num_surfaces):
-                                    surfaces_data[si]["y"].append(None)
-                                    surfaces_data[si]["z"].append(None)
-                        else:
-                            # Ray failed - add None values
-                            for si in range(num_surfaces):
-                                surfaces_data[si]["y"].append(None)
-                                surfaces_data[si]["z"].append(None)
-
-                    except Exception as e:
-                        logger.debug(f"Ray trace failed for field {fi}, wavelength {wi}, py={py:.2f}: {e}")
-                        for si in range(num_surfaces):
-                            surfaces_data[si]["y"].append(None)
-                            surfaces_data[si]["z"].append(None)
-
-                    data.append({
-                        "field_index": fi - 1,
-                        "wavelength_index": wi - 1,
-                        "surfaces": surfaces_data,
-                    })
-        finally:
-            trace_elapsed_ms = (time.perf_counter() - trace_start) * 1000
-            log_timing(logger, "trace_rays_all", trace_elapsed_ms)
-
-        result = {
-            "num_surfaces": num_surfaces,
-            "num_fields": num_fields,
-            "num_wavelengths": num_wavelengths,
-            "data": data,
-        }
-        _log_raw_output("/trace-rays", result)
-        return result
 
     def get_wavefront(
         self,
@@ -3303,7 +3071,7 @@ class ZosPyHandler:
         Args:
             operand_rows: List of dicts with keys:
                 - operand_code: str (e.g. "EFFL")
-                - params: list of up to 6 values (None for unused slots)
+                - params: list of up to 8 values (None for unused slots)
                 - target: float
                 - weight: float
 
@@ -3343,30 +3111,6 @@ class ZosPyHandler:
             params = list(row.get("params", []))
             target = float(row.get("target", 0))
             weight = float(row.get("weight", 1))
-
-            # Resolve semantic pseudo-codes to real Zemax operands
-            if code == "BFD_SEMANTIC":
-                # Back focal distance = TTHI from last glass surface to image surface
-                num_surf = self.oss.LDE.NumberOfSurfaces
-                if num_surf < 3:
-                    row_errors.append({
-                        "row_index": row_index,
-                        "error": "BFD requires at least one optical surface between object and image",
-                    })
-                    evaluated_rows.append({
-                        "row_index": row_index,
-                        "operand_code": code,
-                        "value": None,
-                        "target": target,
-                        "weight": weight,
-                        "contribution": None,
-                        "error": "Insufficient surfaces for BFD calculation",
-                    })
-                    continue
-                image_surf = num_surf - 1
-                last_before_image = image_surf - 1
-                code = "TTHI"
-                params = [last_before_image, image_surf, None, None, None, None]
 
             # Resolve operand type enum
             try:
@@ -3715,7 +3459,7 @@ class ZosPyHandler:
                     except Exception:
                         op_code = f"UNK_{i}"
 
-                    # Read 6 parameter cells
+                    # Read 8 parameter cells
                     # Note: 0 is a valid value (e.g., surface index 0 = image surface),
                     # so we always include it rather than converting to None.
                     params = []
