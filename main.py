@@ -727,7 +727,7 @@ class GeometricImageResponse(BaseModel):
 class MeritFunctionOperandRow(BaseModel):
     """A single merit function operand row."""
     operand_code: str = Field(description="Zemax operand code (e.g. EFFL, MTFA)")
-    params: list[Optional[float]] = Field(default_factory=list, max_length=6, description="Up to 6 parameter values [Int1, Int2, Hx, Hy, Px, Py]")
+    params: list[Optional[float]] = Field(default_factory=list, max_length=8, description="Up to 8 parameter values [Param1..Param8]")
     target: float = Field(default=0, description="Target value")
     weight: float = Field(default=1, description="Weight")
     comment: Optional[str] = Field(default=None, description="Comment text (for BLNK section header rows)")

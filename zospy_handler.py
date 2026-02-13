@@ -3410,19 +3410,21 @@ class ZosPyHandler:
                     except Exception:
                         pass
 
-                # Set parameter cells
-                # Slots 0-1 (Int1, Int2) -> IntegerValue
-                # Slots 2-5 (Hx, Hy, Px, Py) -> DoubleValue
+                # Set parameter cells — use cell DataType to pick the right setter
                 param_columns = [
                     mfe_cols.Param1, mfe_cols.Param2,
                     mfe_cols.Param3, mfe_cols.Param4,
                     mfe_cols.Param5, mfe_cols.Param6,
+                    mfe_cols.Param7, mfe_cols.Param8,
                 ]
                 for i, col in enumerate(param_columns):
                     if i < len(params) and params[i] is not None:
                         cell = op.GetOperandCell(col)
-                        if i < 2:
+                        dt = str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else ''
+                        if dt == 'Integer':
                             cell.IntegerValue = int(float(params[i]))
+                        elif dt == 'String':
+                            cell.Value = str(params[i])
                         else:
                             cell.DoubleValue = float(params[i])
 
@@ -3697,6 +3699,7 @@ class ZosPyHandler:
                 mfe_cols.Param1, mfe_cols.Param2,
                 mfe_cols.Param3, mfe_cols.Param4,
                 mfe_cols.Param5, mfe_cols.Param6,
+                mfe_cols.Param7, mfe_cols.Param8,
             ]
 
             num_operands = mfe.NumberOfOperands
@@ -3719,8 +3722,13 @@ class ZosPyHandler:
                     for j, col in enumerate(param_columns):
                         try:
                             cell = op.GetOperandCell(col)
-                            raw = float(cell.IntegerValue if j < 2 else cell.DoubleValue)
-                            params.append(None if (math.isinf(raw) or math.isnan(raw)) else raw)
+                            dt = str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else ''
+                            if dt == 'String':
+                                val = cell.Value
+                                params.append(str(val) if val else None)
+                            else:
+                                raw = float(cell.IntegerValue if dt == 'Integer' else cell.DoubleValue)
+                                params.append(None if (math.isinf(raw) or math.isnan(raw)) else raw)
                         except Exception:
                             params.append(None)
 
@@ -3739,7 +3747,7 @@ class ZosPyHandler:
                     generated_rows.append({
                         "row_index": i - 1,
                         "operand_code": f"ERR_{i}",
-                        "params": [None] * 6,
+                        "params": [None] * 8,
                         "target": 0.0,
                         "weight": 0.0,
                         "value": None,
@@ -4111,6 +4119,7 @@ class ZosPyHandler:
                 mfe_cols.Param1, mfe_cols.Param2,
                 mfe_cols.Param3, mfe_cols.Param4,
                 mfe_cols.Param5, mfe_cols.Param6,
+                mfe_cols.Param7, mfe_cols.Param8,
             ]
             num_operands = mfe.NumberOfOperands
             for i in range(1, num_operands + 1):
@@ -4125,8 +4134,13 @@ class ZosPyHandler:
                     for j, col in enumerate(param_columns):
                         try:
                             cell = op.GetOperandCell(col)
-                            raw = float(cell.IntegerValue if j < 2 else cell.DoubleValue)
-                            params.append(None if (math.isinf(raw) or math.isnan(raw)) else raw)
+                            dt = str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else ''
+                            if dt == 'String':
+                                val = cell.Value
+                                params.append(str(val) if val else None)
+                            else:
+                                raw = float(cell.IntegerValue if dt == 'Integer' else cell.DoubleValue)
+                                params.append(None if (math.isinf(raw) or math.isnan(raw)) else raw)
                         except Exception:
                             params.append(None)
 
