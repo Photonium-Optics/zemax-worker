@@ -192,8 +192,14 @@ def is_zospy_available() -> bool:
 # Analysis settings
 DEFAULT_NUM_CROSS_SECTION_RAYS = 11
 
-# Mapping from sampling grid strings to OpticStudio SampleSize enum values
-SAMPLING_ENUM_MAP = {
+# Mapping from sampling grid strings to OpticStudio SampleSizes enum names
+# Used as fallback if enum resolution fails at runtime
+SAMPLING_ENUM_NAME_MAP = {
+    "32x32": "S_32x32", "64x64": "S_64x64", "128x128": "S_128x128",
+    "256x256": "S_256x256", "512x512": "S_512x512", "1024x1024": "S_1024x1024",
+    "2048x2048": "S_2048x2048",
+}
+SAMPLING_ENUM_INT_FALLBACK = {
     "32x32": 1, "64x64": 2, "128x128": 3,
     "256x256": 4, "512x512": 5, "1024x1024": 6,
 }
@@ -714,8 +720,31 @@ class ZosPyHandler:
                     f = fields.GetField(i)
                     max_field = max(max_field, abs(_extract_value(f.Y)), abs(_extract_value(f.X)))
             paraxial["max_field"] = max_field
-            paraxial["field_type"] = "object_angle"
-            paraxial["field_unit"] = "deg"
+
+            # Read actual field type from system (ZOSAPI FieldType enum:
+            # Angle=0, ObjectHeight=1, ParaxialImageHeight=2, RealImageHeight=3, TheodoliteAngle=4)
+            field_type_str = "Angle"
+            try:
+                ft = fields.GetFieldType()
+                if hasattr(ft, 'name'):
+                    field_type_str = ft.name
+                else:
+                    field_type_str = str(ft).split(".")[-1]
+            except Exception:
+                pass
+
+            if field_type_str in ("Angle", "TheodoliteAngle"):
+                paraxial["field_type"] = "object_angle"
+                paraxial["field_unit"] = "deg"
+            elif field_type_str == "ObjectHeight":
+                paraxial["field_type"] = "object_height"
+                paraxial["field_unit"] = "mm"
+            elif field_type_str in ("ParaxialImageHeight", "RealImageHeight"):
+                paraxial["field_type"] = "image_height"
+                paraxial["field_unit"] = "mm"
+            else:
+                paraxial["field_type"] = field_type_str.lower()
+                paraxial["field_unit"] = "mm"
 
             # Calculate total track from LDE - use _extract_value for UnitField objects
             lde = self.oss.LDE
@@ -1093,6 +1122,36 @@ class ZosPyHandler:
             except OSError as e:
                 logger.warning(f"Failed to remove temp file {temp_path}: {e}")
 
+    @staticmethod
+    def _extract_data_grid(grid) -> Optional[np.ndarray]:
+        """Extract a 2D data grid from an OpticStudio analysis result.
+
+        Uses bulk .Values extraction when available (single COM call),
+        falling back to per-pixel grid.Z(xi, yi) if needed.
+        """
+        # Try bulk extraction first (per ZOSAPI examples pattern)
+        if hasattr(grid, 'Values'):
+            try:
+                raw_values = grid.Values
+                ny = raw_values.GetLength(0)
+                nx = raw_values.GetLength(1)
+                if nx > 0 and ny > 0:
+                    flat = list(raw_values)
+                    return np.array(flat, dtype=np.float64).reshape(ny, nx)
+            except Exception:
+                pass  # Fall through to per-pixel extraction
+
+        # Fallback: per-pixel extraction via grid.Z()
+        nx = grid.Nx if hasattr(grid, 'Nx') else 0
+        ny = grid.Ny if hasattr(grid, 'Ny') else 0
+        if nx <= 0 or ny <= 0:
+            return None
+        arr = np.zeros((ny, nx), dtype=np.float64)
+        for yi in range(ny):
+            for xi in range(nx):
+                arr[yi, xi] = _extract_value(grid.Z(xi, yi))
+        return arr
+
     def get_wavefront(
         self,
         field_index: int = 1,
@@ -1310,8 +1369,14 @@ class ZosPyHandler:
                 "weight": _extract_value(wl.Weight, 1.0),
             })
 
-        # Map reference parameter to OpticStudio constant (0 = Chief Ray, 1 = Centroid)
-        reference_code = 0 if reference == "chief_ray" else 1
+        # Map reference parameter to OpticStudio enum
+        refer_name = "ChiefRay" if reference == "chief_ray" else "Centroid"
+        try:
+            refer_to_enum = self._zp.constants.Analysis.Settings.RMS.ReferTo
+            reference_value = getattr(refer_to_enum, refer_name)
+        except Exception as e:
+            logger.warning(f"[SPOT] Could not resolve ReferTo.{refer_name} enum, falling back to integer: {e}")
+            reference_value = 0 if reference == "chief_ray" else 1
 
         try:
             logger.info(f"[SPOT] Starting: ray_density={ray_density}, reference={reference}, num_fields={num_fields}, field_index={field_index}, wavelength_index={wavelength_index}")
@@ -1324,7 +1389,7 @@ class ZosPyHandler:
             )
 
             # Configure and run the analysis
-            self._configure_spot_analysis(analysis.Settings, ray_density, reference_code, field_index, wavelength_index)
+            self._configure_spot_analysis(analysis.Settings, ray_density, reference_value, field_index, wavelength_index)
             spot_start = time.perf_counter()
             try:
                 analysis.ApplyAndWaitForCompletion()
@@ -1392,7 +1457,7 @@ class ZosPyHandler:
         self,
         settings: Any,
         ray_density: int,
-        reference_code: int,
+        reference_value: Any,
         field_index: Optional[int] = None,
         wavelength_index: Optional[int] = None,
     ) -> None:
@@ -1402,7 +1467,7 @@ class ZosPyHandler:
         Args:
             settings: OpticStudio analysis settings object
             ray_density: Rays per axis (1-20)
-            reference_code: Reference point (0=Chief Ray, 1=Centroid)
+            reference_value: RMS.ReferTo enum value (ChiefRay or Centroid)
             field_index: Field index (1-indexed). None = all fields.
             wavelength_index: Wavelength index (1-indexed). None = all wavelengths.
         """
@@ -1412,11 +1477,11 @@ class ZosPyHandler:
         elif hasattr(settings, 'NumberOfRays'):
             settings.NumberOfRays = ray_density
 
-        # Set reference point
-        if hasattr(settings, 'ReferenceType'):
-            settings.ReferenceType = reference_code
-        elif hasattr(settings, 'Reference'):
-            settings.Reference = reference_code
+        # Set reference point (ReferTo is the correct ZOSAPI property name)
+        try:
+            settings.ReferTo = reference_value
+        except Exception as e:
+            logger.warning(f"[SPOT] Failed to set ReferTo={reference_value}: {e}")
 
         # Set field selection
         if hasattr(settings, 'Field'):
@@ -1514,10 +1579,11 @@ class ZosPyHandler:
 
             # Get the normalized unpolarized ray trace interface
             max_rays = len(field_indices) * len(wl_indices) * len(pupil_coords)
+            # Per official ZOSAPI examples, toSurface = NumberOfSurfaces (not -1)
             norm_unpol = ray_trace.CreateNormUnpol(
                 max_rays,
                 self._zp.constants.Tools.RayTrace.RaysType.Real,
-                self.oss.LDE.NumberOfSurfaces - 1,  # Image surface
+                self.oss.LDE.NumberOfSurfaces,
             )
 
             if norm_unpol is None:
@@ -1545,6 +1611,9 @@ class ZosPyHandler:
             logger.debug(f"[SPOT] Added {rays_added} rays to batch trace (expected {max_rays})")
 
             ray_trace.RunAndWaitForCompletion()
+
+            # Initialize the read cursor before reading results (required by ZOSAPI)
+            norm_unpol.StartReadingResults()
 
             total_success = 0
             total_failed = 0
@@ -1741,11 +1810,11 @@ class ZosPyHandler:
             fi_1 = field_index + 1
             wi = 1
 
-            # RMS/GEO spot sizes are already in µm from ZOSAPI
+            # RMS/GEO spot sizes are in lens units (mm) from ZOSAPI, convert to µm
             if hasattr(spot_data, 'GetRMSSpotSizeFor'):
-                field_data["rms_radius"] = _extract_value(spot_data.GetRMSSpotSizeFor(fi_1, wi))
+                field_data["rms_radius"] = _extract_value(spot_data.GetRMSSpotSizeFor(fi_1, wi)) * 1000
             if hasattr(spot_data, 'GetGeoSpotSizeFor'):
-                field_data["geo_radius"] = _extract_value(spot_data.GetGeoSpotSizeFor(fi_1, wi))
+                field_data["geo_radius"] = _extract_value(spot_data.GetGeoSpotSizeFor(fi_1, wi)) * 1000
 
             # Centroid coordinates are in mm from ZOSAPI, convert to µm
             if hasattr(spot_data, 'GetReferenceCoordinate_X_For'):
@@ -1867,7 +1936,9 @@ class ZosPyHandler:
                     freq_data = []
 
                     if results is not None:
-                        # Try to get data series
+                        # Try to get data series using bulk XData/YData extraction
+                        # per ZOSAPI examples (PythonStandalone_04, _23).
+                        # YData is 2D: GetLength(0)=num_columns (tang/sag), GetLength(1)=num_points
                         try:
                             num_series = results.NumberOfDataSeries
                             logger.info(f"MTF field {fi}: {num_series} data series")
@@ -1879,48 +1950,84 @@ class ZosPyHandler:
 
                                 desc = str(series.Description) if hasattr(series, 'Description') else ""
                                 desc_lower = desc.lower()
-                                n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
-                                logger.info(f"MTF field {fi} series {si}: desc='{desc}', points={n_points}")
 
-                                # Skip diffraction limit series before extracting points
+                                # Skip diffraction limit series
                                 if "diffrac" in desc_lower or "limit" in desc_lower:
                                     logger.debug(f"MTF field {fi} series {si}: skipping (diffraction limit)")
                                     continue
 
+                                # Bulk extraction via XData.Data / YData.Data
                                 series_x = []
-                                series_y = []
-                                for pi in range(n_points):
-                                    pt = series.GetDataPoint(pi)
-                                    if pt is not None:
-                                        x_val = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
-                                        y_val = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
-                                        series_x.append(x_val)
-                                        series_y.append(y_val)
+                                series_tang = []
+                                series_sag = []
+                                extracted_2d = False
 
-                                # Classify series by description — match flexibly:
-                                # OpticStudio uses "TS ..." for tangential, "SS ..." for sagittal
-                                # but may also use full words or other prefixes depending on version
-                                is_tangential = (
-                                    desc_lower.startswith(("ts ", "ts,", "ts."))
-                                    or "tangential" in desc_lower
-                                    or desc_lower.startswith("t ")
-                                )
-                                is_sagittal = (
-                                    desc_lower.startswith(("ss ", "ss,", "ss."))
-                                    or "sagittal" in desc_lower
-                                    or desc_lower.startswith("s ")
-                                )
+                                if hasattr(series, 'XData') and hasattr(series.XData, 'Data'):
+                                    try:
+                                        x_raw = series.XData.Data
+                                        y_raw = series.YData.Data
+                                        series_x = list(x_raw)
+                                        # YData is a 2D .NET array: dim0=columns (tang/sag), dim1=freq points
+                                        n_cols = y_raw.GetLength(0)
+                                        n_pts = y_raw.GetLength(1)
+                                        logger.info(f"MTF field {fi} series {si}: desc='{desc}', cols={n_cols}, pts={n_pts}")
+                                        if n_cols >= 2 and n_pts > 0:
+                                            # Reshape: list(y_raw) flattens to [col0_pt0, col0_pt1, ..., col1_pt0, ...]
+                                            flat = list(y_raw)
+                                            y_arr = [flat[c * n_pts:(c + 1) * n_pts] for c in range(n_cols)]
+                                            series_tang = [float(v) for v in y_arr[0]]
+                                            series_sag = [float(v) for v in y_arr[1]]
+                                            extracted_2d = True
+                                        elif n_cols == 1 and n_pts > 0:
+                                            flat = list(y_raw)
+                                            series_tang = [float(v) for v in flat[:n_pts]]
+                                            extracted_2d = True
+                                    except Exception as e:
+                                        logger.debug(f"MTF field {fi} series {si}: bulk extraction failed: {e}")
 
-                                if is_tangential and not tangential:
-                                    tangential = series_y
-                                    if not freq_data:
-                                        freq_data = series_x
-                                elif is_sagittal and not sagittal:
-                                    sagittal = series_y
+                                # Fallback: per-point extraction
+                                if not extracted_2d:
+                                    n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
+                                    logger.info(f"MTF field {fi} series {si}: desc='{desc}', points={n_points} (per-point)")
+                                    for pi in range(n_points):
+                                        pt = series.GetDataPoint(pi)
+                                        if pt is not None:
+                                            x_val = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
+                                            y_val = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
+                                            series_x.append(x_val)
+                                            series_tang.append(y_val)
+
+                                # If 2D extraction succeeded, both tang and sag come from same series
+                                if extracted_2d and series_tang and series_sag:
+                                    if not tangential:
+                                        tangential = series_tang
+                                    if not sagittal:
+                                        sagittal = series_sag
                                     if not freq_data:
                                         freq_data = series_x
                                 else:
-                                    unclassified.append((series_x, series_y))
+                                    # Classify single-column series by description
+                                    is_tangential = (
+                                        desc_lower.startswith(("ts ", "ts,", "ts."))
+                                        or "tangential" in desc_lower
+                                        or desc_lower.startswith("t ")
+                                    )
+                                    is_sagittal = (
+                                        desc_lower.startswith(("ss ", "ss,", "ss."))
+                                        or "sagittal" in desc_lower
+                                        or desc_lower.startswith("s ")
+                                    )
+
+                                    if is_tangential and not tangential:
+                                        tangential = series_tang
+                                        if not freq_data:
+                                            freq_data = series_x
+                                    elif is_sagittal and not sagittal:
+                                        sagittal = series_tang
+                                        if not freq_data:
+                                            freq_data = series_x
+                                    else:
+                                        unclassified.append((series_x, series_tang))
 
                             # Fallback: assign unclassified series to missing slots
                             if unclassified and (not tangential or not sagittal):
@@ -2784,16 +2891,8 @@ class ZosPyHandler:
                         if num_rows > 0:
                             grid = results.GetDataGrid(0)
                             if grid is not None:
-                                nx = grid.Nx if hasattr(grid, 'Nx') else 0
-                                ny = grid.Ny if hasattr(grid, 'Ny') else 0
-
-                                if nx > 0 and ny > 0:
-                                    arr = np.zeros((ny, nx), dtype=np.float64)
-                                    for yi in range(ny):
-                                        for xi in range(nx):
-                                            val = _extract_value(grid.Z(xi, yi))
-                                            arr[yi, xi] = val
-
+                                arr = self._extract_data_grid(grid)
+                                if arr is not None:
                                     psf_peak = float(np.max(arr))
                                     image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
                                     array_shape = list(arr.shape)
@@ -2969,16 +3068,8 @@ class ZosPyHandler:
                         if num_grids > 0:
                             grid = results.GetDataGrid(0)
                             if grid is not None:
-                                nx = grid.Nx if hasattr(grid, 'Nx') else 0
-                                ny = grid.Ny if hasattr(grid, 'Ny') else 0
-
-                                if nx > 0 and ny > 0:
-                                    arr = np.zeros((ny, nx), dtype=np.float64)
-                                    for yi in range(ny):
-                                        for xi in range(nx):
-                                            val = _extract_value(grid.Z(xi, yi))
-                                            arr[yi, xi] = val
-
+                                arr = self._extract_data_grid(grid)
+                                if arr is not None:
                                     psf_peak = float(np.max(arr))
                                     image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
                                     array_shape = list(arr.shape)
@@ -3031,6 +3122,18 @@ class ZosPyHandler:
         except Exception as e:
             return {"success": False, "error": f"Huygens PSF analysis failed: {e}"}
 
+    def _resolve_sample_size(self, sampling: str):
+        """Resolve a sampling string like '64x64' to the ZOSAPI SampleSizes enum value."""
+        enum_name = SAMPLING_ENUM_NAME_MAP.get(sampling)
+        if enum_name:
+            try:
+                sample_sizes = self._zp.constants.Analysis.SampleSizes
+                return getattr(sample_sizes, enum_name)
+            except Exception:
+                pass
+        # Fallback to hardcoded integer
+        return SAMPLING_ENUM_INT_FALLBACK.get(sampling, 2)
+
     def _configure_analysis_settings(
         self,
         settings,
@@ -3040,29 +3143,29 @@ class ZosPyHandler:
     ) -> None:
         """Configure common analysis settings (Field, Wavelength, SampleSize).
 
-        Silently ignores missing attributes or setter failures, since different
-        analysis types expose different subsets of these settings.
+        Logs warnings on setter failures, since different analysis types
+        expose different subsets of these settings.
         """
         if field_index is not None and hasattr(settings, 'Field'):
             try:
                 settings.Field.SetFieldNumber(field_index)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to set Field={field_index}: {e}")
         if wavelength_index is not None and hasattr(settings, 'Wavelength'):
             try:
                 settings.Wavelength.SetWavelengthNumber(wavelength_index)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to set Wavelength={wavelength_index}: {e}")
         if sampling is not None:
-            sample_value = SAMPLING_ENUM_MAP.get(sampling, 2)
+            sample_value = self._resolve_sample_size(sampling)
             # SampleSize is the standard attribute; Huygens analyses use
             # PupilSampleSize/ImageSampleSize instead.
             for attr in ('SampleSize', 'PupilSampleSize', 'ImageSampleSize'):
                 if hasattr(settings, attr):
                     try:
                         setattr(settings, attr, sample_value)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Failed to set {attr}={sampling} ({sample_value}): {e}")
 
     def _get_fno(self) -> Optional[float]:
         """
@@ -3072,10 +3175,16 @@ class ZosPyHandler:
         is F/#-based, otherwise calculates from EPD and EFL.
 
         Returns:
-            F-number, or None if it cannot be determined
+            F-number, or None if it cannot be determined.
+            Returns None for afocal systems (F/# is meaningless when EFL is infinite).
         """
         try:
             aperture = self.oss.SystemData.Aperture
+
+            # Afocal systems have no meaningful F/# (EFL is infinite)
+            if hasattr(aperture, 'AFocalImageSpace') and aperture.AFocalImageSpace:
+                return None
+
             # Handle enum ApertureType - try .name first, then string split
             aperture_type = ""
             if aperture.ApertureType:
@@ -3855,7 +3964,7 @@ class ZosPyHandler:
                     opt_tool = tools.OpenHammerOptimization()
 
                 opt_tool.Algorithm = resolved_alg
-                opt_tool.NumberOfCores = getattr(opt_tool, 'MaxCores', 8)
+                opt_tool.NumberOfCores = 8
                 timeout = max(10, min(timeout_seconds or 60, 600))
 
                 try:
@@ -3871,7 +3980,7 @@ class ZosPyHandler:
             else:  # local (default)
                 opt_tool = tools.OpenLocalOptimization()
                 opt_tool.Algorithm = resolved_alg
-                opt_tool.NumberOfCores = getattr(opt_tool, 'MaxCores', 8)
+                opt_tool.NumberOfCores = 8
 
                 resolved_cycles = self._resolve_cycles(zp, cycles)
                 if resolved_cycles is not None and hasattr(opt_tool, 'Cycles'):
