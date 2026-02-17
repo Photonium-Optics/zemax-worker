@@ -197,6 +197,16 @@ DEFAULT_NUM_CROSS_SECTION_RAYS = 11
 SAMPLING_INT_FALLBACK = {
     "32x32": 1, "64x64": 2, "128x128": 3,
     "256x256": 4, "512x512": 5, "1024x1024": 6,
+    "2048x2048": 7,
+}
+
+# ZOSAPI FieldType enum name -> (internal field_type, unit)
+FIELD_TYPE_MAP = {
+    "Angle": ("object_angle", "deg"),
+    "TheodoliteAngle": ("object_angle", "deg"),
+    "ObjectHeight": ("object_height", "mm"),
+    "ParaxialImageHeight": ("image_height", "mm"),
+    "RealImageHeight": ("image_height", "mm"),
 }
 
 # Image export settings
@@ -716,30 +726,18 @@ class ZosPyHandler:
                     max_field = max(max_field, abs(_extract_value(f.Y)), abs(_extract_value(f.X)))
             paraxial["max_field"] = max_field
 
-            # Read actual field type from system (ZOSAPI FieldType enum:
-            # Angle=0, ObjectHeight=1, ParaxialImageHeight=2, RealImageHeight=3, TheodoliteAngle=4)
-            field_type_str = "Angle"
+            # Read actual field type from system (ZOSAPI FieldType enum)
             try:
                 ft = fields.GetFieldType()
-                if hasattr(ft, 'name'):
-                    field_type_str = ft.name
-                else:
-                    field_type_str = str(ft).split(".")[-1]
+                field_type_str = getattr(ft, 'name', str(ft).split(".")[-1])
             except Exception:
-                pass
+                field_type_str = "Angle"
 
-            if field_type_str in ("Angle", "TheodoliteAngle"):
-                paraxial["field_type"] = "object_angle"
-                paraxial["field_unit"] = "deg"
-            elif field_type_str == "ObjectHeight":
-                paraxial["field_type"] = "object_height"
-                paraxial["field_unit"] = "mm"
-            elif field_type_str in ("ParaxialImageHeight", "RealImageHeight"):
-                paraxial["field_type"] = "image_height"
-                paraxial["field_unit"] = "mm"
-            else:
-                paraxial["field_type"] = field_type_str.lower()
-                paraxial["field_unit"] = "mm"
+            ft_type, ft_unit = FIELD_TYPE_MAP.get(
+                field_type_str, (field_type_str.lower(), "mm")
+            )
+            paraxial["field_type"] = ft_type
+            paraxial["field_unit"] = ft_unit
 
             # Calculate total track from LDE - use _extract_value for UnitField objects
             lde = self.oss.LDE
@@ -1118,6 +1116,55 @@ class ZosPyHandler:
                 logger.warning(f"Failed to remove temp file {temp_path}: {e}")
 
     @staticmethod
+    def _extract_mtf_series(series) -> tuple[list, list, list]:
+        """Extract x, tangential, and sagittal data from an MTF data series.
+
+        Tries bulk XData.Data/YData.Data first (single COM call). YData may
+        be a 2D .NET array with dim0=columns (tang/sag), dim1=freq points.
+        Falls back to per-point GetDataPoint() extraction.
+
+        Returns (x_values, tangential_values, sagittal_values).
+        sagittal_values is empty if the series is single-column.
+        """
+        if hasattr(series, 'XData') and hasattr(series.XData, 'Data'):
+            try:
+                x_raw = series.XData.Data
+                y_raw = series.YData.Data
+                n_cols = y_raw.GetLength(0)
+                n_pts = y_raw.GetLength(1)
+                if n_pts > 0:
+                    flat = list(y_raw)
+                    x_vals = list(x_raw)
+                    tang = [float(v) for v in flat[:n_pts]]
+                    sag = [float(v) for v in flat[n_pts:2 * n_pts]] if n_cols >= 2 else []
+                    return x_vals, tang, sag
+            except Exception:
+                pass
+
+        # Fallback: per-point extraction
+        n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
+        x_vals, tang = [], []
+        for pi in range(n_points):
+            pt = series.GetDataPoint(pi)
+            if pt is not None:
+                x_vals.append(_extract_value(pt.X if hasattr(pt, 'X') else pt[0]))
+                tang.append(_extract_value(pt.Y if hasattr(pt, 'Y') else pt[1]))
+        return x_vals, tang, []
+
+    @staticmethod
+    def _classify_mtf_series(desc_lower: str) -> Optional[str]:
+        """Classify an MTF series description as 'tangential', 'sagittal', or None."""
+        if (desc_lower.startswith(("ts ", "ts,", "ts."))
+                or "tangential" in desc_lower
+                or desc_lower.startswith("t ")):
+            return "tangential"
+        if (desc_lower.startswith(("ss ", "ss,", "ss."))
+                or "sagittal" in desc_lower
+                or desc_lower.startswith("s ")):
+            return "sagittal"
+        return None
+
+    @staticmethod
     def _extract_data_grid(grid) -> Optional[np.ndarray]:
         """Extract a 2D data grid from an OpticStudio analysis result.
 
@@ -1125,14 +1172,19 @@ class ZosPyHandler:
         falling back to per-pixel grid.Z(xi, yi) if needed.
         """
         # Try bulk extraction first (per ZOSAPI examples pattern)
+        # Uses explicit [yi, xi] indexing on the .NET double[,] object
+        # because list() on a 2D .NET array may not flatten correctly.
         if hasattr(grid, 'Values'):
             try:
                 raw_values = grid.Values
                 ny = raw_values.GetLength(0)
                 nx = raw_values.GetLength(1)
                 if nx > 0 and ny > 0:
-                    flat = list(raw_values)
-                    return np.array(flat, dtype=np.float64).reshape(ny, nx)
+                    arr = np.zeros((ny, nx), dtype=np.float64)
+                    for yi in range(ny):
+                        for xi in range(nx):
+                            arr[yi, xi] = raw_values[yi, xi]
+                    return arr
             except Exception:
                 pass  # Fall through to per-pixel extraction
 
@@ -1364,13 +1416,14 @@ class ZosPyHandler:
                 "weight": _extract_value(wl.Weight, 1.0),
             })
 
-        # Map reference parameter to OpticStudio enum
+        # Map reference parameter to OpticStudio ReferTo enum
         refer_name = "ChiefRay" if reference == "chief_ray" else "Centroid"
         try:
-            refer_to_enum = self._zp.constants.Analysis.Settings.RMS.ReferTo
-            reference_value = getattr(refer_to_enum, refer_name)
+            reference_value = getattr(
+                self._zp.constants.Analysis.Settings.RMS.ReferTo, refer_name
+            )
         except Exception as e:
-            logger.warning(f"[SPOT] Could not resolve ReferTo.{refer_name} enum, falling back to integer: {e}")
+            logger.warning(f"[SPOT] Could not resolve ReferTo.{refer_name}, falling back to integer: {e}")
             reference_value = 0 if reference == "chief_ray" else 1
 
         try:
@@ -1931,9 +1984,6 @@ class ZosPyHandler:
                     freq_data = []
 
                     if results is not None:
-                        # Try to get data series using bulk XData/YData extraction
-                        # per ZOSAPI examples (PythonStandalone_04, _23).
-                        # YData is 2D: GetLength(0)=num_columns (tang/sag), GetLength(1)=num_points
                         try:
                             num_series = results.NumberOfDataSeries
                             logger.info(f"MTF field {fi}: {num_series} data series")
@@ -1946,83 +1996,33 @@ class ZosPyHandler:
                                 desc = str(series.Description) if hasattr(series, 'Description') else ""
                                 desc_lower = desc.lower()
 
-                                # Skip diffraction limit series
                                 if "diffrac" in desc_lower or "limit" in desc_lower:
                                     logger.debug(f"MTF field {fi} series {si}: skipping (diffraction limit)")
                                     continue
 
-                                # Bulk extraction via XData.Data / YData.Data
-                                series_x = []
-                                series_tang = []
-                                series_sag = []
-                                extracted_2d = False
+                                series_x, series_tang, series_sag = self._extract_mtf_series(series)
 
-                                if hasattr(series, 'XData') and hasattr(series.XData, 'Data'):
-                                    try:
-                                        x_raw = series.XData.Data
-                                        y_raw = series.YData.Data
-                                        series_x = list(x_raw)
-                                        # YData is a 2D .NET array: dim0=columns (tang/sag), dim1=freq points
-                                        n_cols = y_raw.GetLength(0)
-                                        n_pts = y_raw.GetLength(1)
-                                        logger.info(f"MTF field {fi} series {si}: desc='{desc}', cols={n_cols}, pts={n_pts}")
-                                        if n_cols >= 2 and n_pts > 0:
-                                            # Reshape: list(y_raw) flattens to [col0_pt0, col0_pt1, ..., col1_pt0, ...]
-                                            flat = list(y_raw)
-                                            y_arr = [flat[c * n_pts:(c + 1) * n_pts] for c in range(n_cols)]
-                                            series_tang = [float(v) for v in y_arr[0]]
-                                            series_sag = [float(v) for v in y_arr[1]]
-                                            extracted_2d = True
-                                        elif n_cols == 1 and n_pts > 0:
-                                            flat = list(y_raw)
-                                            series_tang = [float(v) for v in flat[:n_pts]]
-                                            extracted_2d = True
-                                    except Exception as e:
-                                        logger.debug(f"MTF field {fi} series {si}: bulk extraction failed: {e}")
-
-                                # Fallback: per-point extraction
-                                if not extracted_2d:
-                                    n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
-                                    logger.info(f"MTF field {fi} series {si}: desc='{desc}', points={n_points} (per-point)")
-                                    for pi in range(n_points):
-                                        pt = series.GetDataPoint(pi)
-                                        if pt is not None:
-                                            x_val = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
-                                            y_val = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
-                                            series_x.append(x_val)
-                                            series_tang.append(y_val)
-
-                                # If 2D extraction succeeded, both tang and sag come from same series
-                                if extracted_2d and series_tang and series_sag:
+                                # 2D bulk extraction yields both tang and sag from one series
+                                if series_sag:
                                     if not tangential:
                                         tangential = series_tang
                                     if not sagittal:
                                         sagittal = series_sag
                                     if not freq_data:
                                         freq_data = series_x
-                                else:
-                                    # Classify single-column series by description
-                                    is_tangential = (
-                                        desc_lower.startswith(("ts ", "ts,", "ts."))
-                                        or "tangential" in desc_lower
-                                        or desc_lower.startswith("t ")
-                                    )
-                                    is_sagittal = (
-                                        desc_lower.startswith(("ss ", "ss,", "ss."))
-                                        or "sagittal" in desc_lower
-                                        or desc_lower.startswith("s ")
-                                    )
+                                    continue
 
-                                    if is_tangential and not tangential:
-                                        tangential = series_tang
-                                        if not freq_data:
-                                            freq_data = series_x
-                                    elif is_sagittal and not sagittal:
-                                        sagittal = series_tang
-                                        if not freq_data:
-                                            freq_data = series_x
-                                    else:
-                                        unclassified.append((series_x, series_tang))
+                                # Single-column: classify by description
+                                category = self._classify_mtf_series(desc_lower)
+                                if category == "tangential" and not tangential:
+                                    tangential = series_tang
+                                elif category == "sagittal" and not sagittal:
+                                    sagittal = series_tang
+                                else:
+                                    unclassified.append((series_x, series_tang))
+                                    continue
+                                if not freq_data:
+                                    freq_data = series_x
 
                             # Fallback: assign unclassified series to missing slots
                             if unclassified and (not tangential or not sagittal):
@@ -2748,7 +2748,7 @@ class ZosPyHandler:
                                             continue
                                     curve_points.append({
                                         "field_value": x_val,
-                                        "rms_radius_um": y_val,
+                                        "rms_radius_um": y_val * 1000,  # mm → µm
                                     })
 
                                 logger.info(f"RmsField series {si} curve {ci}: label='{label}', {len(curve_points)} points, is_diffraction={is_diffraction}")
