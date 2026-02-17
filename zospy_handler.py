@@ -192,14 +192,9 @@ def is_zospy_available() -> bool:
 # Analysis settings
 DEFAULT_NUM_CROSS_SECTION_RAYS = 11
 
-# Mapping from sampling grid strings to OpticStudio SampleSizes enum names
-# Used as fallback if enum resolution fails at runtime
-SAMPLING_ENUM_NAME_MAP = {
-    "32x32": "S_32x32", "64x64": "S_64x64", "128x128": "S_128x128",
-    "256x256": "S_256x256", "512x512": "S_512x512", "1024x1024": "S_1024x1024",
-    "2048x2048": "S_2048x2048",
-}
-SAMPLING_ENUM_INT_FALLBACK = {
+# Fallback integer values for SampleSizes enum when runtime resolution fails.
+# Enum names follow the pattern "S_{size}" (e.g., S_64x64).
+SAMPLING_INT_FALLBACK = {
     "32x32": 1, "64x64": 2, "128x128": 3,
     "256x256": 4, "512x512": 5, "1024x1024": 6,
 }
@@ -3124,15 +3119,11 @@ class ZosPyHandler:
 
     def _resolve_sample_size(self, sampling: str):
         """Resolve a sampling string like '64x64' to the ZOSAPI SampleSizes enum value."""
-        enum_name = SAMPLING_ENUM_NAME_MAP.get(sampling)
-        if enum_name:
-            try:
-                sample_sizes = self._zp.constants.Analysis.SampleSizes
-                return getattr(sample_sizes, enum_name)
-            except Exception:
-                pass
-        # Fallback to hardcoded integer
-        return SAMPLING_ENUM_INT_FALLBACK.get(sampling, 2)
+        try:
+            sample_sizes = self._zp.constants.Analysis.SampleSizes
+            return getattr(sample_sizes, f"S_{sampling}")
+        except Exception:
+            return SAMPLING_INT_FALLBACK.get(sampling, 2)
 
     def _configure_analysis_settings(
         self,
