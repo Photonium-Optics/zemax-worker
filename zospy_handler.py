@@ -1527,31 +1527,29 @@ class ZosPyHandler:
             # AddRay signature: (WaveNumber, Hx, Hy, Px, Py, OPDMode)
             opd_none = self._zp.constants.Tools.RayTrace.OPDMode.None_
 
-            # Add rays for selected field/wavelength/pupil combinations
+            # Cache field coordinates to avoid redundant GetField COM calls
+            field_coords: dict[int, tuple[float, float]] = {}
             rays_added = 0
             for fi in field_indices:
                 field = fields.GetField(fi)
-                field_x_val = _extract_value(field.X)
-                field_y_val = _extract_value(field.Y)
-                hx_norm = float(field_x_val / max_field_x) if max_field_x > 1e-10 else 0.0
-                hy_norm = float(field_y_val / max_field_y) if max_field_y > 1e-10 else 0.0
-                logger.debug(f"[SPOT] Field {fi}: raw=({field_x_val}, {field_y_val}), norm=({hx_norm}, {hy_norm})")
+                field_x = _extract_value(field.X)
+                field_y = _extract_value(field.Y)
+                field_coords[fi] = (field_x, field_y)
+                hx_norm = float(field_x / max_field_x) if max_field_x > 1e-10 else 0.0
+                hy_norm = float(field_y / max_field_y) if max_field_y > 1e-10 else 0.0
+                logger.debug(f"[SPOT] Field {fi}: raw=({field_x}, {field_y}), norm=({hx_norm}, {hy_norm})")
                 for wi in wl_indices:
                     for px, py in pupil_coords:
                         norm_unpol.AddRay(wi, hx_norm, hy_norm, float(px), float(py), opd_none)
                         rays_added += 1
             logger.debug(f"[SPOT] Added {rays_added} rays to batch trace (expected {max_rays})")
 
-            # Run the ray trace
             ray_trace.RunAndWaitForCompletion()
 
-            # Read results and organize by field/wavelength
             total_success = 0
             total_failed = 0
             for fi in field_indices:
-                field = fields.GetField(fi)
-                field_x = _extract_value(field.X)
-                field_y = _extract_value(field.Y)
+                field_x, field_y = field_coords[fi]
 
                 for wi in wl_indices:
                     wl_um = _extract_value(wavelengths.GetWavelength(wi).Wavelength, 0.0)
@@ -2513,15 +2511,22 @@ class ZosPyHandler:
                         return
                     try:
                         setattr(settings, attr, value)
-                        logger.info(f"RmsField: Set {label or attr} = {value}")
+                        # Verify the setting took effect by reading it back
+                        readback = getattr(settings, attr, "?")
+                        logger.info(f"RmsField: Set {label or attr} = {value}, readback = {readback}")
                     except Exception as e:
                         logger.warning(f"RmsField: Could not set {label or attr}: {e}")
+
+                # Log all available settings attributes for diagnostics
+                settings_attrs = [a for a in dir(settings) if not a.startswith('_')]
+                logger.info(f"RmsField: Available settings: {settings_attrs}")
 
                 def _get_enum_value(enum_cls: Any, name: str) -> Any:
                     """Get an enum value by name, returning None if not found."""
                     value = getattr(enum_cls, name, None)
                     if value is None:
-                        logger.warning(f"RmsField: Enum value '{name}' not found on {enum_cls}")
+                        available = [a for a in dir(enum_cls) if not a.startswith('_')]
+                        logger.warning(f"RmsField: Enum value '{name}' not found on {enum_cls}. Available: {available}")
                     return value
 
                 # Data = SpotRadius (RMS spot radius)
@@ -2534,11 +2539,15 @@ class ZosPyHandler:
                 fd_value = _get_enum_value(rms_consts.FieldDensities, f"FieldDens_{snapped}")
                 if fd_value is not None:
                     _set_setting('FieldDensity', fd_value)
+                else:
+                    logger.warning(f"RmsField: FieldDensity not set — analysis will use default (likely 5 points)")
 
                 # RayDensity
                 rd_value = _get_enum_value(rms_consts.RayDensities, f"RayDens_{ray_density}")
                 if rd_value is not None:
                     _set_setting('RayDensity', rd_value)
+                else:
+                    logger.warning(f"RmsField: RayDensity not set — analysis will use default")
 
                 # ReferTo
                 refer_name = "ChiefRay" if reference == "chief_ray" else "Centroid"
@@ -2668,6 +2677,7 @@ class ZosPyHandler:
                         logger.warning(f"RmsField: Text fallback also failed: {e}")
                     return {"success": False, "error": "RmsField analysis returned no extractable data"}
 
+                logger.info(f"RmsField: Returning {len(data_points)} data points, {len(diffraction_limit)} diffraction limit points (requested FieldDens_{snapped})")
                 result = {
                     "success": True,
                     "data": data_points,
