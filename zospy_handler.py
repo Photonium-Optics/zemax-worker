@@ -1361,7 +1361,7 @@ class ZosPyHandler:
 
     def get_spot_diagram(
         self,
-        ray_density: int = 5,
+        ray_density: int = 20,
         reference: str = "chief_ray",
         field_index: Optional[int] = None,
         wavelength_index: Optional[int] = None,
@@ -1379,7 +1379,8 @@ class ZosPyHandler:
         Note: System must be pre-loaded via load_zmx_file().
 
         Args:
-            ray_density: Rays per axis (determines grid density, 1-20)
+            ray_density: Controls number of rays: (ray_density+1)^2 per field/wavelength.
+                         Default 20 → 441 rays. Range 5-40.
             reference: Reference point: 'chief_ray' or 'centroid'
             field_index: Field index (1-indexed). None = all fields.
             wavelength_index: Wavelength index (1-indexed). None = all wavelengths.
@@ -1569,7 +1570,7 @@ class ZosPyHandler:
         Ray positions are converted from lens units (mm) to µm at the source.
 
         Args:
-            ray_density: Rays per axis (e.g., 5 means ~5x5 grid per field)
+            ray_density: Controls ray count: (ray_density+1)^2 random rays per field/wavelength.
             field_index: Field index (1-indexed). None = all fields.
             wavelength_index: Wavelength index (1-indexed). None = all wavelengths.
 
@@ -1600,13 +1601,23 @@ class ZosPyHandler:
 
         logger.info(f"[SPOT] Ray trace: density={ray_density}, fields={field_indices}, wavelengths={wl_indices}")
 
-        # Generate pupil coordinates for ray grid (circular pupil pattern)
-        pupil_coords = []
-        for px in np.linspace(-1, 1, ray_density):
-            for py in np.linspace(-1, 1, ray_density):
-                if px**2 + py**2 <= 1.0:
-                    pupil_coords.append((float(px), float(py)))
-        logger.debug(f"[SPOT] Pupil grid: {len(pupil_coords)} rays from {ray_density}x{ray_density} grid")
+        # Generate random pupil coordinates within the unit circle.
+        # Per official ZOSAPI example (PythonStandalone_22), spot diagrams use
+        # random sampling — not a grid — to avoid grid-like artifacts.
+        # ray_density maps to num_rays = (ray_density + 1)^2 per field/wavelength.
+        num_rays = (ray_density + 1) ** 2
+        rng = np.random.default_rng(seed=42)  # deterministic for reproducibility
+        pupil_coords: list[tuple[float, float]] = []
+        while len(pupil_coords) < num_rays:
+            batch = max(num_rays - len(pupil_coords), 64)
+            px = rng.uniform(-1, 1, batch)
+            py = rng.uniform(-1, 1, batch)
+            mask = px ** 2 + py ** 2 <= 1.0
+            for p, q in zip(px[mask], py[mask]):
+                if len(pupil_coords) >= num_rays:
+                    break
+                pupil_coords.append((float(p), float(q)))
+        logger.debug(f"[SPOT] Random pupil sampling: {len(pupil_coords)} rays (density={ray_density})")
 
         # Calculate max field extent for normalization (must use ALL fields,
         # not just filtered ones, because Hx/Hy are normalized to full extent)
