@@ -1298,6 +1298,18 @@ class ZosPyHandler:
         if num_fields == 0:
             return {"success": False, "error": "System has no fields defined"}
 
+        # Read wavelength info from system data
+        wavelengths_obj = self.oss.SystemData.Wavelengths
+        num_wavelengths = wavelengths_obj.NumberOfWavelengths
+        wavelength_info = []
+        for wi in range(1, num_wavelengths + 1):
+            wl = wavelengths_obj.GetWavelength(wi)
+            wavelength_info.append({
+                "index": wi,
+                "um": _extract_value(wl.Wavelength, 0.0),
+                "weight": _extract_value(wl.Weight, 1.0),
+            })
+
         # Map reference parameter to OpticStudio constant (0 = Chief Ray, 1 = Centroid)
         reference_code = 0 if reference == "chief_ray" else 1
 
@@ -1325,7 +1337,7 @@ class ZosPyHandler:
             airy_radius: Optional[float] = None
             if analysis.Results is not None:
                 airy_radius = self._extract_airy_radius(analysis.Results)
-                spot_data = self._extract_spot_data_from_results(analysis.Results, fields, num_fields)
+                spot_data = self._extract_spot_data_from_results(analysis.Results, fields, num_fields, field_index=field_index)
                 logger.info(f"[SPOT] StandardSpot results: airy_radius={airy_radius}, fields={len(spot_data)}")
             else:
                 logger.warning("[SPOT] StandardSpot analysis.Results is None")
@@ -1363,6 +1375,9 @@ class ZosPyHandler:
                 "spot_data": spot_data,
                 "spot_rays": spot_rays,
                 "airy_radius": airy_radius,
+                "num_fields": num_fields,
+                "num_wavelengths": num_wavelengths,
+                "wavelength_info": wavelength_info,
             }
             _log_raw_output("/spot-diagram", result)
             return result
@@ -1539,11 +1554,13 @@ class ZosPyHandler:
                 field_y = _extract_value(field.Y)
 
                 for wi in wl_indices:
+                    wl_um = _extract_value(wavelengths.GetWavelength(wi).Wavelength, 0.0)
                     field_rays = {
                         "field_index": fi - 1,
                         "field_x": field_x,
                         "field_y": field_y,
                         "wavelength_index": wi - 1,
+                        "wavelength_um": wl_um,
                         "rays": [],
                     }
 
@@ -1625,6 +1642,7 @@ class ZosPyHandler:
         results: Any,
         fields: Any,
         num_fields: int,
+        field_index: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """
         Extract per-field spot data from analysis results.
@@ -1633,14 +1651,23 @@ class ZosPyHandler:
             results: OpticStudio analysis results object
             fields: OpticStudio fields object
             num_fields: Number of fields in the system
+            field_index: If set (1-indexed), only extract data for this field.
+                         When a single field is analyzed, ZOSAPI returns 0 for
+                         non-analyzed fields, so we must limit iteration.
 
         Returns:
             List of spot data dicts per field
         """
         spot_data: list[dict[str, Any]] = []
 
+        # Determine which fields to iterate
+        if field_index is not None:
+            field_indices_0based = [field_index - 1]  # Convert 1-based to 0-based
+        else:
+            field_indices_0based = list(range(num_fields))
+
         try:
-            for fi in range(num_fields):
+            for fi in field_indices_0based:
                 field = fields.GetField(fi + 1)  # 1-indexed
                 # Use _extract_value for UnitField objects
                 field_data = self._create_field_spot_data(fi, _extract_value(field.X), _extract_value(field.Y))
