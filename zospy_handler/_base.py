@@ -10,10 +10,8 @@ Each uvicorn worker process gets its own OpticStudio connection (via ZOS singlet
 Multiple workers are supported — the constraint is license seats, not threading.
 """
 
-import base64
 import json
 import logging
-import math
 import os
 import re
 import time
@@ -400,7 +398,6 @@ class ZosPyHandlerBase:
         Returns:
             Dict with load status and system info
         """
-        import os
         if not os.path.exists(file_path):
             raise ZosPyError(f"ZMX file not found: {file_path}")
 

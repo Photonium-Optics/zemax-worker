@@ -42,7 +42,7 @@ class RayTracingMixin:
         """
         # Note: 'distribution' parameter is accepted for API compatibility but only square grid
         # is currently implemented. Log warning if hexapolar is requested.
-        if distribution != "square" and distribution != "grid":
+        if distribution not in ("square", "grid"):
             logger.warning(
                 f"Distribution '{distribution}' requested but only square grid is implemented. "
                 "Using square grid instead."

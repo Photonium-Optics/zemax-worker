@@ -384,7 +384,6 @@ class OptimizationMixin:
             return _wizard_error(f"Merit function calculation failed after wizard: {e}")
 
         # Read all generated rows from MFE
-        generated_rows = []
         try:
             mfe_cols = zp.constants.Editors.MFE.MeritColumn
             param_columns = [
@@ -393,61 +392,8 @@ class OptimizationMixin:
                 mfe_cols.Param5, mfe_cols.Param6,
                 mfe_cols.Param7, mfe_cols.Param8,
             ]
-
-            num_operands = mfe.NumberOfOperands
-            logger.info(f"Wizard generated {num_operands} operand rows")
-
-            for i in range(1, num_operands + 1):
-                try:
-                    op = mfe.GetOperandAt(i)
-
-                    # Get operand code from enum
-                    try:
-                        op_code = str(op.Type).split('.')[-1]
-                    except Exception:
-                        op_code = f"UNK_{i}"
-
-                    # Read 8 parameter cells
-                    # Note: 0 is a valid value (e.g., surface index 0 = image surface),
-                    # so we always include it rather than converting to None.
-                    params = []
-                    for j, col in enumerate(param_columns):
-                        try:
-                            cell = op.GetOperandCell(col)
-                            dt = str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else ''
-                            if dt == 'String':
-                                # String params (e.g. BLNK comment text) are not numeric;
-                                # the text is already captured in the 'comment' field.
-                                params.append(None)
-                            else:
-                                raw = float(cell.IntegerValue if dt == 'Integer' else cell.DoubleValue)
-                                params.append(None if (math.isinf(raw) or math.isnan(raw)) else raw)
-                        except Exception:
-                            params.append(None)
-
-                    generated_rows.append({
-                        "row_index": i - 1,
-                        "operand_code": op_code,
-                        "params": params,
-                        "target": _extract_value(op.Target, 0.0),
-                        "weight": _extract_value(op.Weight, 0.0),
-                        "value": _extract_value(op.Value, None),
-                        "contribution": _extract_value(op.Contribution, None),
-                        "comment": _read_comment_cell(op, mfe_cols.Comment),
-                    })
-                except Exception as e:
-                    logger.warning(f"Error reading wizard MFE row {i}: {e}")
-                    generated_rows.append({
-                        "row_index": i - 1,
-                        "operand_code": f"ERR_{i}",
-                        "params": [None] * 8,
-                        "target": 0.0,
-                        "weight": 0.0,
-                        "value": None,
-                        "contribution": None,
-                        "comment": None,
-                    })
-
+            logger.info(f"Wizard generated {mfe.NumberOfOperands} operand rows")
+            generated_rows = self._read_mfe_rows(mfe, mfe_cols, param_columns, "wizard")
         except Exception as e:
             logger.error(f"Error reading wizard-generated MFE rows: {e}")
             return _wizard_error(f"Failed to read wizard-generated rows: {e}", total_merit=total_merit)
@@ -608,6 +554,59 @@ class OptimizationMixin:
                 "default_value": None,
             }
 
+
+    # ── MFE row reading helper ─────────────────────────────────────────
+
+    @staticmethod
+    def _read_mfe_param_cells(op, param_columns) -> list:
+        params = []
+        for col in param_columns:
+            try:
+                cell = op.GetOperandCell(col)
+                dt = str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else ''
+                if dt == 'String':
+                    params.append(None)
+                else:
+                    raw = float(cell.IntegerValue if dt == 'Integer' else cell.DoubleValue)
+                    params.append(None if (math.isinf(raw) or math.isnan(raw)) else raw)
+            except Exception:
+                params.append(None)
+        return params
+
+    def _read_mfe_rows(self, mfe, mfe_cols, param_columns, label: str) -> list[dict[str, Any]]:
+        rows = []
+        num_operands = mfe.NumberOfOperands
+        for i in range(1, num_operands + 1):
+            try:
+                op = mfe.GetOperandAt(i)
+                try:
+                    op_code = str(op.Type).split('.')[-1]
+                except Exception:
+                    op_code = f"UNK_{i}"
+
+                rows.append({
+                    "row_index": i - 1,
+                    "operand_code": op_code,
+                    "params": self._read_mfe_param_cells(op, param_columns),
+                    "target": _extract_value(op.Target, 0.0),
+                    "weight": _extract_value(op.Weight, 0.0),
+                    "value": _extract_value(op.Value, None),
+                    "contribution": _extract_value(op.Contribution, None),
+                    "comment": _read_comment_cell(op, mfe_cols.Comment),
+                })
+            except Exception as e:
+                logger.warning(f"Error reading {label} MFE row {i}: {e}")
+                rows.append({
+                    "row_index": i - 1,
+                    "operand_code": f"ERR_{i}",
+                    "params": [None] * 8,
+                    "target": 0.0,
+                    "weight": 0.0,
+                    "value": None,
+                    "contribution": None,
+                    "comment": None,
+                })
+        return rows
 
     # ── Optimization enum helpers ──────────────────────────────────────
 
@@ -814,42 +813,7 @@ class OptimizationMixin:
                 mfe_cols.Param5, mfe_cols.Param6,
                 mfe_cols.Param7, mfe_cols.Param8,
             ]
-            num_operands = mfe.NumberOfOperands
-            for i in range(1, num_operands + 1):
-                try:
-                    op = mfe.GetOperandAt(i)
-                    try:
-                        op_code = str(op.Type).split('.')[-1]
-                    except Exception:
-                        op_code = f"UNK_{i}"
-
-                    params = []
-                    for j, col in enumerate(param_columns):
-                        try:
-                            cell = op.GetOperandCell(col)
-                            dt = str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else ''
-                            if dt == 'String':
-                                # String params (e.g. BLNK comment text) are not numeric;
-                                # the text is already captured in the 'comment' field.
-                                params.append(None)
-                            else:
-                                raw = float(cell.IntegerValue if dt == 'Integer' else cell.DoubleValue)
-                                params.append(None if (math.isinf(raw) or math.isnan(raw)) else raw)
-                        except Exception:
-                            params.append(None)
-
-                    operand_results.append({
-                        "row_index": i - 1,
-                        "operand_code": op_code,
-                        "params": params,
-                        "target": _extract_value(op.Target, 0.0),
-                        "weight": _extract_value(op.Weight, 0.0),
-                        "value": _extract_value(op.Value, None),
-                        "contribution": _extract_value(op.Contribution, None),
-                        "comment": _read_comment_cell(op, mfe_cols.Comment),
-                    })
-                except Exception as e:
-                    logger.warning(f"Error reading post-opt MFE row {i}: {e}")
+            operand_results = self._read_mfe_rows(mfe, mfe_cols, param_columns, "post-opt")
         except Exception as e:
             logger.warning(f"Error reading post-optimization MFE: {e}")
 
@@ -1015,14 +979,7 @@ class OptimizationMixin:
         if criterion_enum is None:
             return {"success": False, "error": "QuickFocus criterion enum not found in this OpticStudio version"}
 
-        criterion_map = {
-            "SpotSizeRadial": "SpotSizeRadial",
-            "RMSSpotSizeRadial": "RMSSpotSizeRadial",
-            "SpotSizeX": "SpotSizeX",
-            "SpotSizeY": "SpotSizeY",
-        }
-        criterion_attr = criterion_map.get(criterion, "SpotSizeRadial")
-        resolved_criterion = getattr(criterion_enum, criterion_attr, None)
+        resolved_criterion = getattr(criterion_enum, criterion, None)
         if resolved_criterion is None:
             resolved_criterion = getattr(criterion_enum, "SpotSizeRadial", None)
             if resolved_criterion is None:

@@ -6,7 +6,7 @@ import math
 import os
 import tempfile
 import time
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -466,7 +466,6 @@ class AberrationsMixin:
                 if not data_points:
                     logger.warning("RmsField: No data extracted from DataSeries, attempting text fallback")
                     try:
-                        import tempfile, os
                         tmp = tempfile.NamedTemporaryFile(suffix='.txt', delete=False)
                         tmp_path = tmp.name
                         tmp.close()
@@ -506,7 +505,7 @@ class AberrationsMixin:
         maximum_term: int,
         wavelength_index: int,
         field_density: int,
-    ) -> Optional["pd.DataFrame"]:
+    ) -> "pd.DataFrame | None":
         """
         Run ZernikeCoefficientsVsField via the raw new_analysis API.
 
