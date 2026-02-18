@@ -543,6 +543,7 @@ class SpotRayData(BaseModel):
     field_x: float = Field(description="Field X coordinate")
     field_y: float = Field(description="Field Y coordinate")
     wavelength_index: int = Field(description="0-based wavelength index")
+    wavelength_um: float = Field(default=0.0, description="Wavelength in micrometers")
     rays: list[SpotRayPoint] = Field(default_factory=list, description="Ray hit points on image plane")
 
 
@@ -1036,6 +1037,7 @@ async def get_spot_diagram(
                     field_x=ray_data["field_x"],
                     field_y=ray_data["field_y"],
                     wavelength_index=ray_data["wavelength_index"],
+                    wavelength_um=ray_data.get("wavelength_um", 0.0),
                     rays=rays,
                 ))
             total_rays = sum(len(sr.rays) for sr in spot_rays)
