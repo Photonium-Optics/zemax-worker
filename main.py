@@ -561,6 +561,9 @@ class SpotDiagramResponse(BaseModel):
     spot_data: Optional[list[SpotFieldData]] = Field(default=None, description="Per-field spot metrics (RMS, GEO radius, centroid)")
     spot_rays: Optional[list[SpotRayData]] = Field(default=None, description="Raw ray X,Y positions for Mac-side rendering")
     airy_radius: Optional[float] = Field(default=None, description="Airy disk radius in lens units")
+    wavelength_info: Optional[list[dict]] = Field(default=None, description="Wavelength info [{index, um}, ...]")
+    num_fields: Optional[int] = Field(default=None, description="Number of fields in the system")
+    num_wavelengths: Optional[int] = Field(default=None, description="Number of wavelengths in the system")
     error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 
@@ -1052,6 +1055,9 @@ async def get_spot_diagram(
             spot_data=spot_data,
             spot_rays=spot_rays,
             airy_radius=result.get("airy_radius"),
+            wavelength_info=result.get("wavelength_info"),
+            num_fields=result.get("num_fields"),
+            num_wavelengths=result.get("num_wavelengths"),
         )
 
     return await _run_endpoint(
