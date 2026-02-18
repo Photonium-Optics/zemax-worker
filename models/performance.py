@@ -150,6 +150,10 @@ class PSFResponse(BaseModel):
     wavelength_um: Optional[float] = Field(default=None, description="Wavelength in micrometers")
     field_x: Optional[float] = Field(default=None, description="Field X coordinate")
     field_y: Optional[float] = Field(default=None, description="Field Y coordinate")
+    delta_x: Optional[float] = Field(default=None, description="Pixel spacing in X (grid Dx)")
+    delta_y: Optional[float] = Field(default=None, description="Pixel spacing in Y (grid Dy)")
+    extent_x: Optional[float] = Field(default=None, description="Total grid extent in X (MaxX - MinX)")
+    extent_y: Optional[float] = Field(default=None, description="Total grid extent in Y (MaxY - MinY)")
     error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 

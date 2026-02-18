@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import numpy as np
@@ -33,6 +34,32 @@ logger = logging.getLogger(__name__)
 
 # Dedicated logger for raw Zemax analysis output (filterable in dashboard)
 logger_raw = logging.getLogger("zemax.raw")
+
+
+@dataclass
+class GridWithMetadata:
+    """Data grid with optional spatial extent metadata from ZOS-API IGrid."""
+    data: np.ndarray
+    min_x: Optional[float] = None
+    max_x: Optional[float] = None
+    min_y: Optional[float] = None
+    max_y: Optional[float] = None
+    dx: Optional[float] = None
+    dy: Optional[float] = None
+
+    @property
+    def extent_x(self) -> Optional[float]:
+        """Total grid extent in X (MaxX - MinX), or None if bounds are unavailable."""
+        if self.min_x is not None and self.max_x is not None:
+            return self.max_x - self.min_x
+        return None
+
+    @property
+    def extent_y(self) -> Optional[float]:
+        """Total grid extent in Y (MaxY - MinY), or None if bounds are unavailable."""
+        if self.min_y is not None and self.max_y is not None:
+            return self.max_y - self.min_y
+        return None
 
 
 def _summarize_value(key: str, value: Any) -> Any:
@@ -492,22 +519,46 @@ class ZosPyHandlerBase:
     def _extract_data_grid(grid) -> Optional[np.ndarray]:
         """Extract a 2D data grid from an OpticStudio analysis result.
 
-        Uses bulk .Values extraction when available (single COM call),
+        Uses tiered bulk .Values extraction when available (single COM call),
         falling back to per-pixel grid.Z(xi, yi) if needed.
+
+        Tiers for .Values path:
+          1. np.asarray — instant if pythonnet supports buffer protocol
+          2. List comprehension — builds array in one numpy call
+          3. Per-element loop — guaranteed fallback
         """
-        # Try bulk extraction first (per ZOSAPI examples pattern)
-        # Uses explicit [yi, xi] indexing on the .NET double[,] object
-        # because list() on a 2D .NET array may not flatten correctly.
         if hasattr(grid, 'Values'):
             try:
                 raw_values = grid.Values
                 ny = raw_values.GetLength(0)
                 nx = raw_values.GetLength(1)
                 if nx > 0 and ny > 0:
+                    # Tier 1: direct numpy conversion (zero-copy if supported)
+                    try:
+                        arr = np.asarray(raw_values, dtype=np.float64)
+                        if arr.shape == (ny, nx):
+                            logger.debug("_extract_data_grid: Tier 1 (np.asarray) succeeded")
+                            return arr
+                    except Exception:
+                        pass
+
+                    # Tier 2: list comprehension → single numpy call
+                    try:
+                        arr = np.array(
+                            [[raw_values[yi, xi] for xi in range(nx)] for yi in range(ny)],
+                            dtype=np.float64,
+                        )
+                        logger.debug("_extract_data_grid: Tier 2 (list comprehension) succeeded")
+                        return arr
+                    except Exception:
+                        pass
+
+                    # Tier 3: per-element loop (original fallback)
                     arr = np.zeros((ny, nx), dtype=np.float64)
                     for yi in range(ny):
                         for xi in range(nx):
                             arr[yi, xi] = raw_values[yi, xi]
+                    logger.debug("_extract_data_grid: Tier 3 (per-element loop) succeeded")
                     return arr
             except Exception:
                 pass  # Fall through to per-pixel extraction
@@ -523,12 +574,35 @@ class ZosPyHandlerBase:
                 arr[yi, xi] = _extract_value(grid.Z(xi, yi))
         return arr
 
+    def _extract_grid_with_metadata(self, grid) -> Optional["GridWithMetadata"]:
+        """Extract data grid with spatial metadata from a ZOS-API IGrid object.
+
+        Probes the grid for MinX/MaxX/MinY/MaxY/Dx/Dy properties (IGrid interface).
+        Safe if properties are absent.
+        """
+        data = self._extract_data_grid(grid)
+        if data is None:
+            return None
+        meta = GridWithMetadata(data=data)
+        for attr, field_name in [
+            ('MinX', 'min_x'), ('MaxX', 'max_x'),
+            ('MinY', 'min_y'), ('MaxY', 'max_y'),
+            ('Dx', 'dx'), ('Dy', 'dy'),
+        ]:
+            if hasattr(grid, attr):
+                try:
+                    setattr(meta, field_name, float(getattr(grid, attr)))
+                except Exception:
+                    pass
+        return meta
+
     def _resolve_sample_size(self, sampling: str):
         """Resolve a sampling string like '64x64' to the ZOSAPI SampleSizes enum value."""
         try:
             sample_sizes = self._zp.constants.Analysis.SampleSizes
             return getattr(sample_sizes, f"S_{sampling}")
         except Exception:
+            logger.warning(f"_resolve_sample_size: Could not resolve '{sampling}' via ZOSAPI enum, using integer fallback")
             return SAMPLING_INT_FALLBACK.get(sampling, 2)
 
     def _configure_analysis_settings(

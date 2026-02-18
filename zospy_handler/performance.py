@@ -3,15 +3,61 @@
 import base64
 import logging
 import math
+import re
 import time
 from typing import Any, Optional
 
 import numpy as np
 
-from zospy_handler._base import _extract_value, _log_raw_output, _extract_dataframe
+from zospy_handler._base import _extract_value, _log_raw_output, _extract_dataframe, GridWithMetadata
 from utils.timing import log_timing
 
 logger = logging.getLogger(__name__)
+
+_STREHL_RE = re.compile(
+    r"strehl\s*(?:ratio)?\s*[:=]\s*([\d.]+(?:e[+-]?\d+)?)",
+    re.IGNORECASE,
+)
+
+
+def _parse_strehl_from_header(header_lines) -> Optional[float]:
+    """Parse Strehl ratio from analysis header lines using regex.
+
+    Handles formats like:
+      "Strehl Ratio : 0.8532"
+      "Strehl Ratio : 0.8532 (0.550 um)"
+      "Strehl = 8.532e-01"
+    """
+    if not hasattr(header_lines, '__iter__'):
+        return None
+    for line in header_lines:
+        m = _STREHL_RE.search(str(line))
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                pass
+    return None
+
+
+def _grid_meta_to_psf_fields(grid_meta: GridWithMetadata) -> dict[str, Any]:
+    """Convert a GridWithMetadata into the common PSF result dict fields.
+
+    Returns a dict with keys: image (base64), image_format, array_shape,
+    array_dtype, psf_peak, delta_x, delta_y, extent_x, extent_y.
+    """
+    arr = grid_meta.data
+    return {
+        "image": base64.b64encode(arr.tobytes()).decode('utf-8'),
+        "image_format": "numpy_array",
+        "array_shape": list(arr.shape),
+        "array_dtype": str(arr.dtype),
+        "psf_peak": float(np.max(arr)),
+        "delta_x": grid_meta.dx,
+        "delta_y": grid_meta.dy,
+        "extent_x": grid_meta.extent_x,
+        "extent_y": grid_meta.extent_y,
+    }
 
 
 class PerformanceMixin:
@@ -27,20 +73,27 @@ class PerformanceMixin:
         Returns (x_values, tangential_values, sagittal_values).
         sagittal_values is empty if the series is single-column.
         """
-        if hasattr(series, 'XData') and hasattr(series.XData, 'Data'):
+        if (hasattr(series, 'XData') and hasattr(series.XData, 'Data')
+                and hasattr(series, 'YData') and hasattr(series.YData, 'Data')):
             try:
                 x_raw = series.XData.Data
                 y_raw = series.YData.Data
                 n_cols = y_raw.GetLength(0)
                 n_pts = y_raw.GetLength(1)
                 if n_pts > 0:
-                    flat = list(y_raw)
-                    x_vals = list(x_raw)
-                    tang = [float(v) for v in flat[:n_pts]]
-                    sag = [float(v) for v in flat[n_pts:2 * n_pts]] if n_cols >= 2 else []
+                    if n_cols > 2:
+                        logger.warning(f"MTF bulk: unexpected n_cols={n_cols} (expected 1 or 2); using cols 0 and 1 only")
+                    x_len = x_raw.GetLength(0)
+                    if x_len != n_pts:
+                        logger.warning(f"MTF bulk: x length {x_len} != y points {n_pts}; truncating to shorter")
+                        n_pts = min(x_len, n_pts)
+                    x_vals = [float(x_raw[i]) for i in range(n_pts)]
+                    tang = [float(y_raw[0, i]) for i in range(n_pts)]
+                    sag = [float(y_raw[1, i]) for i in range(n_pts)] if n_cols >= 2 else []
+                    logger.debug(f"MTF bulk extraction: {n_cols} cols x {n_pts} pts")
                     return x_vals, tang, sag
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"MTF bulk extraction failed, falling back to per-point: {type(e).__name__}: {e}")
 
         # Fallback: per-point extraction
         n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
@@ -50,6 +103,7 @@ class PerformanceMixin:
             if pt is not None:
                 x_vals.append(_extract_value(pt.X if hasattr(pt, 'X') else pt[0]))
                 tang.append(_extract_value(pt.Y if hasattr(pt, 'Y') else pt[1]))
+        logger.debug(f"MTF per-point extraction: {len(x_vals)} pts")
         return x_vals, tang, []
 
     @staticmethod
@@ -1343,27 +1397,20 @@ class PerformanceMixin:
                     psf_elapsed_ms = (time.perf_counter() - psf_start) * 1000
                     log_timing(logger, "FftPsf.run", psf_elapsed_ms)
 
-                # Extract 2D PSF data
+                # Extract 2D PSF data with spatial metadata
                 results = analysis.Results
-                image_b64 = None
-                array_shape = None
-                array_dtype = None
-                psf_peak = None
+                psf_fields: dict[str, Any] = {}
 
                 if results is not None:
                     try:
-                        # Try to get the data grid
                         num_rows = results.NumberOfDataGrids
                         if num_rows > 0:
                             grid = results.GetDataGrid(0)
                             if grid is not None:
-                                arr = self._extract_data_grid(grid)
-                                if arr is not None:
-                                    psf_peak = float(np.max(arr))
-                                    image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
-                                    array_shape = list(arr.shape)
-                                    array_dtype = str(arr.dtype)
-                                    logger.info(f"PSF data extracted: shape={arr.shape}, peak={psf_peak:.6f}")
+                                grid_meta = self._extract_grid_with_metadata(grid)
+                                if grid_meta is not None:
+                                    psf_fields = _grid_meta_to_psf_fields(grid_meta)
+                                    logger.info(f"PSF data extracted: shape={grid_meta.data.shape}, peak={psf_fields['psf_peak']:.6f}")
                     except Exception as e:
                         logger.warning(f"PSF: Could not extract data grid: {e}")
             finally:
@@ -1372,68 +1419,62 @@ class PerformanceMixin:
                 except Exception:
                     pass
 
-            if image_b64 is None:
+            if not psf_fields:
                 return {"success": False, "error": "FFT PSF analysis did not produce data"}
 
-            # Try to get Strehl ratio from Huygens PSF
+            # Try to get Strehl ratio -- check FFT header first (cheap),
+            # then fall back to a minimal 32x32 Huygens run.
             strehl_ratio = None
-            huygens = None
-            try:
-                huygens = self._zp.analyses.new_analysis(
-                    self.oss,
-                    idm.HuygensPsf,
-                    settings_first=True,
-                )
-                h_settings = huygens.Settings
-                self._configure_analysis_settings(
-                    h_settings,
-                    field_index=field_index,
-                    wavelength_index=wavelength_index,
-                )
-
-                huygens_start = time.perf_counter()
+            if results is not None:
                 try:
-                    huygens.ApplyAndWaitForCompletion()
-                finally:
-                    huygens_elapsed_ms = (time.perf_counter() - huygens_start) * 1000
-                    log_timing(logger, "HuygensPSF.run (Strehl)", huygens_elapsed_ms)
+                    fft_header = results.HeaderData.Lines if hasattr(results, 'HeaderData') else ""
+                    strehl_ratio = _parse_strehl_from_header(fft_header)
+                except Exception:
+                    pass
 
-                h_results = huygens.Results
-                if h_results is not None:
-                    # Try to extract Strehl from header text
+            if strehl_ratio is None:
+                huygens = None
+                try:
+                    huygens = self._zp.analyses.new_analysis(
+                        self.oss,
+                        idm.HuygensPsf,
+                        settings_first=True,
+                    )
+                    h_settings = huygens.Settings
+                    self._configure_analysis_settings(
+                        h_settings,
+                        field_index=field_index,
+                        wavelength_index=wavelength_index,
+                        sampling="32x32",
+                    )
+
+                    huygens_start = time.perf_counter()
                     try:
-                        header_text = h_results.HeaderData.Lines if hasattr(h_results, 'HeaderData') else ""
-                        if hasattr(header_text, '__iter__'):
-                            for line in header_text:
-                                line_str = str(line).lower()
-                                if "strehl" in line_str:
-                                    parts = line_str.split(":")
-                                    if len(parts) > 1:
-                                        val_str = parts[-1].strip()
-                                        try:
-                                            strehl_ratio = float(val_str)
-                                        except ValueError:
-                                            pass
-                                    break
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.debug(f"PSF: Huygens Strehl ratio extraction failed (non-critical): {e}")
-            finally:
-                if huygens is not None:
-                    try:
-                        huygens.Close()
-                    except Exception:
-                        pass
+                        huygens.ApplyAndWaitForCompletion()
+                    finally:
+                        huygens_elapsed_ms = (time.perf_counter() - huygens_start) * 1000
+                        log_timing(logger, "HuygensPSF.run (Strehl-only, 32x32)", huygens_elapsed_ms)
+
+                    h_results = huygens.Results
+                    if h_results is not None:
+                        try:
+                            header_text = h_results.HeaderData.Lines if hasattr(h_results, 'HeaderData') else ""
+                            strehl_ratio = _parse_strehl_from_header(header_text)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.debug(f"PSF: Huygens Strehl ratio extraction failed (non-critical): {e}")
+                finally:
+                    if huygens is not None:
+                        try:
+                            huygens.Close()
+                        except Exception:
+                            pass
 
             result = {
                 "success": True,
-                "image": image_b64,
-                "image_format": "numpy_array",
-                "array_shape": array_shape,
-                "array_dtype": array_dtype,
+                **psf_fields,
                 "strehl_ratio": strehl_ratio,
-                "psf_peak": psf_peak,
                 "wavelength_um": float(wavelength_um),
                 "field_x": field_x,
                 "field_y": field_y,
@@ -1521,44 +1562,27 @@ class PerformanceMixin:
 
                 # Extract results
                 results = analysis.Results
-                image_b64 = None
-                array_shape = None
-                array_dtype = None
-                psf_peak = None
+                psf_fields: dict[str, Any] = {}
                 strehl_ratio = None
 
                 if results is not None:
-                    # Extract 2D PSF data grid
+                    # Extract 2D PSF data grid with spatial metadata
                     try:
                         num_grids = results.NumberOfDataGrids
                         if num_grids > 0:
                             grid = results.GetDataGrid(0)
                             if grid is not None:
-                                arr = self._extract_data_grid(grid)
-                                if arr is not None:
-                                    psf_peak = float(np.max(arr))
-                                    image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
-                                    array_shape = list(arr.shape)
-                                    array_dtype = str(arr.dtype)
-                                    logger.info(f"Huygens PSF data extracted: shape={arr.shape}, peak={psf_peak:.6f}")
+                                grid_meta = self._extract_grid_with_metadata(grid)
+                                if grid_meta is not None:
+                                    psf_fields = _grid_meta_to_psf_fields(grid_meta)
+                                    logger.info(f"Huygens PSF data extracted: shape={grid_meta.data.shape}, peak={psf_fields['psf_peak']:.6f}")
                     except Exception as e:
                         logger.warning(f"Huygens PSF: Could not extract data grid: {e}")
 
                     # Extract Strehl ratio from header text
                     try:
                         header_text = results.HeaderData.Lines if hasattr(results, 'HeaderData') else ""
-                        if hasattr(header_text, '__iter__'):
-                            for line in header_text:
-                                line_str = str(line).lower()
-                                if "strehl" in line_str:
-                                    parts = line_str.split(":")
-                                    if len(parts) > 1:
-                                        val_str = parts[-1].strip()
-                                        try:
-                                            strehl_ratio = float(val_str)
-                                        except ValueError:
-                                            pass
-                                    break
+                        strehl_ratio = _parse_strehl_from_header(header_text)
                     except Exception as e:
                         logger.debug(f"Huygens PSF: Could not extract Strehl ratio from header: {e}")
             finally:
@@ -1567,17 +1591,13 @@ class PerformanceMixin:
                 except Exception:
                     pass
 
-            if image_b64 is None:
+            if not psf_fields:
                 return {"success": False, "error": "Huygens PSF analysis did not produce data"}
 
             result = {
                 "success": True,
-                "image": image_b64,
-                "image_format": "numpy_array",
-                "array_shape": array_shape,
-                "array_dtype": array_dtype,
+                **psf_fields,
                 "strehl_ratio": strehl_ratio,
-                "psf_peak": psf_peak,
                 "wavelength_um": float(wavelength_um),
                 "field_x": field_x,
                 "field_y": field_y,
