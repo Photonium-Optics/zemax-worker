@@ -74,8 +74,10 @@ RAY_ERROR_CODES = {
     4: "VIGNETTE",
 }
 
-# F/# aperture types
-FNO_APERTURE_TYPES = ["ImageSpaceFNumber", "FloatByStopSize", "ParaxialWorkingFNumber"]
+# Aperture types where ApertureValue directly returns the F/#
+# Note: FloatByStopSize is NOT included — its ApertureValue is the stop
+# semi-diameter scaling factor (often 0), not the F/#.
+FNO_APERTURE_TYPES = ["ImageSpaceFNumber", "ParaxialWorkingFNumber"]
 
 # =============================================================================
 # Logging/output formatting

@@ -51,18 +51,9 @@ class GeometryMixin:
             Dict with success flag and paraxial properties.
         """
         try:
-            # Get EFL and BFL from SystemData analysis
-            try:
-                sys_data = self._zp.analyses.reports.SystemData().run(self.oss)
-                gld = sys_data.data.general_lens_data
-                efl = _extract_value(gld.effective_focal_length_air, None)
-                bfl = _extract_value(
-                    getattr(gld, "back_focal_length", None), None
-                )
-            except Exception as e:
-                logger.warning(f"get_paraxial: SystemData failed: {e}")
-                efl = self._get_efl()
-                bfl = None
+            # Get EFL and BFL
+            efl = self._get_efl()
+            bfl = None
 
             fno = self._get_fno()
             na = 1.0 / (2.0 * fno) if fno is not None and fno > 0 else None
@@ -213,6 +204,9 @@ class GeometryMixin:
 
             # Get paraxial data and surface geometry
             paraxial = self._get_paraxial_from_lde()
+            efl = self._get_efl()
+            if efl is not None:
+                paraxial["efl"] = efl
             surfaces_data = self._get_surface_geometry()
 
             rays_total = number_of_rays * max(1, num_fields)

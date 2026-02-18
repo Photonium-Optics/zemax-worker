@@ -642,10 +642,11 @@ class ZosPyHandlerBase:
 
     def _get_fno(self) -> Optional[float]:
         """
-        Get the f-number of the optical system.
+        Get the working f-number of the optical system.
 
-        Tries to get f/# directly from aperture settings if the aperture type
-        is F/#-based, otherwise calculates from EPD and EFL.
+        Uses the WFNO merit function operand (paraxial working F/#) as the
+        primary method — this is reliable regardless of aperture type.
+        Falls back to aperture settings or EFL/EPD if the operand fails.
 
         Returns:
             F-number, or None if it cannot be determined.
@@ -657,8 +658,21 @@ class ZosPyHandlerBase:
             # Afocal systems have no meaningful F/# (EFL is infinite)
             if hasattr(aperture, 'AFocalImageSpace') and aperture.AFocalImageSpace:
                 return None
+        except Exception:
+            pass
 
-            # Handle enum ApertureType - try .name first, then string split
+        # Primary: use WFNO operand (works for all aperture types)
+        try:
+            wfno_type = self._zp.constants.Editors.MFE.MeritOperandType.WFNO
+            fno = float(self.oss.MFE.GetOperandValue(wfno_type, 0, 0, 0, 0, 0, 0, 0, 0))
+            if not np.isnan(fno) and not np.isinf(fno) and fno > 0:
+                return fno
+        except Exception as e:
+            logger.debug(f"WFNO operand failed: {e}")
+
+        # Fallback: aperture settings
+        try:
+            aperture = self.oss.SystemData.Aperture
             aperture_type = ""
             if aperture.ApertureType:
                 if hasattr(aperture.ApertureType, 'name'):
@@ -667,17 +681,17 @@ class ZosPyHandlerBase:
                     aperture_type = str(aperture.ApertureType).split(".")[-1]
 
             if aperture_type in FNO_APERTURE_TYPES:
-                # Use _extract_value for UnitField objects
-                return _extract_value(aperture.ApertureValue)
+                val = _extract_value(aperture.ApertureValue)
+                if val > 0:
+                    return val
 
             # Calculate from EPD and EFL
-            # Use _extract_value for UnitField objects
             epd = _extract_value(aperture.ApertureValue)
             efl = self._get_efl()
             if epd and efl and epd > 0:
                 return efl / epd
 
         except Exception as e:
-            logger.debug(f"Could not get f-number: {e}")
+            logger.debug(f"Could not get f-number from aperture: {e}")
 
         return None
