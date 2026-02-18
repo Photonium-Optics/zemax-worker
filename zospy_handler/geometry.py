@@ -26,72 +26,39 @@ class GeometryMixin:
         """
         Get first-order (paraxial) optical properties.
 
-        Delegates to _get_paraxial_from_lde() and adds F/# if available.
+        Delegates to _get_paraxial_from_lde() for raw LDE data, then adds
+        EFL, F/#, NA, and image height.
 
         Returns:
-            Dict with paraxial properties (epd, max_field, total_track, fno, etc.)
+            Dict with paraxial properties (epd, max_field, total_track,
+            efl, fno, na, image_height, etc.)
         """
         paraxial = self._get_paraxial_from_lde()
 
-        # Add F/# if available
+        efl = self._get_efl()
+        if efl is not None:
+            paraxial["efl"] = efl
+
+        bfl = self._get_bfl()
+        if bfl is not None:
+            paraxial["bfl"] = bfl
+
         fno = self._get_fno()
         if fno is not None:
             paraxial["fno"] = fno
+            paraxial["na"] = 1.0 / (2.0 * fno) if fno > 0 else None
+
+        # Compute image height from EFL and max field angle
+        max_field = paraxial.get("max_field")
+        if (
+            efl is not None
+            and max_field is not None
+            and max_field > 0
+            and paraxial.get("field_type") == "object_angle"
+        ):
+            paraxial["image_height"] = abs(efl) * math.tan(math.radians(max_field))
 
         return paraxial
-
-    def get_paraxial(self) -> dict[str, Any]:
-        """
-        Get comprehensive first-order optical properties in a single call.
-
-        Combines EFL, BFL, F/#, NA, EPD, total track, and FOV info from
-        SystemData analysis and LDE.
-
-        Returns:
-            Dict with success flag and paraxial properties.
-        """
-        try:
-            # Get EFL and BFL
-            efl = self._get_efl()
-            bfl = None
-
-            fno = self._get_fno()
-            na = 1.0 / (2.0 * fno) if fno is not None and fno > 0 else None
-
-            # Get EPD, total track, field info from LDE
-            lde_data = self._get_paraxial_from_lde()
-            max_field = lde_data.get("max_field")
-            field_type = lde_data.get("field_type")
-
-            # Compute image height from EFL and max field angle
-            image_height = None
-            if (
-                efl is not None
-                and max_field is not None
-                and max_field > 0
-                and field_type == "object_angle"
-            ):
-                image_height = abs(efl) * math.tan(math.radians(max_field))
-
-            result = {
-                "success": True,
-                "efl": efl,
-                "bfl": bfl,
-                "fno": fno,
-                "na": na,
-                "epd": lde_data.get("epd"),
-                "total_track": lde_data.get("total_track"),
-                "max_field": max_field,
-                "field_type": field_type,
-                "field_unit": lde_data.get("field_unit"),
-                "image_height": image_height,
-            }
-            _log_raw_output("/paraxial", result)
-            return result
-
-        except Exception as e:
-            logger.error(f"get_paraxial failed: {e}")
-            return {"success": False, "error": str(e)}
 
     def get_cardinal_points(self) -> dict[str, Any]:
         """
@@ -203,10 +170,7 @@ class GeometryMixin:
             logger.info(f"Successfully exported CrossSection image, size = {len(image_b64)}")
 
             # Get paraxial data and surface geometry
-            paraxial = self._get_paraxial_from_lde()
-            efl = self._get_efl()
-            if efl is not None:
-                paraxial["efl"] = efl
+            paraxial = self.get_paraxial_data()
             surfaces_data = self._get_surface_geometry()
 
             rays_total = number_of_rays * max(1, num_fields)

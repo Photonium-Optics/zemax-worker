@@ -128,7 +128,7 @@ class PhysicalOpticsMixin:
                 return {"success": False, "error": "Geometric Image Analysis returned None"}
 
             # Get paraxial data
-            paraxial = self._get_paraxial_from_lde()
+            paraxial = self.get_paraxial_data()
 
             result_dict = {
                 "success": True,

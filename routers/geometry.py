@@ -17,7 +17,7 @@ async def get_paraxial(request: SystemRequest, _: None = Depends(main.verify_api
     """Get comprehensive first-order (paraxial) optical properties."""
     return await main._run_endpoint(
         "/paraxial", ParaxialResponse, request,
-        lambda: main.zospy_handler.get_paraxial(),
+        lambda: main.zospy_handler.get_paraxial_data(),
     )
 
 

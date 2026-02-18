@@ -723,11 +723,11 @@ class PerformanceMixin:
             # Get F/# for diffraction limit calculation
             fno = self._get_fno()
             if fno is None or fno <= 0:
-                fno = 5.0  # Fallback
+                logger.warning(f"MTF: Could not determine F/# (got {fno}), diffraction limit and cutoff will be omitted")
 
             # Calculate cutoff frequency: fc = 1 / (wavelength_mm * fno)
             wavelength_mm = wavelength_um / 1000.0
-            cutoff_frequency = 1.0 / (wavelength_mm * fno)
+            cutoff_frequency = (1.0 / (wavelength_mm * fno)) if fno and fno > 0 else None
 
             all_fields_data = []
             frequency = None
@@ -858,25 +858,29 @@ class PerformanceMixin:
 
             # Generate frequency array if not obtained from analysis
             if frequency is None or len(frequency) == 0:
-                max_freq = maximum_frequency if maximum_frequency > 0 else cutoff_frequency
-                frequency = list(np.linspace(0, max_freq, 64))
+                max_freq = maximum_frequency if maximum_frequency > 0 else (cutoff_frequency or 100.0)
+                # Match grid size from sampling (e.g. "128x128" → 128 points)
+                grid_size = int(sampling.split('x')[0]) if 'x' in sampling else 64
+                frequency = list(np.linspace(0, max_freq, grid_size))
 
-            # Compute diffraction limit: MTF_dl(f) = (2/pi)[arccos(f/fc) - (f/fc)*sqrt(1-(f/fc)^2)]
+            # Compute diffraction limit if cutoff frequency is available
             freq_arr = np.array(frequency)
-            fn = np.clip(freq_arr / cutoff_frequency, 0.0, 1.0)
-            dl = np.where(
-                fn >= 1.0,
-                0.0,
-                (2.0 / np.pi) * (np.arccos(fn) - fn * np.sqrt(1.0 - fn * fn)),
-            )
-            diffraction_limit = dl.tolist()
+            diffraction_limit: list[float] = []
+            if cutoff_frequency and cutoff_frequency > 0:
+                fn = np.clip(freq_arr / cutoff_frequency, 0.0, 1.0)
+                dl = np.where(
+                    fn >= 1.0,
+                    0.0,
+                    (2.0 / np.pi) * (np.arccos(fn) - fn * np.sqrt(1.0 - fn * fn)),
+                )
+                diffraction_limit = dl.tolist()
 
             result = {
                 "success": True,
                 "frequency": freq_arr.tolist(),
                 "fields": all_fields_data,
                 "diffraction_limit": diffraction_limit,
-                "cutoff_frequency": float(cutoff_frequency),
+                "cutoff_frequency": float(cutoff_frequency) if cutoff_frequency else None,
                 "wavelength_um": float(wavelength_um),
             }
             _log_raw_output("/mtf", result)
@@ -940,11 +944,11 @@ class PerformanceMixin:
             # Get F/# for diffraction limit calculation
             fno = self._get_fno()
             if fno is None or fno <= 0:
-                fno = 5.0  # Fallback
+                logger.warning(f"Huygens MTF: Could not determine F/# (got {fno}), diffraction limit and cutoff will be omitted")
 
             # Calculate cutoff frequency: fc = 1 / (wavelength_mm * fno)
             wavelength_mm = wavelength_um / 1000.0
-            cutoff_frequency = 1.0 / (wavelength_mm * fno)
+            cutoff_frequency = (1.0 / (wavelength_mm * fno)) if fno and fno > 0 else None
 
             all_fields_data = []
             frequency = None
@@ -1077,25 +1081,28 @@ class PerformanceMixin:
 
             # Generate frequency array if not obtained from analysis
             if frequency is None or len(frequency) == 0:
-                max_freq = maximum_frequency if maximum_frequency > 0 else cutoff_frequency
-                frequency = list(np.linspace(0, max_freq, 64))
+                max_freq = maximum_frequency if maximum_frequency > 0 else (cutoff_frequency or 100.0)
+                grid_size = int(sampling.split('x')[0]) if 'x' in sampling else 64
+                frequency = list(np.linspace(0, max_freq, grid_size))
 
-            # Compute diffraction limit
+            # Compute diffraction limit if cutoff frequency is available
             freq_arr = np.array(frequency)
-            fn = np.clip(freq_arr / cutoff_frequency, 0.0, 1.0)
-            dl = np.where(
-                fn >= 1.0,
-                0.0,
-                (2.0 / np.pi) * (np.arccos(fn) - fn * np.sqrt(1.0 - fn * fn)),
-            )
-            diffraction_limit = dl.tolist()
+            diffraction_limit: list[float] = []
+            if cutoff_frequency and cutoff_frequency > 0:
+                fn = np.clip(freq_arr / cutoff_frequency, 0.0, 1.0)
+                dl = np.where(
+                    fn >= 1.0,
+                    0.0,
+                    (2.0 / np.pi) * (np.arccos(fn) - fn * np.sqrt(1.0 - fn * fn)),
+                )
+                diffraction_limit = dl.tolist()
 
             result = {
                 "success": True,
                 "frequency": freq_arr.tolist(),
                 "fields": all_fields_data,
                 "diffraction_limit": diffraction_limit,
-                "cutoff_frequency": float(cutoff_frequency),
+                "cutoff_frequency": float(cutoff_frequency) if cutoff_frequency else None,
                 "wavelength_um": float(wavelength_um),
             }
             _log_raw_output("/huygens-mtf", result)

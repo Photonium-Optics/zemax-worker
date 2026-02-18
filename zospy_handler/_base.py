@@ -462,6 +462,24 @@ class ZosPyHandlerBase:
             logger.warning(f"_get_efl failed: {e}")
             return None
 
+    def _get_bfl(self) -> Optional[float]:
+        """
+        Get back focal length (distance from last surface to image plane).
+
+        Returns:
+            Back focal length in lens units, or None if calculation fails.
+        """
+        try:
+            last_surf_idx = self.oss.LDE.NumberOfSurfaces - 1  # Image surface index
+            if last_surf_idx < 2:
+                return None
+            # BFL = thickness of the surface before the image plane
+            bfl = _extract_value(self.oss.LDE.GetSurfaceAt(last_surf_idx - 1).Thickness, None)
+            return bfl
+        except Exception as e:
+            logger.warning(f"_get_bfl failed: {e}")
+            return None
+
     def _check_analysis_errors(self, analysis: Any) -> Optional[str]:
         """
         Check if an OpticStudio analysis has error messages.
