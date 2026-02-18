@@ -4164,6 +4164,94 @@ class ZosPyHandler:
 
         return variable_states
 
+    # ── QuickFocus (native) ──────────────────────────────────────────
+
+    def run_quick_focus(
+        self,
+        criterion: str = "SpotSizeRadial",
+        use_centroid: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Run OpticStudio's native QuickFocus tool.
+
+        Adjusts the last surface thickness (back focal distance) to minimise
+        the chosen focus criterion in a single internal call.
+
+        Args:
+            criterion: "SpotSizeRadial" or "RMSSpotSizeRadial"
+            use_centroid: Whether to use centroid reference (True) or chief ray
+
+        Returns:
+            Dict with success, thickness_before, thickness_after, delta_thickness,
+            and surface_index (1-based LDE index of the surface that was adjusted).
+        """
+        zp = self._zp
+        lde = self.oss.LDE
+
+        num_surfaces = lde.NumberOfSurfaces
+        focus_surf_idx = num_surfaces - 2
+        if focus_surf_idx < 1:
+            return {"success": False, "error": "System too short for QuickFocus"}
+
+        surf_before = lde.GetSurfaceAt(focus_surf_idx)
+        thickness_before = _extract_value(surf_before.Thickness, 0.0, allow_inf=True)
+
+        # Resolve the criterion enum (varies by OpticStudio version)
+        criterion_enum = None
+        for enum_path in (
+            "Tools.General.QuickFocusCriterion",
+            "Tools.General.QuickAdjustCriterion",
+        ):
+            try:
+                parts = enum_path.split(".")
+                obj = zp.constants
+                for part in parts:
+                    obj = getattr(obj, part)
+                criterion_enum = obj
+                break
+            except AttributeError:
+                continue
+
+        if criterion_enum is None:
+            return {"success": False, "error": "QuickFocus criterion enum not found in this OpticStudio version"}
+
+        criterion_map = {
+            "SpotSizeRadial": "SpotSizeRadial",
+            "RMSSpotSizeRadial": "RMSSpotSizeRadial",
+            "SpotSizeX": "SpotSizeX",
+            "SpotSizeY": "SpotSizeY",
+        }
+        criterion_attr = criterion_map.get(criterion, "SpotSizeRadial")
+        resolved_criterion = getattr(criterion_enum, criterion_attr, None)
+        if resolved_criterion is None:
+            resolved_criterion = getattr(criterion_enum, "SpotSizeRadial", None)
+            if resolved_criterion is None:
+                return {"success": False, "error": f"Criterion '{criterion}' not available"}
+
+        try:
+            qf = self.oss.Tools.OpenQuickFocus()
+            qf.Criterion = resolved_criterion
+            if hasattr(qf, 'UseCentroid'):
+                qf.UseCentroid = use_centroid
+            qf.RunAndWaitForCompletion()
+            qf.Close()
+        except Exception as e:
+            return {"success": False, "error": f"QuickFocus failed: {e}"}
+
+        surf_after = lde.GetSurfaceAt(focus_surf_idx)
+        thickness_after = _extract_value(surf_after.Thickness, 0.0, allow_inf=True)
+
+        result = {
+            "success": True,
+            "surface_index": focus_surf_idx,
+            "thickness_before": thickness_before,
+            "thickness_after": thickness_after,
+            "delta_thickness": thickness_after - thickness_before,
+            "criterion": criterion,
+        }
+        _log_raw_output("/quick-focus", result)
+        return result
+
     def _run_zernike_vs_field_fallback(
         self,
         maximum_term: int,

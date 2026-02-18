@@ -1629,6 +1629,43 @@ async def run_optimization(
     )
 
 
+# =============================================================================
+# QuickFocus
+# =============================================================================
+
+
+class QuickFocusRequest(SystemRequest):
+    """Request for native QuickFocus tool."""
+    criterion: str = Field(default="SpotSizeRadial", description="Focus criterion: SpotSizeRadial, RMSSpotSizeRadial, SpotSizeX, SpotSizeY")
+    use_centroid: bool = Field(default=True, description="Use centroid reference (True) or chief ray (False)")
+
+
+class QuickFocusResponse(BaseModel):
+    """Response from QuickFocus tool."""
+    success: bool = Field(description="Whether QuickFocus succeeded")
+    surface_index: Optional[int] = Field(default=None, description="1-based LDE index of adjusted surface")
+    thickness_before: Optional[float] = Field(default=None, description="Back focal distance before adjustment")
+    thickness_after: Optional[float] = Field(default=None, description="Back focal distance after adjustment")
+    delta_thickness: Optional[float] = Field(default=None, description="Change in thickness")
+    criterion: Optional[str] = Field(default=None, description="Criterion used")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
+@app.post("/quick-focus", response_model=QuickFocusResponse)
+async def quick_focus(
+    request: QuickFocusRequest,
+    _: None = Depends(verify_api_key),
+) -> QuickFocusResponse:
+    """Run OpticStudio's native QuickFocus tool to find best focus position."""
+    return await _run_endpoint(
+        "/quick-focus", QuickFocusResponse, request,
+        lambda: zospy_handler.run_quick_focus(
+            criterion=request.criterion,
+            use_centroid=request.use_centroid,
+        ),
+    )
+
+
 class OperandParameterInfo(BaseModel):
     """Metadata for a single operand parameter column."""
     column: str = Field(description="Column name: Comment, Param1-Param8")
