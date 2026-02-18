@@ -27,6 +27,14 @@ Examples:
 The Mac-side zemax-analysis-service auto-detects the worker count from /health.
 """
 
+import sys
+# When run as `python main.py`, this module's __name__ is "__main__", not "main".
+# Router modules do `import main` to access globals at request time.  Without this
+# alias, Python would re-import main.py as a *separate* "main" module, triggering
+# a circular import crash.  This one-liner ensures both names resolve to the same
+# module object.
+sys.modules.setdefault("main", sys.modules[__name__])
+
 import asyncio
 import base64
 import logging
