@@ -479,11 +479,6 @@ class PerformanceMixin:
 
                     if entry_failed > 0 or entry_vignetted > 0:
                         logger.debug(f"[SPOT] Field {fi} wl {wi}: {len(field_rays['rays'])} OK, {entry_vignetted} vignetted, {entry_failed} failed")
-                    # Log mean ray position to compare with centroid units
-                    if field_rays["rays"]:
-                        mean_x = sum(r["x"] for r in field_rays["rays"]) / len(field_rays["rays"])
-                        mean_y = sum(r["y"] for r in field_rays["rays"]) / len(field_rays["rays"])
-                        logger.info(f"[SPOT] Field {fi} wl {wi}: mean_ray_pos=({mean_x:.4f}, {mean_y:.4f}) [after *1000, should be µm]")
                     spot_rays.append(field_rays)
 
             logger.info(f"[SPOT] Ray trace: {total_success} success, {total_vignetted} vignetted, {total_failed} failed out of {rays_added}")
@@ -660,17 +655,17 @@ class PerformanceMixin:
             if hasattr(spot_data, 'GetGeoSpotSizeFor'):
                 field_data["geo_radius"] = _extract_value(spot_data.GetGeoSpotSizeFor(fi_1, wi))
 
-            # Centroid coordinates from SpotData
+            # Centroid coordinates from SpotData are in lens units (mm);
+            # convert to µm to match batch ray trace positions (* 1000 at line ~471).
             if hasattr(spot_data, 'GetReferenceCoordinate_X_For'):
-                field_data["centroid_x"] = _extract_value(spot_data.GetReferenceCoordinate_X_For(fi_1, wi))
+                field_data["centroid_x"] = _extract_value(spot_data.GetReferenceCoordinate_X_For(fi_1, wi)) * 1000
             if hasattr(spot_data, 'GetReferenceCoordinate_Y_For'):
-                field_data["centroid_y"] = _extract_value(spot_data.GetReferenceCoordinate_Y_For(fi_1, wi))
+                field_data["centroid_y"] = _extract_value(spot_data.GetReferenceCoordinate_Y_For(fi_1, wi)) * 1000
 
             logger.info(
-                f"[SPOT] field[{field_index}]: rms={field_data.get('rms_radius')}, "
-                f"geo={field_data.get('geo_radius')}, "
-                f"centroid=({field_data.get('centroid_x')}, {field_data.get('centroid_y')}) "
-                f"[units TBD - compare with ray mean to determine mm vs µm]"
+                f"[SPOT] field[{field_index}]: rms={field_data.get('rms_radius')} µm, "
+                f"geo={field_data.get('geo_radius')} µm, "
+                f"centroid=({field_data.get('centroid_x')}, {field_data.get('centroid_y')}) µm"
             )
 
         except Exception as e:

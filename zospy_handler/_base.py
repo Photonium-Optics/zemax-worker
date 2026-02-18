@@ -447,21 +447,19 @@ class ZosPyHandlerBase:
 
     def _get_efl(self) -> Optional[float]:
         """
-        Get effective focal length using ZosPy's SystemData analysis.
+        Get effective focal length via ZOS-API GetOperandValue (read-only, no MFE modification).
 
         Returns:
             Effective focal length in mm, or None if calculation fails.
         """
         try:
-            # Use the SystemData analysis to get first-order properties
-            result = self._zp.analyses.reports.SystemData().run(self.oss)
-            # Use _extract_value for potential UnitField object
-            efl = _extract_value(result.data.general_lens_data.effective_focal_length_air, None)
-            if efl is None:
-                logger.warning("_get_efl: effective_focal_length_air extracted as None")
+            effl_type = self._zp.constants.Editors.MFE.MeritOperandType.EFFL
+            efl = float(self.oss.MFE.GetOperandValue(effl_type, 0, 0, 0, 0, 0, 0, 0, 0))
+            if np.isnan(efl) or np.isinf(efl):
+                return None
             return efl
         except Exception as e:
-            logger.warning(f"_get_efl: SystemData analysis failed: {e}")
+            logger.warning(f"_get_efl failed: {e}")
             return None
 
     def _check_analysis_errors(self, analysis: Any) -> Optional[str]:
