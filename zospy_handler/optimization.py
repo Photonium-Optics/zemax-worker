@@ -987,6 +987,8 @@ class OptimizationMixin:
 
         try:
             qf = self.oss.Tools.OpenQuickFocus()
+            if qf is None:
+                return {"success": False, "error": "Could not open QuickFocus tool (another tool may be active)"}
             qf.Criterion = resolved_criterion
             if hasattr(qf, 'UseCentroid'):
                 qf.UseCentroid = use_centroid
@@ -1066,6 +1068,8 @@ class OptimizationMixin:
         # ScaleToUnit takes ZOSAPI.Tools.General.ScaleToUnits enum.
         try:
             scale_tool = self.oss.Tools.OpenScale()
+            if scale_tool is None:
+                return {"success": False, "error": "Could not open Scale Lens tool (another tool may be active)"}
 
             if mode == "factor":
                 scale_tool.ScaleByFactor = True
