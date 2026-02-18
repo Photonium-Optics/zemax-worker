@@ -23,14 +23,24 @@ _STREHL_RE = re.compile(
 def _parse_strehl_from_header(header_lines) -> Optional[float]:
     """Parse Strehl ratio from analysis header lines using regex.
 
+    Accepts a list of line strings, a single multi-line string, or a .NET
+    IList<string>.  Returns None if no Strehl value is found.
+
     Handles formats like:
       "Strehl Ratio : 0.8532"
       "Strehl Ratio : 0.8532 (0.550 um)"
       "Strehl = 8.532e-01"
     """
-    if not hasattr(header_lines, '__iter__'):
+    if not header_lines:
         return None
-    for line in header_lines:
+    # Handle a single multi-line string (some ZOS-API versions)
+    if isinstance(header_lines, str):
+        lines_iter = header_lines.splitlines()
+    elif hasattr(header_lines, '__iter__'):
+        lines_iter = header_lines
+    else:
+        return None
+    for line in lines_iter:
         m = _STREHL_RE.search(str(line))
         if m:
             try:
@@ -52,7 +62,7 @@ def _grid_meta_to_psf_fields(grid_meta: GridWithMetadata) -> dict[str, Any]:
         "image_format": "numpy_array",
         "array_shape": list(arr.shape),
         "array_dtype": str(arr.dtype),
-        "psf_peak": float(np.max(arr)),
+        "psf_peak": float(np.max(arr)) if arr.size > 0 else None,
         "delta_x": grid_meta.dx,
         "delta_y": grid_meta.dy,
         "extent_x": grid_meta.extent_x,
@@ -469,6 +479,11 @@ class PerformanceMixin:
 
                     if entry_failed > 0 or entry_vignetted > 0:
                         logger.debug(f"[SPOT] Field {fi} wl {wi}: {len(field_rays['rays'])} OK, {entry_vignetted} vignetted, {entry_failed} failed")
+                    # Log mean ray position to compare with centroid units
+                    if field_rays["rays"]:
+                        mean_x = sum(r["x"] for r in field_rays["rays"]) / len(field_rays["rays"])
+                        mean_y = sum(r["y"] for r in field_rays["rays"]) / len(field_rays["rays"])
+                        logger.info(f"[SPOT] Field {fi} wl {wi}: mean_ray_pos=({mean_x:.4f}, {mean_y:.4f}) [after *1000, should be µm]")
                     spot_rays.append(field_rays)
 
             logger.info(f"[SPOT] Ray trace: {total_success} success, {total_vignetted} vignetted, {total_failed} failed out of {rays_added}")
@@ -645,16 +660,17 @@ class PerformanceMixin:
             if hasattr(spot_data, 'GetGeoSpotSizeFor'):
                 field_data["geo_radius"] = _extract_value(spot_data.GetGeoSpotSizeFor(fi_1, wi))
 
-            # Centroid coordinates from SpotData are also in µm
+            # Centroid coordinates from SpotData
             if hasattr(spot_data, 'GetReferenceCoordinate_X_For'):
                 field_data["centroid_x"] = _extract_value(spot_data.GetReferenceCoordinate_X_For(fi_1, wi))
             if hasattr(spot_data, 'GetReferenceCoordinate_Y_For'):
                 field_data["centroid_y"] = _extract_value(spot_data.GetReferenceCoordinate_Y_For(fi_1, wi))
 
             logger.info(
-                f"[SPOT] field[{field_index}]: rms={field_data.get('rms_radius')} µm, "
-                f"geo={field_data.get('geo_radius')} µm, "
-                f"centroid=({field_data.get('centroid_x')}, {field_data.get('centroid_y')}) µm"
+                f"[SPOT] field[{field_index}]: rms={field_data.get('rms_radius')}, "
+                f"geo={field_data.get('geo_radius')}, "
+                f"centroid=({field_data.get('centroid_x')}, {field_data.get('centroid_y')}) "
+                f"[units TBD - compare with ray mean to determine mm vs µm]"
             )
 
         except Exception as e:
@@ -1400,11 +1416,12 @@ class PerformanceMixin:
                 # Extract 2D PSF data with spatial metadata
                 results = analysis.Results
                 psf_fields: dict[str, Any] = {}
+                fft_header_lines = []
 
                 if results is not None:
                     try:
-                        num_rows = results.NumberOfDataGrids
-                        if num_rows > 0:
+                        num_grids = results.NumberOfDataGrids
+                        if num_grids > 0:
                             grid = results.GetDataGrid(0)
                             if grid is not None:
                                 grid_meta = self._extract_grid_with_metadata(grid)
@@ -1413,6 +1430,14 @@ class PerformanceMixin:
                                     logger.info(f"PSF data extracted: shape={grid_meta.data.shape}, peak={psf_fields['psf_peak']:.6f}")
                     except Exception as e:
                         logger.warning(f"PSF: Could not extract data grid: {e}")
+
+                    # Grab header text BEFORE closing the analysis (COM object
+                    # becomes invalid after Close).
+                    try:
+                        if hasattr(results, 'HeaderData'):
+                            fft_header_lines = results.HeaderData.Lines
+                    except Exception:
+                        pass
             finally:
                 try:
                     analysis.Close()
@@ -1422,15 +1447,9 @@ class PerformanceMixin:
             if not psf_fields:
                 return {"success": False, "error": "FFT PSF analysis did not produce data"}
 
-            # Try to get Strehl ratio -- check FFT header first (cheap),
+            # Try to get Strehl ratio — check FFT header first (cheap),
             # then fall back to a minimal 32x32 Huygens run.
-            strehl_ratio = None
-            if results is not None:
-                try:
-                    fft_header = results.HeaderData.Lines if hasattr(results, 'HeaderData') else ""
-                    strehl_ratio = _parse_strehl_from_header(fft_header)
-                except Exception:
-                    pass
+            strehl_ratio = _parse_strehl_from_header(fft_header_lines)
 
             if strehl_ratio is None:
                 huygens = None

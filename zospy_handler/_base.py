@@ -15,7 +15,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
@@ -456,8 +456,12 @@ class ZosPyHandlerBase:
             # Use the SystemData analysis to get first-order properties
             result = self._zp.analyses.reports.SystemData().run(self.oss)
             # Use _extract_value for potential UnitField object
-            return _extract_value(result.data.general_lens_data.effective_focal_length_air, None)
-        except Exception:
+            efl = _extract_value(result.data.general_lens_data.effective_focal_length_air, None)
+            if efl is None:
+                logger.warning("_get_efl: effective_focal_length_air extracted as None")
+            return efl
+        except Exception as e:
+            logger.warning(f"_get_efl: SystemData analysis failed: {e}")
             return None
 
     def _check_analysis_errors(self, analysis: Any) -> Optional[str]:

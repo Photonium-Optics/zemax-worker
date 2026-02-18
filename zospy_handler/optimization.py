@@ -1011,9 +1011,10 @@ class OptimizationMixin:
 
     # ── Scale Lens (native) ─────────────────────────────────────────
 
-    # Unit name → ZOSAPI.SystemData.ZemaxUnitType index
+    # Unit name → ZOSAPI index mappings
     _UNIT_INDEX = {"mm": 0, "cm": 1, "inches": 2, "meters": 3}
     _UNIT_NAMES = {0: "mm", 1: "cm", 2: "inches", 3: "meters"}
+    _ENUM_NAME_TO_INDEX = {"Millimeters": 0, "Centimeters": 1, "Inches": 2, "Meters": 3}
 
     def run_scale_lens(
         self,
@@ -1051,8 +1052,12 @@ class OptimizationMixin:
         original_unit = None
         try:
             unit_type = self.oss.SystemData.Units.LensUnits
-            unit_index = int(unit_type) if isinstance(unit_type, int) else int(str(unit_type).split(".")[-1].replace("Millimeters", "0").replace("Centimeters", "1").replace("Inches", "2").replace("Meters", "3"))
-            original_unit = self._UNIT_NAMES.get(unit_index)
+            if isinstance(unit_type, int):
+                unit_index = unit_type
+            else:
+                enum_name = str(unit_type).split(".")[-1]
+                unit_index = self._ENUM_NAME_TO_INDEX.get(enum_name)
+            original_unit = self._UNIT_NAMES.get(unit_index) if unit_index is not None else None
         except Exception as e:
             logger.warning(f"Could not read original unit: {e}")
 
