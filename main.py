@@ -513,7 +513,7 @@ class WavefrontResponse(BaseModel):
 class SpotDiagramRequest(BaseModel):
     """Spot diagram analysis request."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
-    ray_density: int = Field(default=5, ge=1, le=20, description="Rays per axis (grid density)")
+    ray_density: int = Field(default=20, ge=5, le=40, description="Ray density for pupil sampling")
     reference: str = Field(default="centroid", description="Reference point: 'chief_ray' or 'centroid'")
     field_index: Optional[int] = Field(default=None, ge=1, description="Field index (1-indexed). None = all fields.")
     wavelength_index: Optional[int] = Field(default=None, ge=1, description="Wavelength index (1-indexed). None = all wavelengths.")
@@ -1227,7 +1227,7 @@ async def get_zernike_vs_field(
 class RmsVsFieldRequest(BaseModel):
     """RMS vs Field analysis request."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
-    ray_density: int = Field(default=5, ge=1, le=20, description="Ray density (1-20)")
+    ray_density: int = Field(default=20, ge=5, le=40, description="Ray density (5-40)")
     num_field_points: int = Field(default=20, ge=3, le=256, description="Number of field points (snapped to nearest FieldDensity enum)")
     reference: str = Field(default="centroid", description="Reference point: 'centroid' or 'chief_ray'")
     wavelength_index: int = Field(default=1, ge=1, description="Wavelength index (1-indexed)")
