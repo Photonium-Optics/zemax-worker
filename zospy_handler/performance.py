@@ -157,7 +157,7 @@ class PerformanceMixin:
             airy_radius: Optional[float] = None
             if analysis.Results is not None:
                 airy_radius = self._extract_airy_radius(analysis.Results)
-                spot_data = self._extract_spot_data_from_results(analysis.Results, fields, num_fields, field_index=field_index)
+                spot_data = self._extract_spot_data_from_results(analysis.Results, fields, num_fields, field_index=field_index, wavelength_index=wavelength_index)
                 logger.info(f"[SPOT] StandardSpot results: airy_radius={airy_radius}, fields={len(spot_data)}")
             else:
                 logger.warning("[SPOT] StandardSpot analysis.Results is None")
@@ -381,6 +381,7 @@ class PerformanceMixin:
             norm_unpol.StartReadingResults()
 
             total_success = 0
+            total_vignetted = 0
             total_failed = 0
             for fi in field_indices:
                 field_x, field_y = field_coords[fi]
@@ -397,22 +398,26 @@ class PerformanceMixin:
                     }
 
                     entry_failed = 0
+                    entry_vignetted = 0
                     for _ in pupil_coords:
                         result = norm_unpol.ReadNextResult()
-                        # ReadNextResult returns 15 values; we only need success(0), err_code(2), x(4), y(5)
-                        success, err_code = result[0], result[2]
-                        if success and err_code == 0:
+                        # ReadNextResult returns 15 values; we need success(0), err_code(2), vignette_code(3), x(4), y(5)
+                        success, err_code, vignette_code = result[0], result[2], result[3]
+                        if success and err_code == 0 and vignette_code == 0:
                             field_rays["rays"].append({"x": float(result[4]) * 1000, "y": float(result[5]) * 1000})
                             total_success += 1
+                        elif success and err_code == 0:
+                            total_vignetted += 1
+                            entry_vignetted += 1
                         else:
                             total_failed += 1
                             entry_failed += 1
 
-                    if entry_failed > 0:
-                        logger.debug(f"[SPOT] Field {fi} wl {wi}: {len(field_rays['rays'])} OK, {entry_failed} failed")
+                    if entry_failed > 0 or entry_vignetted > 0:
+                        logger.debug(f"[SPOT] Field {fi} wl {wi}: {len(field_rays['rays'])} OK, {entry_vignetted} vignetted, {entry_failed} failed")
                     spot_rays.append(field_rays)
 
-            logger.info(f"[SPOT] Ray trace: {total_success} success, {total_failed} failed out of {rays_added} total")
+            logger.info(f"[SPOT] Ray trace: {total_success} success, {total_vignetted} vignetted, {total_failed} failed out of {rays_added}")
 
         except Exception as e:
             logger.error(f"[SPOT] Batch ray trace FAILED: {type(e).__name__}: {e}", exc_info=True)
@@ -475,6 +480,7 @@ class PerformanceMixin:
         fields: Any,
         num_fields: int,
         field_index: Optional[int] = None,
+        wavelength_index: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """
         Extract per-field spot data from analysis results.
@@ -486,6 +492,8 @@ class PerformanceMixin:
             field_index: If set (1-indexed), only extract data for this field.
                          When a single field is analyzed, ZOSAPI returns 0 for
                          non-analyzed fields, so we must limit iteration.
+            wavelength_index: If set (1-indexed), query metrics for this wavelength.
+                              None = primary wavelength (1).
 
         Returns:
             List of spot data dicts per field
@@ -505,7 +513,7 @@ class PerformanceMixin:
                 field_data = self._create_field_spot_data(fi, _extract_value(field.X), _extract_value(field.Y))
 
                 # Try to get spot data for this field
-                self._populate_spot_data_from_results(results, fi, field_data)
+                self._populate_spot_data_from_results(results, fi, field_data, wavelength_index=wavelength_index)
                 spot_data.append(field_data)
 
         except Exception as e:
@@ -546,6 +554,7 @@ class PerformanceMixin:
         results: Any,
         field_index: int,
         field_data: dict[str, Any],
+        wavelength_index: Optional[int] = None,
     ) -> None:
         """
         Populate spot data dict from analysis results.
@@ -558,6 +567,7 @@ class PerformanceMixin:
             results: OpticStudio analysis results object
             field_index: 0-indexed field number
             field_data: Dict to populate with spot metrics
+            wavelength_index: 1-indexed wavelength number. None = primary wavelength (1).
         """
         try:
             if not hasattr(results, 'SpotData'):
@@ -571,21 +581,21 @@ class PerformanceMixin:
                 logger.debug(f"[SPOT] SpotData type={type(spot_data).__name__}, attrs={spot_attrs}")
 
             # ZOSAPI SpotData methods are 1-indexed for both field and wavelength.
-            # Query primary wavelength (index 1).
             fi_1 = field_index + 1
-            wi = 1
+            wi = wavelength_index if wavelength_index else 1
 
-            # RMS/GEO spot sizes are in lens units (mm) from ZOSAPI, convert to µm
+            # StandardSpot SpotData methods return values in µm (not lens units).
+            # The ZOSAPI example (PythonStandalone_22) prints these raw with no conversion.
             if hasattr(spot_data, 'GetRMSSpotSizeFor'):
-                field_data["rms_radius"] = _extract_value(spot_data.GetRMSSpotSizeFor(fi_1, wi)) * 1000
+                field_data["rms_radius"] = _extract_value(spot_data.GetRMSSpotSizeFor(fi_1, wi))
             if hasattr(spot_data, 'GetGeoSpotSizeFor'):
-                field_data["geo_radius"] = _extract_value(spot_data.GetGeoSpotSizeFor(fi_1, wi)) * 1000
+                field_data["geo_radius"] = _extract_value(spot_data.GetGeoSpotSizeFor(fi_1, wi))
 
-            # Centroid coordinates are in mm from ZOSAPI, convert to µm
+            # Centroid coordinates from SpotData are also in µm
             if hasattr(spot_data, 'GetReferenceCoordinate_X_For'):
-                field_data["centroid_x"] = _extract_value(spot_data.GetReferenceCoordinate_X_For(fi_1, wi)) * 1000
+                field_data["centroid_x"] = _extract_value(spot_data.GetReferenceCoordinate_X_For(fi_1, wi))
             if hasattr(spot_data, 'GetReferenceCoordinate_Y_For'):
-                field_data["centroid_y"] = _extract_value(spot_data.GetReferenceCoordinate_Y_For(fi_1, wi)) * 1000
+                field_data["centroid_y"] = _extract_value(spot_data.GetReferenceCoordinate_Y_For(fi_1, wi))
 
             logger.info(
                 f"[SPOT] field[{field_index}]: rms={field_data.get('rms_radius')} µm, "

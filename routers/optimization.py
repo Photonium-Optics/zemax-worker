@@ -1,4 +1,4 @@
-"""Optimization router – run optimization, quick focus."""
+"""Optimization router – run optimization, quick focus, scale lens."""
 
 from fastapi import APIRouter, Depends
 
@@ -6,6 +6,7 @@ import main
 from models import (
     RunOptimizationRequest, VariableState, RunOptimizationResponse,
     QuickFocusRequest, QuickFocusResponse,
+    ScaleLensRequest, ScaleLensResponse,
 )
 
 router = APIRouter()
@@ -77,5 +78,21 @@ async def quick_focus(
         lambda: main.zospy_handler.run_quick_focus(
             criterion=request.criterion,
             use_centroid=request.use_centroid,
+        ),
+    )
+
+
+@router.post("/scale-lens", response_model=ScaleLensResponse)
+async def scale_lens(
+    request: ScaleLensRequest,
+    _: None = Depends(main.verify_api_key),
+) -> ScaleLensResponse:
+    """Run OpticStudio's native Scale Lens tool to uniformly scale all dimensions."""
+    return await main._run_endpoint(
+        "/scale-lens", ScaleLensResponse, request,
+        lambda: main.zospy_handler.run_scale_lens(
+            mode=request.mode,
+            scale_factor=request.scale_factor,
+            target_unit=request.target_unit,
         ),
     )

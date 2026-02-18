@@ -1008,3 +1008,109 @@ class OptimizationMixin:
         }
         _log_raw_output("/quick-focus", result)
         return result
+
+    # ── Scale Lens (native) ─────────────────────────────────────────
+
+    # Unit name → ZOSAPI.SystemData.ZemaxUnitType index
+    _UNIT_INDEX = {"mm": 0, "cm": 1, "inches": 2, "meters": 3}
+    _UNIT_NAMES = {0: "mm", 1: "cm", 2: "inches", 3: "meters"}
+
+    def run_scale_lens(
+        self,
+        mode: str = "factor",
+        scale_factor: float | None = None,
+        target_unit: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Run OpticStudio's native Scale Lens tool.
+
+        Uniformly scales all dimensions by a factor, or converts between unit systems.
+
+        Args:
+            mode: "factor" to scale by numeric factor, "units" to convert unit systems
+            scale_factor: Numeric scale factor (required for mode="factor")
+            target_unit: Target unit system (required for mode="units")
+
+        Returns:
+            Dict with success, mode, scale_factor, efl_before/after, total_track_before/after
+        """
+        # Validate args
+        if mode == "factor" and scale_factor is None:
+            return {"success": False, "error": "scale_factor is required for mode='factor'"}
+        if mode == "units" and target_unit is None:
+            return {"success": False, "error": "target_unit is required for mode='units'"}
+        if mode == "units" and target_unit not in self._UNIT_INDEX:
+            return {"success": False, "error": f"Invalid target_unit: {target_unit}. Must be one of: mm, cm, inches, meters"}
+
+        # Read pre-scale paraxial data
+        efl_before = self._get_efl()
+        paraxial_before = self._get_paraxial_from_lde()
+        total_track_before = paraxial_before.get("total_track")
+
+        # Read original unit for reporting
+        original_unit = None
+        try:
+            unit_type = self.oss.SystemData.Units.LensUnits
+            unit_index = int(unit_type) if isinstance(unit_type, int) else int(str(unit_type).split(".")[-1].replace("Millimeters", "0").replace("Centimeters", "1").replace("Inches", "2").replace("Meters", "3"))
+            original_unit = self._UNIT_NAMES.get(unit_index)
+        except Exception as e:
+            logger.warning(f"Could not read original unit: {e}")
+
+        # Run Scale Lens tool
+        # IScale interface: ScaleByFactor/ScaleByUnits are mutually exclusive toggles.
+        # ScaleToUnit takes ZOSAPI.Tools.General.ScaleToUnits enum.
+        try:
+            scale_tool = self.oss.Tools.OpenScale()
+
+            if mode == "factor":
+                scale_tool.ScaleByFactor = True
+                scale_tool.ScaleFactor = float(scale_factor)
+            else:  # mode == "units"
+                scale_tool.ScaleByUnits = True
+                # Resolve ScaleToUnits enum (ZOSAPI.Tools.General.ScaleToUnits)
+                unit_idx = self._UNIT_INDEX[target_unit]
+                unit_enum_names = {
+                    0: "Millimeters", 1: "Centimeters",
+                    2: "Inches", 3: "Meters",
+                }
+                try:
+                    scale_units_enum = self._zp.constants.Tools.General.ScaleToUnits
+                    enum_val = getattr(scale_units_enum, unit_enum_names[unit_idx], None)
+                    if enum_val is not None:
+                        scale_tool.ScaleToUnit = enum_val
+                    else:
+                        scale_tool.ScaleToUnit = unit_idx
+                except Exception:
+                    # Fallback: integer index works per example script 11
+                    scale_tool.ScaleToUnit = unit_idx
+
+            scale_tool.RunAndWaitForCompletion()
+            scale_tool.Close()
+
+        except Exception as e:
+            logger.error(f"Scale Lens tool failed: {e}")
+            return {"success": False, "error": f"Scale Lens failed: {e}"}
+
+        # Read post-scale paraxial data
+        efl_after = self._get_efl()
+        paraxial_after = self._get_paraxial_from_lde()
+        total_track_after = paraxial_after.get("total_track")
+
+        # Compute effective factor for unit conversion mode
+        effective_factor = scale_factor
+        if mode == "units" and efl_before and efl_after and abs(efl_before) > 1e-12:
+            effective_factor = efl_after / efl_before
+
+        result = {
+            "success": True,
+            "mode": mode,
+            "scale_factor": effective_factor,
+            "efl_before": efl_before,
+            "efl_after": efl_after,
+            "total_track_before": total_track_before,
+            "total_track_after": total_track_after,
+            "original_unit": original_unit,
+            "target_unit": target_unit if mode == "units" else None,
+        }
+        _log_raw_output("/scale-lens", result)
+        return result

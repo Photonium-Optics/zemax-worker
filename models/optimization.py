@@ -39,6 +39,27 @@ class RunOptimizationResponse(BaseModel):
     error: Optional[str] = Field(default=None, description="Error message if failed")
 
 
+class ScaleLensRequest(SystemRequest):
+    """Request for native Scale Lens tool."""
+    mode: Literal["factor", "units"] = Field(description="Scaling mode: 'factor' to scale by a numeric factor, 'units' to convert between unit systems")
+    scale_factor: Optional[float] = Field(default=None, ge=0.001, le=1000, description="Scale factor (required for mode='factor')")
+    target_unit: Optional[Literal["mm", "cm", "inches", "meters"]] = Field(default=None, description="Target unit system (required for mode='units')")
+
+
+class ScaleLensResponse(BaseModel):
+    """Response from Scale Lens tool."""
+    success: bool = Field(description="Whether scaling succeeded")
+    mode: Optional[str] = Field(default=None, description="Scaling mode used")
+    scale_factor: Optional[float] = Field(default=None, description="Effective scale factor applied")
+    efl_before: Optional[float] = Field(default=None, description="EFL before scaling")
+    efl_after: Optional[float] = Field(default=None, description="EFL after scaling")
+    total_track_before: Optional[float] = Field(default=None, description="Total track before scaling")
+    total_track_after: Optional[float] = Field(default=None, description="Total track after scaling")
+    original_unit: Optional[str] = Field(default=None, description="Original unit system (for mode='units')")
+    target_unit: Optional[str] = Field(default=None, description="Target unit system (for mode='units')")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+
+
 class QuickFocusRequest(SystemRequest):
     """Request for native QuickFocus tool."""
     criterion: str = Field(default="SpotSizeRadial", description="Focus criterion: SpotSizeRadial, RMSSpotSizeRadial, SpotSizeX, SpotSizeY")
