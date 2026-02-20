@@ -29,18 +29,6 @@ def _cutoff_frequency(wavelength_um: float, fno: Optional[float]) -> Optional[fl
     return 1.0 / (wavelength_mm * fno)
 
 
-def _diffraction_limit_curve(freq_arr: np.ndarray, cutoff: Optional[float]) -> list[float]:
-    """Compute the ideal diffraction-limited MTF curve for circular aperture."""
-    if not cutoff or cutoff <= 0:
-        return []
-    fn = np.clip(freq_arr / cutoff, 0.0, 1.0)
-    dl = np.where(
-        fn >= 1.0,
-        0.0,
-        (2.0 / np.pi) * (np.arccos(fn) - fn * np.sqrt(1.0 - fn * fn)),
-    )
-    return dl.tolist()
-
 
 def _parse_strehl_from_header(header_lines) -> Optional[float]:
     """Parse Strehl ratio from analysis header lines using regex.
@@ -882,15 +870,13 @@ class PerformanceMixin:
                 grid_size = int(sampling.split('x')[0]) if 'x' in sampling else 64
                 frequency = list(np.linspace(0, max_freq, grid_size))
 
-            # Use diffraction limit from API if available, else compute manually
             freq_arr = np.array(frequency)
-            diffraction_limit = diffraction_limit_from_api or _diffraction_limit_curve(freq_arr, cutoff_frequency)
 
             result = {
                 "success": True,
                 "frequency": freq_arr.tolist(),
                 "fields": all_fields_data,
-                "diffraction_limit": diffraction_limit,
+                "diffraction_limit": diffraction_limit_from_api,
                 "cutoff_frequency": float(cutoff_frequency) if cutoff_frequency else None,
                 "wavelength_um": float(wavelength_um),
             }
@@ -1102,15 +1088,13 @@ class PerformanceMixin:
                 grid_size = int(sampling.split('x')[0]) if 'x' in sampling else 64
                 frequency = list(np.linspace(0, max_freq, grid_size))
 
-            # Use diffraction limit from API if available, else compute manually
             freq_arr = np.array(frequency)
-            diffraction_limit = diffraction_limit_from_api or _diffraction_limit_curve(freq_arr, cutoff_frequency)
 
             result = {
                 "success": True,
                 "frequency": freq_arr.tolist(),
                 "fields": all_fields_data,
-                "diffraction_limit": diffraction_limit,
+                "diffraction_limit": diffraction_limit_from_api,
                 "cutoff_frequency": float(cutoff_frequency) if cutoff_frequency else None,
                 "wavelength_um": float(wavelength_um),
             }
