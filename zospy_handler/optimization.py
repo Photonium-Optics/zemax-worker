@@ -713,7 +713,7 @@ class OptimizationMixin:
             except Exception as e:
                 logger.debug(f"CurrentMeritFunction({j}) unavailable, stopping at {len(solutions)} solutions")
                 break
-            if mf_val is None or mf_val <= 0:
+            if mf_val is None or mf_val < 0:
                 break
             solutions.append(mf_val)
         if not solutions:
@@ -802,10 +802,7 @@ class OptimizationMixin:
                     opt_tool.Cancel()
                     opt_tool.WaitForCompletion()
                 finally:
-                    # Check Succeeded/ErrorMessage (available on Hammer, not Global)
-                    if hasattr(opt_tool, 'Succeeded') and not opt_tool.Succeeded:
-                        err_msg = getattr(opt_tool, 'ErrorMessage', 'unknown error')
-                        logger.warning(f"{method} optimization did not succeed: {err_msg}")
+                    # Note: Succeeded is always False after deliberate Cancel() — don't warn
                     if method == "global":
                         best_solutions = self._read_best_solutions(opt_tool, mfe, num_to_save or 10)
                     systems_evaluated = self._read_systems_evaluated(opt_tool)
@@ -1027,9 +1024,9 @@ class OptimizationMixin:
 
         resolved_criterion = getattr(criterion_enum, criterion, None)
         if resolved_criterion is None:
-            resolved_criterion = getattr(criterion_enum, "SpotSizeRadial", None)
-            if resolved_criterion is None:
-                return {"success": False, "error": f"Criterion '{criterion}' not available"}
+            # Don't silently substitute a different criterion — report the error
+            available = [m for m in dir(criterion_enum) if not m.startswith('_')]
+            return {"success": False, "error": f"Criterion '{criterion}' not available. Available: {available}"}
 
         try:
             qf = self.oss.Tools.OpenQuickFocus()

@@ -715,7 +715,8 @@ class ZosPyHandlerBase:
     def _extract_grid_with_metadata(self, grid) -> Optional["GridWithMetadata"]:
         """Extract data grid with spatial metadata from a ZOS-API IGrid object.
 
-        Probes the grid for MinX/MaxX/MinY/MaxY/Dx/Dy properties (IGrid interface).
+        Probes the grid for MinX/MinY/Dx/Dy properties (IAR_DataGrid interface).
+        MaxX/MaxY are NOT on IAR_DataGrid, so we compute them from Min + (N-1)*D.
         Safe if properties are absent.
         """
         data = self._extract_data_grid(grid)
@@ -723,8 +724,7 @@ class ZosPyHandlerBase:
             return None
         meta = GridWithMetadata(data=data)
         for attr, field_name in [
-            ('MinX', 'min_x'), ('MaxX', 'max_x'),
-            ('MinY', 'min_y'), ('MaxY', 'max_y'),
+            ('MinX', 'min_x'), ('MinY', 'min_y'),
             ('Dx', 'dx'), ('Dy', 'dy'),
         ]:
             if hasattr(grid, attr):
@@ -732,6 +732,11 @@ class ZosPyHandlerBase:
                     setattr(meta, field_name, float(getattr(grid, attr)))
                 except Exception:
                     pass
+        # Compute MaxX/MaxY from MinX + (Nx-1)*Dx (IAR_DataGrid has no MaxX/MaxY)
+        if meta.max_x is None and meta.min_x is not None and meta.dx is not None:
+            meta.max_x = meta.min_x + (data.shape[1] - 1) * meta.dx
+        if meta.max_y is None and meta.min_y is not None and meta.dy is not None:
+            meta.max_y = meta.min_y + (data.shape[0] - 1) * meta.dy
         return meta
 
     def _resolve_sample_size(self, sampling: str):

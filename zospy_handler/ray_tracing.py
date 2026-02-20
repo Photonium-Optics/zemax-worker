@@ -151,6 +151,7 @@ class RayTracingMixin:
 
         except Exception as e:
             logger.error(f"BatchRayTrace FAILED: {type(e).__name__}: {e}", exc_info=True)
+            raw_rays = []  # discard partial results on failure
         finally:
             if batch_trace is not None:
                 try:
@@ -159,6 +160,9 @@ class RayTracingMixin:
                     pass
             ray_trace_elapsed_ms = (time.perf_counter() - ray_trace_start) * 1000
             log_timing(logger, "ray_trace_all", ray_trace_elapsed_ms)
+
+        if not raw_rays:
+            return {"success": False, "error": "BatchRayTrace produced no results"}
 
         result = {
             "paraxial": {

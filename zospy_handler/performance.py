@@ -86,8 +86,9 @@ class PerformanceMixin:
     def _extract_mtf_series(series) -> tuple[list, list, list]:
         """Extract x, tangential, and sagittal data from an MTF data series.
 
-        Tries bulk XData.Data/YData.Data first (single COM call). YData may
-        be a 2D .NET array with dim0=columns (tang/sag), dim1=freq points.
+        Tries bulk XData.Data/YData.Data first (single COM call).
+        IMatrixData layout: GetLength(0)=Rows=freq points, GetLength(1)=Cols=NumSeries(tang/sag).
+        Access pattern: y_raw[row, col] i.e. y_raw[freq_index, series_index].
         Falls back to per-point GetDataPoint() extraction.
 
         Returns (x_values, tangential_values, sagittal_values).
@@ -98,8 +99,8 @@ class PerformanceMixin:
             try:
                 x_raw = series.XData.Data
                 y_raw = series.YData.Data
-                n_cols = y_raw.GetLength(0)
-                n_pts = y_raw.GetLength(1)
+                n_pts = y_raw.GetLength(0)   # Rows = frequency points
+                n_cols = y_raw.GetLength(1)  # Cols = NumSeries (tang/sag)
                 if n_pts > 0:
                     if n_cols > 2:
                         logger.warning(f"MTF bulk: unexpected n_cols={n_cols} (expected 1 or 2); using cols 0 and 1 only")
@@ -108,9 +109,9 @@ class PerformanceMixin:
                         logger.warning(f"MTF bulk: x length {x_len} != y points {n_pts}; truncating to shorter")
                         n_pts = min(x_len, n_pts)
                     x_vals = [float(x_raw[i]) for i in range(n_pts)]
-                    tang = [float(y_raw[0, i]) for i in range(n_pts)]
-                    sag = [float(y_raw[1, i]) for i in range(n_pts)] if n_cols >= 2 else []
-                    logger.debug(f"MTF bulk extraction: {n_cols} cols x {n_pts} pts")
+                    tang = [float(y_raw[i, 0]) for i in range(n_pts)]
+                    sag = [float(y_raw[i, 1]) for i in range(n_pts)] if n_cols >= 2 else []
+                    logger.debug(f"MTF bulk extraction: {n_pts} pts x {n_cols} cols")
                     return x_vals, tang, sag
             except Exception as e:
                 logger.warning(f"MTF bulk extraction failed, falling back to per-point: {type(e).__name__}: {e}")
@@ -519,10 +520,19 @@ class PerformanceMixin:
         # Using µm directly: 1.22 * wl_um * fno gives result in µm
         try:
             fno = self._get_fno()
-            primary_wl_um = _extract_value(
-                self.oss.SystemData.Wavelengths.GetWavelength(1).Wavelength,
-                0.5876,
-            )
+            # Find the actual primary wavelength (not always index 1)
+            wavelengths = self.oss.SystemData.Wavelengths
+            primary_wl_um = 0.5876  # fallback
+            for wi in range(1, wavelengths.NumberOfWavelengths + 1):
+                wl = wavelengths.GetWavelength(wi)
+                if wl.IsPrimary:
+                    primary_wl_um = _extract_value(wl.Wavelength, 0.5876)
+                    break
+            else:
+                # No primary found, use wavelength 1
+                primary_wl_um = _extract_value(
+                    wavelengths.GetWavelength(1).Wavelength, 0.5876,
+                )
             if fno and fno > 0:
                 airy_radius_um = 1.22 * primary_wl_um * fno
                 logger.info(f"[SPOT] Computed airy_radius: 1.22 * {primary_wl_um:.4f}µm * F/{fno:.2f} = {airy_radius_um:.3f} µm")

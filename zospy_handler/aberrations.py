@@ -77,9 +77,9 @@ def _parse_zernike_full_text(text: str) -> dict:
                 pass
             continue
 
-        # Match P-V lines
+        # Match P-V lines (dash may be ASCII hyphen, en-dash, or Unicode minus)
         m = re.match(
-            r'P-V\s*\(to\s+(chief|centroid)\)\s*:\s*([\d.eE+-]+)',
+            r'P[-\u2010\u2013\u2014\u2212]V\s*\(to\s+(chief|centroid)\)\s*:\s*([-\d.eE+]+)',
             line_stripped, re.IGNORECASE,
         )
         if m:
@@ -282,10 +282,17 @@ class AberrationsMixin:
                     if os.path.exists(zernike_temp_path):
                         text = self._read_opticstudio_text_file(zernike_temp_path)
                         if text:
+                            # Log the metric-containing lines for debugging
+                            for dbg_line in text.splitlines():
+                                ls = dbg_line.strip()
+                                if any(kw in ls.lower() for kw in ['rms', 'p-v', 'p–v', 'p−v', 'peak', 'strehl', 'variance', 'max']):
+                                    logger.debug(f"ZernikeText metric line: {ls!r}")
                             metrics = _parse_zernike_full_text(text)
                             rms_waves = metrics["rms_to_chief"]
                             pv_waves = metrics["pv_to_chief"]
                             strehl_ratio = metrics["strehl_ratio"]
+                            if pv_waves is None or strehl_ratio is None:
+                                logger.warning(f"ZernikeStandardCoefficients: parsed metrics incomplete — rms={rms_waves}, pv={pv_waves}, strehl={strehl_ratio}")
                     else:
                         logger.warning("ZernikeStandardCoefficients: GetTextFile produced no output")
 
@@ -348,6 +355,23 @@ class AberrationsMixin:
             finally:
                 self._cleanup_analysis(wfm_analysis)
                 wfm_analysis = None
+
+            # Fallback: compute P-V from wavefront map if text parsing missed it
+            if pv_waves is None and image_b64 is not None and array_shape is not None:
+                try:
+                    import numpy as np
+                    wfm_arr = np.frombuffer(base64.b64decode(image_b64), dtype=array_dtype).reshape(array_shape)
+                    valid = wfm_arr[wfm_arr != 0]  # zero = outside pupil
+                    if valid.size > 0:
+                        pv_waves = float(np.max(valid) - np.min(valid))
+                        logger.info(f"P-V computed from wavefront map: {pv_waves:.6f}")
+                except Exception as e:
+                    logger.warning(f"P-V fallback computation failed: {e}")
+
+            # Fallback: compute Strehl from RMS via Marechal approximation
+            if strehl_ratio is None and rms_waves is not None:
+                strehl_ratio = math.exp(-(2.0 * math.pi * rms_waves) ** 2)
+                logger.info(f"Strehl computed from RMS (Marechal approx): {strehl_ratio:.6e}")
 
             result = {
                 "success": True,
@@ -693,12 +717,11 @@ class AberrationsMixin:
                     x_raw = series.XData.Data
                     y_raw = series.YData.Data
                     n_pts = x_raw.GetLength(0)
-                    n_cols = y_raw.GetLength(0)
-                    n_y_pts = y_raw.GetLength(1)
-                    n_pts = min(n_pts, n_y_pts)
+                    n_y_rows = y_raw.GetLength(0)  # Rows = data points
+                    n_pts = min(n_pts, n_y_rows)
                     for pi in range(n_pts):
                         x = float(x_raw[pi])
-                        y = float(y_raw[0, pi])
+                        y = float(y_raw[pi, 0])
                         if pi >= len(rows):
                             rows.append({"field": x})
                         rows[pi][desc] = y
@@ -713,8 +736,8 @@ class AberrationsMixin:
                 grid = results.GetDataGrid(gi)
                 if grid is None:
                     continue
-                n_rows = getattr(grid, 'NumberOfRows', 0)
-                n_cols = getattr(grid, 'NumberOfCols', 0)
+                n_rows = getattr(grid, 'Ny', 0)
+                n_cols = getattr(grid, 'Nx', 0)
                 for ri in range(n_rows):
                     row_data = {}
                     for ci in range(n_cols):
