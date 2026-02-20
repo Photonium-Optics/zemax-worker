@@ -36,6 +36,7 @@ class RunOptimizationResponse(BaseModel):
     variable_states: Optional[list[VariableState]] = Field(default=None, description="Variable parameter states after optimization")
     best_solutions: Optional[list[float]] = Field(default=None, description="Best merit function values from global optimization")
     systems_evaluated: Optional[int] = Field(default=None, description="Number of systems evaluated (global/hammer)")
+    modified_zmx_content: Optional[str] = Field(default=None, description="Base64-encoded ZMX of modified system for full LDE readback")
     error: Optional[str] = Field(default=None, description="Error message if failed")
 
 
@@ -57,6 +58,7 @@ class ScaleLensResponse(BaseModel):
     total_track_after: Optional[float] = Field(default=None, description="Total track after scaling")
     original_unit: Optional[str] = Field(default=None, description="Original unit system (for mode='units')")
     target_unit: Optional[str] = Field(default=None, description="Target unit system (for mode='units')")
+    modified_zmx_content: Optional[str] = Field(default=None, description="Base64-encoded ZMX of modified system for full LDE readback")
     error: Optional[str] = Field(default=None, description="Error message if failed")
 
 
@@ -74,4 +76,5 @@ class QuickFocusResponse(BaseModel):
     thickness_after: Optional[float] = Field(default=None, description="Back focal distance after adjustment")
     delta_thickness: Optional[float] = Field(default=None, description="Change in thickness")
     criterion: Optional[str] = Field(default=None, description="Criterion used")
+    modified_zmx_content: Optional[str] = Field(default=None, description="Base64-encoded ZMX of modified system for full LDE readback")
     error: Optional[str] = Field(default=None, description="Error message if failed")

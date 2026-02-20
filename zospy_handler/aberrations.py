@@ -4,17 +4,99 @@ import base64
 import logging
 import math
 import os
+import re
 import tempfile
 import time
 from typing import Any
 
-import numpy as np
-
 from config import SEIDEL_TEMP_FILENAME
-from zospy_handler._base import _extract_value, _log_raw_output, _extract_dataframe, _parse_zernike_term_number
+from zospy_handler._base import _extract_value, _log_raw_output, _parse_zernike_term_number
 from utils.timing import log_timing
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_zernike_full_text(text: str) -> dict:
+    """Parse full ZernikeStandardCoefficients text output.
+
+    Extracts individual coefficients plus RMS, P-V, and Strehl metrics.
+
+    The OpticStudio text output has coefficient lines like:
+        Z   1      0.12345678     1
+        Z   2     -0.01234567     4ρ·Cos(A)
+
+    And metric lines like:
+        RMS (to chief)     :   0.12345678
+        P-V (to chief)     :   0.56789012
+        Strehl Ratio       :   0.90123456
+
+    Returns:
+        dict with keys: coefficients, rms_to_chief, rms_to_centroid,
+        pv_to_chief, pv_to_centroid, strehl_ratio
+    """
+    result = {
+        "coefficients": [],
+        "rms_to_chief": None,
+        "rms_to_centroid": None,
+        "pv_to_chief": None,
+        "pv_to_centroid": None,
+        "strehl_ratio": None,
+    }
+
+    for line in text.splitlines():
+        line_stripped = line.strip()
+
+        # Match coefficient lines: Z   N      value     formula
+        m = re.match(r'Z\s+(\d+)\s+([-\d.eE+]+)\s*(.*)', line_stripped)
+        if m:
+            try:
+                result["coefficients"].append({
+                    "term": int(m.group(1)),
+                    "value": float(m.group(2)),
+                    "formula": m.group(3).strip(),
+                })
+            except (ValueError, TypeError):
+                pass
+            continue
+
+        # Match RMS lines
+        m = re.match(
+            r'RMS\s*\(to\s+(chief|centroid)\)\s*:\s*([\d.eE+-]+)',
+            line_stripped, re.IGNORECASE,
+        )
+        if m:
+            key = f"rms_to_{m.group(1).lower()}"
+            try:
+                result[key] = float(m.group(2))
+            except ValueError:
+                pass
+            continue
+
+        # Match P-V lines
+        m = re.match(
+            r'P-V\s*\(to\s+(chief|centroid)\)\s*:\s*([\d.eE+-]+)',
+            line_stripped, re.IGNORECASE,
+        )
+        if m:
+            key = f"pv_to_{m.group(1).lower()}"
+            try:
+                result[key] = float(m.group(2))
+            except ValueError:
+                pass
+            continue
+
+        # Match Strehl Ratio
+        m = re.match(
+            r'Strehl\s+Ratio\s*:\s*([\d.eE+-]+)',
+            line_stripped, re.IGNORECASE,
+        )
+        if m:
+            try:
+                result["strehl_ratio"] = float(m.group(1))
+            except ValueError:
+                pass
+
+    return result
 
 
 class AberrationsMixin:
@@ -94,11 +176,11 @@ class AberrationsMixin:
         remove_tilt: bool = False,
     ) -> dict[str, Any]:
         """
-        Get wavefront error map and metrics using ZosPy's WavefrontMap
-        and ZernikeStandardCoefficients analyses.
+        Get wavefront error map and metrics using raw ZOS-API calls.
 
-        This is a "dumb executor" - returns raw data only. Wavefront map
-        image rendering happens on Mac side.
+        Uses ZernikeStandardCoefficients (text output) for RMS/P-V/Strehl,
+        and WavefrontMap (data grid) for the 2D wavefront array. Both use
+        the raw new_analysis() pattern to avoid ZosPy temp-file issues.
 
         Note: System must be pre-loaded via load_zmx_file().
 
@@ -106,6 +188,7 @@ class AberrationsMixin:
             field_index: Field index (1-indexed)
             wavelength_index: Wavelength index (1-indexed)
             sampling: Pupil sampling grid (e.g., '32x32', '64x64', '128x128')
+            remove_tilt: Whether to remove tilt from wavefront map
 
         Returns:
             On success: {
@@ -123,6 +206,10 @@ class AberrationsMixin:
             }
             On error: {"success": False, "error": "..."}
         """
+        zernike_analysis = None
+        wfm_analysis = None
+        zernike_temp_path = os.path.join(tempfile.gettempdir(), "zospy_zernike_wavefront.txt")
+
         try:
             # Get field coordinates for response
             fields = self.oss.SystemData.Fields
@@ -130,7 +217,6 @@ class AberrationsMixin:
                 return {"success": False, "error": f"Field index {field_index} out of range (max: {fields.NumberOfFields})"}
 
             field = fields.GetField(field_index)
-            # Use _extract_value for UnitField objects
             field_x = _extract_value(field.X)
             field_y = _extract_value(field.Y)
 
@@ -139,86 +225,117 @@ class AberrationsMixin:
             if wavelength_index > wavelengths.NumberOfWavelengths:
                 return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
 
-            # Use _extract_value for UnitField objects
             wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
 
-            # Get wavefront metrics using ZernikeStandardCoefficients
-            # This gives us RMS, P-V, and Strehl ratio
+            idm = self._zp.constants.Analysis.AnalysisIDM
+            image_surf = self.oss.LDE.NumberOfSurfaces - 1
+
+            # -----------------------------------------------------------------
+            # Part A: ZernikeStandardCoefficients → RMS, P-V, Strehl
+            # Uses GetTextFile + text parsing (same pattern as get_seidel_native)
+            # -----------------------------------------------------------------
             rms_waves = None
             pv_waves = None
             strehl_ratio = None
 
-            # Get wavefront metrics from ZernikeStandardCoefficients
-            zernike_analysis = self._zp.analyses.wavefront.ZernikeStandardCoefficients(
-                sampling=sampling,
-                maximum_term=37,
-                wavelength=wavelength_index,
-                field=field_index,
-                reference_opd_to_vertex=False,
-                surface="Image",
-            )
-            zernike_start = time.perf_counter()
             try:
-                zernike_result = zernike_analysis.run(self.oss)
+                zernike_analysis = self._zp.analyses.new_analysis(
+                    self.oss, idm.ZernikeStandardCoefficients, settings_first=True,
+                )
+                settings = zernike_analysis.Settings
+                self._configure_analysis_settings(settings, field_index, wavelength_index, sampling)
+
+                # Zernike-specific settings (hasattr guard pattern from get_rms_vs_field)
+                if hasattr(settings, 'MaximumNumberOfTerms'):
+                    settings.MaximumNumberOfTerms = 37
+                elif hasattr(settings, 'MaximumTerm'):
+                    settings.MaximumTerm = 37
+
+                if hasattr(settings, 'Surface'):
+                    try:
+                        settings.Surface.SetSurfaceNumber(image_surf)
+                    except Exception as e:
+                        logger.warning(f"ZernikeStandardCoefficients: Could not set Surface: {e}")
+
+                # ZOS-API uses "OBD" not "OPD" (naming quirk)
+                if hasattr(settings, 'ReferenceOBDToVertex'):
+                    settings.ReferenceOBDToVertex = False
+                elif hasattr(settings, 'ReferenceOPDToVertex'):
+                    settings.ReferenceOPDToVertex = False
+
+                zernike_start = time.perf_counter()
+                try:
+                    zernike_analysis.ApplyAndWaitForCompletion()
+                finally:
+                    elapsed = (time.perf_counter() - zernike_start) * 1000
+                    log_timing(logger, "ZernikeStandardCoefficients.ApplyAndWaitForCompletion", elapsed)
+
+                # Check for analysis errors
+                error_msg = self._check_analysis_errors(zernike_analysis)
+                if error_msg:
+                    logger.warning(f"ZernikeStandardCoefficients error: {error_msg}")
+                else:
+                    # Extract metrics from text output
+                    zernike_analysis.Results.GetTextFile(zernike_temp_path)
+                    if os.path.exists(zernike_temp_path):
+                        text = self._read_opticstudio_text_file(zernike_temp_path)
+                        if text:
+                            metrics = _parse_zernike_full_text(text)
+                            rms_waves = metrics["rms_to_chief"]
+                            pv_waves = metrics["pv_to_chief"]
+                            strehl_ratio = metrics["strehl_ratio"]
+                    else:
+                        logger.warning("ZernikeStandardCoefficients: GetTextFile produced no output")
+
+            except Exception as e:
+                logger.warning(f"ZernikeStandardCoefficients failed: {e}")
             finally:
-                zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
-                log_timing(logger, "ZernikeStandardCoefficients.run", zernike_elapsed_ms)
-
-            if hasattr(zernike_result, 'data') and zernike_result.data is not None:
-                zdata = zernike_result.data
-
-                # Get P-V wavefront error (in waves)
-                if hasattr(zdata, 'peak_to_valley_to_chief'):
-                    pv_waves = _extract_value(zdata.peak_to_valley_to_chief)
-                elif hasattr(zdata, 'peak_to_valley_to_centroid'):
-                    pv_waves = _extract_value(zdata.peak_to_valley_to_centroid)
-
-                # Get RMS and Strehl from integration data
-                if hasattr(zdata, 'from_integration_of_the_rays'):
-                    integration = zdata.from_integration_of_the_rays
-                    if hasattr(integration, 'rms_to_chief'):
-                        rms_waves = _extract_value(integration.rms_to_chief)
-                    elif hasattr(integration, 'rms_to_centroid'):
-                        rms_waves = _extract_value(integration.rms_to_centroid)
-                    if hasattr(integration, 'strehl_ratio'):
-                        strehl_ratio = _extract_value(integration.strehl_ratio)
+                self._cleanup_analysis(zernike_analysis, zernike_temp_path)
+                zernike_analysis = None
 
             if rms_waves is None and pv_waves is None:
                 return {"success": False, "error": "ZernikeStandardCoefficients returned no metrics"}
 
-            # Get wavefront map as numpy array
+            # -----------------------------------------------------------------
+            # Part B: WavefrontMap → 2D wavefront array
+            # Uses GetDataGrid + _extract_data_grid (same pattern as spot/MTF)
+            # -----------------------------------------------------------------
             image_b64 = None
             array_shape = None
             array_dtype = None
 
             try:
+                wfm_analysis = self._zp.analyses.new_analysis(
+                    self.oss, idm.WavefrontMap, settings_first=True,
+                )
+                settings = wfm_analysis.Settings
+                self._configure_analysis_settings(settings, field_index, wavelength_index, sampling)
+
+                # WavefrontMap-specific settings
+                if hasattr(settings, 'Surface'):
+                    try:
+                        settings.Surface.SetSurfaceNumber(image_surf)
+                    except Exception as e:
+                        logger.warning(f"WavefrontMap: Could not set Surface: {e}")
+
+                if hasattr(settings, 'RemoveTilt'):
+                    settings.RemoveTilt = remove_tilt
+
+                if hasattr(settings, 'UseExitPupil'):
+                    settings.UseExitPupil = True
+
                 wfm_start = time.perf_counter()
                 try:
-                    wavefront_map = self._zp.analyses.wavefront.WavefrontMap(
-                        sampling=sampling,
-                        wavelength=wavelength_index,
-                        field=field_index,
-                        surface="Image",
-                        show_as="Surface",
-                        rotation="Rotate_0",
-                        scale=1,
-                        polarization=None,
-                        reference_to_primary=False,
-                        remove_tilt=remove_tilt,
-                        use_exit_pupil=True,
-                    ).run(self.oss, oncomplete="Release")
+                    wfm_analysis.ApplyAndWaitForCompletion()
                 finally:
-                    wfm_elapsed_ms = (time.perf_counter() - wfm_start) * 1000
-                    log_timing(logger, "WavefrontMap.run", wfm_elapsed_ms)
+                    elapsed = (time.perf_counter() - wfm_start) * 1000
+                    log_timing(logger, "WavefrontMap.ApplyAndWaitForCompletion", elapsed)
 
-                if hasattr(wavefront_map, 'data') and wavefront_map.data is not None:
-                    wf_data = wavefront_map.data
-                    if hasattr(wf_data, 'values'):
-                        arr = np.array(wf_data.values, dtype=np.float64)
-                    else:
-                        arr = np.array(wf_data, dtype=np.float64)
-
-                    if arr.ndim >= 2:
+                results = wfm_analysis.Results
+                if results and hasattr(results, 'NumberOfDataGrids') and results.NumberOfDataGrids > 0:
+                    grid = results.GetDataGrid(0)
+                    arr = self._extract_data_grid(grid)
+                    if arr is not None and arr.ndim >= 2:
                         image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
                         array_shape = list(arr.shape)
                         array_dtype = str(arr.dtype)
@@ -226,6 +343,9 @@ class AberrationsMixin:
 
             except Exception as e:
                 logger.warning(f"WavefrontMap failed: {e} (metrics still available)")
+            finally:
+                self._cleanup_analysis(wfm_analysis)
+                wfm_analysis = None
 
             result = {
                 "success": True,
@@ -465,18 +585,22 @@ class AberrationsMixin:
                 # Fallback: parse text output
                 if not data_points:
                     logger.warning("RmsField: No data extracted from DataSeries, attempting text fallback")
+                    tmp = tempfile.NamedTemporaryFile(suffix='.txt', delete=False)
+                    tmp_path = tmp.name
+                    tmp.close()
                     try:
-                        tmp = tempfile.NamedTemporaryFile(suffix='.txt', delete=False)
-                        tmp_path = tmp.name
-                        tmp.close()
                         results.GetTextFile(tmp_path)
                         with open(tmp_path, 'r') as f:
                             text_content = f.read()
-                        os.unlink(tmp_path)
                         if text_content:
                             logger.info(f"RmsField text output (first 500 chars): {text_content[:500]}")
                     except Exception as e:
                         logger.warning(f"RmsField: Text fallback also failed: {e}")
+                    finally:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
                     return {"success": False, "error": "RmsField analysis returned no extractable data"}
 
                 logger.info(f"RmsField: Returning {len(data_points)} data points, {len(diffraction_limit)} diffraction limit points (requested FieldDens_{snapped})")
@@ -491,11 +615,7 @@ class AberrationsMixin:
                 return result
 
             finally:
-                if analysis is not None:
-                    try:
-                        analysis.Close()
-                    except Exception:
-                        pass
+                self._cleanup_analysis(analysis)
 
         except Exception as e:
             return {"success": False, "error": f"RmsField analysis failed: {e}"}
@@ -505,6 +625,7 @@ class AberrationsMixin:
         maximum_term: int,
         wavelength_index: int,
         field_density: int,
+        sampling: str = "64x64",
     ) -> "pd.DataFrame | None":
         """
         Run ZernikeCoefficientsVsField via the raw new_analysis API.
@@ -527,8 +648,7 @@ class AberrationsMixin:
                 settings.MaximumNumberOfTerms = maximum_term
             elif hasattr(settings, 'MaximumTerm'):
                 settings.MaximumTerm = maximum_term
-            if hasattr(settings, 'Wavelength'):
-                settings.Wavelength.SetWavelengthNumber(wavelength_index)
+            self._configure_analysis_settings(settings, wavelength_index=wavelength_index, sampling=sampling)
             if hasattr(settings, 'FieldDensity'):
                 settings.FieldDensity = field_density
 
@@ -545,10 +665,7 @@ class AberrationsMixin:
                 return None
             return pd.DataFrame(rows).set_index("field")
         finally:
-            try:
-                analysis.Close()
-            except Exception:
-                pass
+            self._cleanup_analysis(analysis)
 
     def _extract_zernike_fallback_rows(self, results: Any) -> list[dict]:
         """
@@ -648,44 +765,12 @@ class AberrationsMixin:
                 field_type_str = ""
             field_unit = "deg" if "angle" in field_type_str.lower() else "mm"
 
-            # Build coefficients range string: "1-N"
-            coefficients_str = f"1-{maximum_term}"
-
-            # Run ZernikeCoefficientsVsField using the new-style ZOSPy API
-            # ZosPy's parser can fail on certain input combinations in some versions,
-            # so we fall back to the raw new_analysis API if needed.
-            zernike_result = None
-            try:
-                zernike_vs_field = self._zp.analyses.wavefront.ZernikeCoefficientsVsField(
-                    coefficients=coefficients_str,
-                    wavelength=wavelength_index,
-                    sampling=sampling,
-                    field_density=field_density,
-                )
-
-                zernike_start = time.perf_counter()
-                try:
-                    zernike_result = zernike_vs_field.run(self.oss)
-                finally:
-                    zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
-                    log_timing(logger, "ZernikeCoefficientsVsField.run", zernike_elapsed_ms)
-            except Exception as wrapper_err:
-                logger.warning(f"ZernikeCoefficientsVsField wrapper failed ({wrapper_err}), falling back to new_analysis API")
-                zernike_result = self._run_zernike_vs_field_fallback(
-                    maximum_term, wavelength_index, field_density,
-                )
-                if zernike_result is None:
-                    return {"success": False, "error": "ZernikeCoefficientsVsField fallback returned no data"}
-
-            # Extract DataFrame from the result (wrapper path yields AnalysisResult,
-            # fallback path yields a DataFrame directly)
-            import pandas as pd
-            if isinstance(zernike_result, pd.DataFrame):
-                df = zernike_result
-            else:
-                df = _extract_dataframe(zernike_result, "ZernikeCoefficientsVsField")
-                if df is None:
-                    return {"success": False, "error": "ZernikeCoefficientsVsField returned no extractable DataFrame"}
+            # Run ZernikeCoefficientsVsField using raw ZOS-API (no ZosPy temp files)
+            df = self._run_zernike_vs_field_fallback(
+                maximum_term, wavelength_index, field_density, sampling,
+            )
+            if df is None:
+                return {"success": False, "error": "ZernikeCoefficientsVsField returned no data"}
 
             logger.info(f"ZernikeVsField: DataFrame columns={list(df.columns)}, shape={df.shape}")
 
@@ -761,6 +846,9 @@ class AberrationsMixin:
             On success: dict with coefficients, P-V, RMS, Strehl, etc.
             On error: {"success": False, "error": "..."}
         """
+        analysis = None
+        temp_path = os.path.join(tempfile.gettempdir(), "zospy_zernike_standard.txt")
+
         try:
             # Validate field index
             fields = self.oss.SystemData.Fields
@@ -778,67 +866,75 @@ class AberrationsMixin:
 
             wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
 
-            # Run ZernikeStandardCoefficients analysis
-            zernike_analysis = self._zp.analyses.wavefront.ZernikeStandardCoefficients(
-                sampling=sampling,
-                maximum_term=maximum_term,
-                wavelength=wavelength_index,
-                field=field_index,
-                reference_opd_to_vertex=False,
-                surface=surface,
+            # Determine surface number
+            if surface == "Image" or surface is None:
+                surf_num = self.oss.LDE.NumberOfSurfaces - 1
+            else:
+                try:
+                    surf_num = int(surface)
+                except (ValueError, TypeError):
+                    surf_num = self.oss.LDE.NumberOfSurfaces - 1
+
+            # Run ZernikeStandardCoefficients via raw ZOS-API (no ZosPy temp files)
+            idm = self._zp.constants.Analysis.AnalysisIDM
+            analysis = self._zp.analyses.new_analysis(
+                self.oss, idm.ZernikeStandardCoefficients, settings_first=True,
             )
+            settings = analysis.Settings
+            self._configure_analysis_settings(settings, field_index, wavelength_index, sampling)
+
+            # Zernike-specific settings
+            if hasattr(settings, 'MaximumNumberOfTerms'):
+                settings.MaximumNumberOfTerms = maximum_term
+            elif hasattr(settings, 'MaximumTerm'):
+                settings.MaximumTerm = maximum_term
+
+            if hasattr(settings, 'Surface'):
+                try:
+                    settings.Surface.SetSurfaceNumber(surf_num)
+                except Exception as e:
+                    logger.warning(f"ZernikeStandardCoefficients: Could not set Surface: {e}")
+
+            # ZOS-API uses "OBD" not "OPD" (naming quirk)
+            if hasattr(settings, 'ReferenceOBDToVertex'):
+                settings.ReferenceOBDToVertex = False
+            elif hasattr(settings, 'ReferenceOPDToVertex'):
+                settings.ReferenceOPDToVertex = False
 
             zernike_start = time.perf_counter()
             try:
-                zernike_result = zernike_analysis.run(self.oss)
+                analysis.ApplyAndWaitForCompletion()
             finally:
-                zernike_elapsed_ms = (time.perf_counter() - zernike_start) * 1000
-                log_timing(logger, "ZernikeStandardCoefficients.run (full)", zernike_elapsed_ms)
+                elapsed = (time.perf_counter() - zernike_start) * 1000
+                log_timing(logger, "ZernikeStandardCoefficients.run (full)", elapsed)
 
-            if not hasattr(zernike_result, 'data') or zernike_result.data is None:
-                return {"success": False, "error": "ZernikeStandardCoefficients returned no data"}
+            # Check for analysis errors
+            error_msg = self._check_analysis_errors(analysis)
+            if error_msg:
+                return {"success": False, "error": f"ZernikeStandardCoefficients error: {error_msg}"}
 
-            zdata = zernike_result.data
+            # Extract text output and parse coefficients + metrics
+            analysis.Results.GetTextFile(temp_path)
+            if not os.path.exists(temp_path):
+                return {"success": False, "error": "ZernikeStandardCoefficients: GetTextFile produced no output"}
 
-            # Extract P-V wavefront error
-            pv_to_chief = _extract_value(getattr(zdata, 'peak_to_valley_to_chief', None))
-            pv_to_centroid = _extract_value(getattr(zdata, 'peak_to_valley_to_centroid', None))
+            text = self._read_opticstudio_text_file(temp_path)
+            if not text:
+                return {"success": False, "error": "ZernikeStandardCoefficients text output is empty"}
 
-            # Extract RMS and Strehl from integration data
-            rms_to_chief = None
-            rms_to_centroid = None
-            strehl_ratio = None
+            parsed = _parse_zernike_full_text(text)
 
-            if hasattr(zdata, 'from_integration_of_the_rays'):
-                integration = zdata.from_integration_of_the_rays
-                rms_to_chief = _extract_value(getattr(integration, 'rms_to_chief', None))
-                rms_to_centroid = _extract_value(getattr(integration, 'rms_to_centroid', None))
-                strehl_ratio = _extract_value(getattr(integration, 'strehl_ratio', None))
-
-            # Extract individual Zernike coefficients
-            coefficients = []
-            if hasattr(zdata, 'coefficients') and zdata.coefficients:
-                for term, coeff in zdata.coefficients.items():
-                    try:
-                        coefficients.append({
-                            "term": int(term),
-                            "value": float(coeff.value),
-                            "formula": str(coeff.formula) if hasattr(coeff, 'formula') else "",
-                        })
-                    except (ValueError, TypeError, AttributeError) as e:
-                        logger.debug(f"Skipping Zernike term {term}: {e}")
-
-            if not coefficients:
-                return {"success": False, "error": "No Zernike coefficients extracted"}
+            if not parsed["coefficients"]:
+                return {"success": False, "error": "No Zernike coefficients extracted from text output"}
 
             result = {
                 "success": True,
-                "coefficients": coefficients,
-                "pv_to_chief": pv_to_chief,
-                "pv_to_centroid": pv_to_centroid,
-                "rms_to_chief": rms_to_chief,
-                "rms_to_centroid": rms_to_centroid,
-                "strehl_ratio": strehl_ratio,
+                "coefficients": parsed["coefficients"],
+                "pv_to_chief": parsed["pv_to_chief"],
+                "pv_to_centroid": parsed["pv_to_centroid"],
+                "rms_to_chief": parsed["rms_to_chief"],
+                "rms_to_centroid": parsed["rms_to_centroid"],
+                "strehl_ratio": parsed["strehl_ratio"],
                 "surface": str(surface),
                 "field_x": field_x,
                 "field_y": field_y,
@@ -849,9 +945,10 @@ class AberrationsMixin:
             }
 
             _log_raw_output("get_zernike_standard_coefficients", result)
-
             return result
 
         except Exception as e:
             logger.error(f"get_zernike_standard_coefficients failed: {e}")
             return {"success": False, "error": str(e)}
+        finally:
+            self._cleanup_analysis(analysis, temp_path)

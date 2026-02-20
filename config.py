@@ -96,7 +96,7 @@ _ARRAY_SUMMARY_FIELDS = {
 _ARRAY_SUMMARY_MAX = 5
 
 # Fields containing binary/large base64 data to skip
-_BINARY_FIELDS = {"image", "zmx_content"}
+_BINARY_FIELDS = {"image", "zmx_content", "modified_zmx_content"}
 
 # Text fields to truncate
 _TEXT_TRUNCATE_FIELDS = {"seidel_text": 200}

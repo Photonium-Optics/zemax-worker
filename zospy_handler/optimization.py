@@ -820,6 +820,9 @@ class OptimizationMixin:
         # Step 6: Extract variable states from LDE
         variable_states = self._extract_variable_states()
 
+        # Save the modified system so the caller can round-trip via zmxToLlm
+        modified_zmx_content = self._try_save_modified_system("optimization")
+
         result: dict[str, Any] = {
             "success": True,
             "method": method,
@@ -829,6 +832,7 @@ class OptimizationMixin:
             "cycles_completed": cycles if method == "local" else None,
             "operand_results": operand_results,
             "variable_states": variable_states,
+            "modified_zmx_content": modified_zmx_content,
         }
         if best_solutions is not None:
             result["best_solutions"] = best_solutions
@@ -1000,6 +1004,9 @@ class OptimizationMixin:
         surf_after = lde.GetSurfaceAt(focus_surf_idx)
         thickness_after = _extract_value(surf_after.Thickness, 0.0, allow_inf=True)
 
+        # Save the modified system so the caller can round-trip via zmxToLlm
+        modified_zmx_content = self._try_save_modified_system("quick-focus")
+
         result = {
             "success": True,
             "surface_index": focus_surf_idx,
@@ -1007,6 +1014,7 @@ class OptimizationMixin:
             "thickness_after": thickness_after,
             "delta_thickness": thickness_after - thickness_before,
             "criterion": criterion,
+            "modified_zmx_content": modified_zmx_content,
         }
         _log_raw_output("/quick-focus", result)
         return result
@@ -1110,6 +1118,9 @@ class OptimizationMixin:
         if mode == "units" and efl_before and efl_after and abs(efl_before) > 1e-12:
             effective_factor = efl_after / efl_before
 
+        # Save the modified system so the caller can round-trip via zmxToLlm
+        modified_zmx_content = self._try_save_modified_system("scale-lens")
+
         result = {
             "success": True,
             "mode": mode,
@@ -1120,6 +1131,7 @@ class OptimizationMixin:
             "total_track_after": total_track_after,
             "original_unit": original_unit,
             "target_unit": target_unit if mode == "units" else None,
+            "modified_zmx_content": modified_zmx_content,
         }
         _log_raw_output("/scale-lens", result)
         return result

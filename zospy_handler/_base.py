@@ -10,10 +10,12 @@ Each uvicorn worker process gets its own OpticStudio connection (via ZOS singlet
 Multiple workers are supported — the constraint is license seats, not threading.
 """
 
+import base64
 import json
 import logging
 import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -478,6 +480,31 @@ class ZosPyHandlerBase:
             return bfl
         except Exception as e:
             logger.warning(f"_get_bfl failed: {e}")
+            return None
+
+    def _save_modified_system(self) -> str:
+        """Save the current OpticStudio system to a temp ZMX file and return base64 content.
+
+        Used after any operation that modifies the LDE (optimization, scale, quick-focus)
+        so the caller can round-trip back to canonical LLM JSON via zmxToLlm.
+        """
+        with tempfile.NamedTemporaryFile(suffix='.zmx', delete=False) as f:
+            temp_path = f.name
+        try:
+            self.oss.save_as(temp_path)
+            with open(temp_path, 'rb') as f:
+                zmx_bytes = f.read()
+            return base64.b64encode(zmx_bytes).decode('ascii')
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def _try_save_modified_system(self, operation_name: str) -> str | None:
+        """Save the modified system, returning None on failure instead of raising."""
+        try:
+            return self._save_modified_system()
+        except Exception as e:
+            logger.warning(f"_save_modified_system failed after {operation_name}: {e}")
             return None
 
     def _check_analysis_errors(self, analysis: Any) -> Optional[str]:
