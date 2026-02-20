@@ -1,4 +1,5 @@
 """Aberrations mixin – Seidel, wavefront, Zernike, RMS vs field."""
+from __future__ import annotations
 
 import base64
 import logging
@@ -7,7 +8,6 @@ import os
 import re
 import tempfile
 import time
-from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
