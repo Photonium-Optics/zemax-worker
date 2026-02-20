@@ -309,17 +309,17 @@ class OptimizationMixin:
                 logger.warning(f"Unknown arms count {arms}, using Arms_6")
                 wizard.Arms = getattr(wizard_enums.PupilArmsCount, "Arms_6")
 
-            wizard.IsGaussianQuadrature = bool(use_gaussian_quadrature)
+            wizard.UseGaussianQuadrature = bool(use_gaussian_quadrature)
 
             # Glass boundary values
-            wizard.IsGlassBoundaryValues = bool(use_glass_boundary_values)
+            wizard.UseGlassBoundaryValues = bool(use_glass_boundary_values)
             if use_glass_boundary_values:
                 wizard.GlassMin = float(glass_min)
                 wizard.GlassMax = float(glass_max)
                 _set_wizard_prop("GlassEdgeThickness", float(glass_edge_thickness))
 
             # Air boundary values
-            wizard.IsAirBoundaryValues = bool(use_air_boundary_values)
+            wizard.UseAirBoundaryValues = bool(use_air_boundary_values)
             if use_air_boundary_values:
                 wizard.AirMin = float(air_min)
                 wizard.AirMax = float(air_max)
@@ -339,10 +339,10 @@ class OptimizationMixin:
             _set_wizard_prop("SpatialFrequency", float(spatial_frequency))
             _set_wizard_prop("XSWeight", float(xs_weight))
             _set_wizard_prop("YTWeight", float(yt_weight))
-            _set_wizard_prop("IsMaxDistortion", bool(use_maximum_distortion))
+            _set_wizard_prop("UseMaximumDistortion", bool(use_maximum_distortion))
             if use_maximum_distortion:
                 _set_wizard_prop("MaxDistortionPct", float(max_distortion_pct))
-            _set_wizard_prop("IsIgnoreLateralColor", bool(ignore_lateral_color))
+            _set_wizard_prop("IgnoreLateralColor", bool(ignore_lateral_color))
 
             # Pupil Integration
             _set_wizard_prop("Obscuration", float(obscuration))
