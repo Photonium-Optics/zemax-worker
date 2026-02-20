@@ -64,7 +64,7 @@ class ScaleLensResponse(BaseModel):
 
 class QuickFocusRequest(SystemRequest):
     """Request for native QuickFocus tool."""
-    criterion: str = Field(default="SpotSizeRadial", description="Focus criterion: SpotSizeRadial, RMSSpotSizeRadial, SpotSizeX, SpotSizeY")
+    criterion: str = Field(default="SpotSizeRadial", description="Focus criterion: SpotSizeRadial, SpotSizeXOnly, SpotSizeYOnly, RMSWavefront")
     use_centroid: bool = Field(default=True, description="Use centroid reference (True) or chief ray (False)")
 
 
