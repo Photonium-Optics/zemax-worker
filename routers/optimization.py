@@ -40,7 +40,7 @@ async def run_optimization(
             algorithm=result.get("algorithm"),
             merit_before=result.get("merit_before"),
             merit_after=result.get("merit_after"),
-            cycles_completed=result.get("cycles_completed"),
+            cycles_requested=result.get("cycles_requested"),
             operand_results=result.get("operand_results"),
             variable_states=variable_states,
             best_solutions=result.get("best_solutions"),

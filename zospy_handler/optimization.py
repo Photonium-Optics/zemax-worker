@@ -214,10 +214,13 @@ class OptimizationMixin:
         rings: int = 3,
         arms: int = 6,
         use_gaussian_quadrature: bool = False,
-        use_glass_boundary_values: bool = False,
+        use_rectangular_array: bool = False,
+        grid_size_nxn: int = 32,
+        use_glass_boundary_values: bool = True,
         glass_min: float = 1.0,
         glass_max: float = 50.0,
-        use_air_boundary_values: bool = False,
+        glass_edge_thickness: float = 0.0,
+        use_air_boundary_values: bool = True,
         air_min: float = 0.5,
         air_max: float = 1000.0,
         air_edge_thickness: float = 0.0,
@@ -229,7 +232,6 @@ class OptimizationMixin:
         max_distortion_pct: float = 1.0,
         ignore_lateral_color: bool = False,
         obscuration: float = 0.0,
-        glass_edge_thickness: float = 0.0,
         optimization_goal: str = "nominal",
         manufacturing_yield_weight: float = 1.0,
         start_at: int = 1,
@@ -244,8 +246,8 @@ class OptimizationMixin:
         """
         Apply the SEQ Optimization Wizard to auto-generate merit function operands.
 
-        Uses OpticStudio's SEQOptimizationWizard2 to populate the MFE based on
-        image quality criteria (Spot, Wavefront, or Contrast).
+        Uses OpticStudio's ISEQOptimizationWizard2 to populate the MFE based on
+        image quality criteria (Spot, Wavefront, Contrast, or Angular).
 
         Returns:
             Dict with success, total_merit, generated_rows, num_rows_generated
@@ -288,12 +290,12 @@ class OptimizationMixin:
                     "Check ZosPy version compatibility."
                 )
 
-            # Set criterion (wizard.Criterion = ZOSAPI.Wizards.CriterionTypes.Spot)
+            # Criterion — ZOSAPI.Wizards.CriterionTypes: Wavefront=0, Contrast=1, Spot=2, Angular=3
             if not hasattr(wizard_enums.CriterionTypes, criterion):
                 return _wizard_error(f"Unknown criterion type: {criterion}")
             wizard.Criterion = getattr(wizard_enums.CriterionTypes, criterion)
 
-            # Set reference (wizard.Reference = ZOSAPI.Wizards.ReferenceTypes.Centroid)
+            # Reference — ZOSAPI.Wizards.ReferenceTypes: Centroid=0, ChiefRay=1, Unreferenced=2
             if not hasattr(wizard_enums.ReferenceTypes, reference):
                 return _wizard_error(f"Unknown reference type: {reference}")
             wizard.Reference = getattr(wizard_enums.ReferenceTypes, reference)
@@ -301,7 +303,7 @@ class OptimizationMixin:
             wizard.OverallWeight = float(overall_weight)
             wizard.Rings = int(rings)
 
-            # Map arms count to ZOSAPI enum
+            # Arms — ZOSAPI.Wizards.PupilArmsCount: Arms_6=0, Arms_8=1, Arms_10=2, Arms_12=3
             arms_enum_name = f"Arms_{arms}"
             if hasattr(wizard_enums.PupilArmsCount, arms_enum_name):
                 wizard.Arms = getattr(wizard_enums.PupilArmsCount, arms_enum_name)
@@ -309,7 +311,11 @@ class OptimizationMixin:
                 logger.warning(f"Unknown arms count {arms}, using Arms_6")
                 wizard.Arms = getattr(wizard_enums.PupilArmsCount, "Arms_6")
 
+            # Pupil sampling mode
             wizard.UseGaussianQuadrature = bool(use_gaussian_quadrature)
+            _set_wizard_prop("UseRectangularArray", bool(use_rectangular_array))
+            if use_rectangular_array:
+                _set_wizard_prop("GridSizeNxN", int(grid_size_nxn))
 
             # Glass boundary values
             wizard.UseGlassBoundaryValues = bool(use_glass_boundary_values)
@@ -325,7 +331,7 @@ class OptimizationMixin:
                 wizard.AirMax = float(air_max)
                 wizard.AirEdgeThickness = float(air_edge_thickness)
 
-            # Type (RMS/PTV) — wizard.Type = ZOSAPI.Wizards.OptimizationTypes.RMS
+            # Type — ZOSAPI.Wizards.OptimizationTypes: RMS=0, PTV=1
             if hasattr(wizard_enums, "OptimizationTypes"):
                 opt_type = getattr(wizard_enums.OptimizationTypes, type, None)
                 if opt_type is not None:
@@ -347,11 +353,23 @@ class OptimizationMixin:
             # Pupil Integration
             _set_wizard_prop("Obscuration", float(obscuration))
 
-            # Optimization Goal
-            _set_wizard_prop("OptimizeForBestNominalPerformance", optimization_goal == "nominal")
-            _set_wizard_prop("OptimizeForManufacturingYield", optimization_goal == "manufacturing_yield")
+            # Optimization Goal — check availability before enabling manufacturing yield
             if optimization_goal == "manufacturing_yield":
-                _set_wizard_prop("ManufacturingYieldWeight", float(manufacturing_yield_weight))
+                is_available = getattr(wizard, "IsHighManufacturingYieldAvailable", None)
+                if is_available is False:
+                    logger.warning(
+                        "Manufacturing yield optimization not available in this license; "
+                        "falling back to nominal"
+                    )
+                    _set_wizard_prop("OptimizeForBestNominalPerformance", True)
+                    _set_wizard_prop("OptimizeForManufacturingYield", False)
+                else:
+                    _set_wizard_prop("OptimizeForBestNominalPerformance", False)
+                    _set_wizard_prop("OptimizeForManufacturingYield", True)
+                    _set_wizard_prop("ManufacturingYieldWeight", float(manufacturing_yield_weight))
+            else:
+                _set_wizard_prop("OptimizeForBestNominalPerformance", True)
+                _set_wizard_prop("OptimizeForManufacturingYield", False)
 
             # Bottom bar params
             _set_wizard_prop("StartAt", int(start_at))
@@ -368,7 +386,8 @@ class OptimizationMixin:
             logger.info(
                 f"Applying optimization wizard: criterion={criterion}, type={type}, "
                 f"reference={reference}, rings={rings}, arms={arms}, "
-                f"gaussian_quadrature={use_gaussian_quadrature}, goal={optimization_goal}"
+                f"gaussian_quadrature={use_gaussian_quadrature}, "
+                f"rectangular_array={use_rectangular_array}, goal={optimization_goal}"
             )
             wizard.Apply()
 
@@ -654,20 +673,16 @@ class OptimizationMixin:
     def _resolve_save_count(zp_module, num_to_save: int | None):
         """Map save count to OptimizationSaveCount enum value.
 
-        Picks the closest supported value (5, 10, 20, 50).
+        Picks the closest supported value (10, 20, 30, ..., 100).
         """
         save_enum = zp_module.constants.Tools.Optimization.OptimizationSaveCount
         fallback = "Save_10"
         if num_to_save is None:
             return getattr(save_enum, fallback, None)
-        mapping = {
-            5: "Save_5",
-            10: "Save_10",
-            20: "Save_20",
-            50: "Save_50",
-        }
-        closest = min(mapping.keys(), key=lambda k: abs(k - num_to_save))
-        attr_name = mapping[closest]
+        # API supports Save_10 through Save_100 in steps of 10
+        valid = list(range(10, 101, 10))
+        closest = min(valid, key=lambda k: abs(k - num_to_save))
+        attr_name = f"Save_{closest}"
         return OptimizationMixin._resolve_enum(save_enum, attr_name, fallback, "SaveCount")
 
     @staticmethod
@@ -679,22 +694,29 @@ class OptimizationMixin:
             logger.debug(f"Could not read systems_evaluated: {e}")
             return None
 
-    def _read_best_solutions(self, opt_tool, mfe) -> list[float]:
-        """Read the best merit value from a global optimizer, with MFE fallback."""
+    def _read_best_solutions(self, opt_tool, mfe, num_to_save: int = 10) -> list[float]:
+        """Read the best N merit values from a global optimizer.
+
+        CurrentMeritFunction(j) is 1-indexed and returns the j-th best solution's merit.
+        Must be called before opt_tool.Close() — solutions are lost after that.
+        """
+        # Round up to the actual enum count we set (multiples of 10)
+        count = max(10, min(((num_to_save + 9) // 10) * 10, 100))
         solutions: list[float] = []
         try:
-            mf_val = _extract_value(opt_tool.CurrentMeritFunction)
-            if mf_val is not None and mf_val > 0:
-                solutions.append(mf_val)
+            for j in range(1, count + 1):
+                mf_val = _extract_value(opt_tool.CurrentMeritFunction(j))
+                if mf_val is not None and mf_val > 0:
+                    solutions.append(mf_val)
         except Exception as e:
-            logger.warning(f"Failed to read CurrentMeritFunction from optimizer: {e}")
+            logger.warning(f"Failed to read CurrentMeritFunction({len(solutions) + 1}): {e}")
         if not solutions:
             try:
                 mf_val = _extract_value(mfe.CalculateMeritFunction())
                 if mf_val is not None:
                     solutions.append(mf_val)
             except Exception as e:
-                logger.warning(f"Failed to read global best solutions: {e}")
+                logger.warning(f"MFE fallback for best solutions also failed: {e}")
         return solutions
 
     # ── Main optimization entry point ───────────────────────────────
@@ -713,14 +735,14 @@ class OptimizationMixin:
 
         Args:
             method: "local" | "global" | "hammer"
-            algorithm: "DLS" | "OrthogonalDescent" | "DLSX" | "PSD"
+            algorithm: "DLS" | "OrthogonalDescent"
             cycles: Cycle count for local optimization (1, 5, 10, 50, or None=auto)
             timeout_seconds: Time limit for global/hammer (they run indefinitely)
             num_to_save: Number of best solutions to retain (global only)
             operand_rows: Explicit MFE operand rows
 
         Returns:
-            Dict with merit_before, merit_after, cycles_completed,
+            Dict with merit_before, merit_after, cycles_requested,
             operand_results, variable_states, and (for global) best_solutions
         """
         zp = self._zp
@@ -774,7 +796,7 @@ class OptimizationMixin:
                     opt_tool.WaitForCompletion()
                 finally:
                     if method == "global":
-                        best_solutions = self._read_best_solutions(opt_tool, mfe)
+                        best_solutions = self._read_best_solutions(opt_tool, mfe, num_to_save or 10)
                     systems_evaluated = self._read_systems_evaluated(opt_tool)
                     opt_tool.Close()
 
@@ -829,7 +851,7 @@ class OptimizationMixin:
             "algorithm": algorithm,
             "merit_before": merit_before,
             "merit_after": merit_after,
-            "cycles_completed": cycles if method == "local" else None,
+            "cycles_requested": cycles if method == "local" else None,
             "operand_results": operand_results,
             "variable_states": variable_states,
             "modified_zmx_content": modified_zmx_content,

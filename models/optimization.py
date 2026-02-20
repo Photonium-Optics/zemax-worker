@@ -9,10 +9,10 @@ class RunOptimizationRequest(BaseModel):
     """Request to run OpticStudio optimization."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
     method: Literal["local", "global", "hammer"] = Field(default="local", description="Optimization method: local (gradient descent), global (full search), hammer (perturb+refine)")
-    algorithm: Literal["DLS", "OrthogonalDescent", "DLSX", "PSD"] = Field(default="DLS", description="Optimization algorithm (Hammer is a method, not an algorithm)")
-    cycles: Optional[int] = Field(default=5, ge=1, le=50, description="Cycles for local optimization (ignored for global/hammer)")
+    algorithm: Literal["DLS", "OrthogonalDescent"] = Field(default="DLS", description="Optimization algorithm: DLS (damped least squares) or OrthogonalDescent")
+    cycles: Optional[Literal[1, 5, 10, 50]] = Field(default=5, description="Cycles for local optimization: 1, 5, 10, or 50. Omit for automatic.")
     timeout_seconds: Optional[float] = Field(default=60, ge=5, le=600, description="Time limit in seconds for global/hammer optimization")
-    num_to_save: Optional[int] = Field(default=10, ge=1, le=50, description="Number of best solutions to retain (global only)")
+    num_to_save: Optional[int] = Field(default=10, ge=10, le=100, description="Number of best solutions to retain (global only, rounds to nearest 10)")
     operand_rows: Optional[list[MeritFunctionOperandRow]] = Field(default=None, description="Explicit MFE operand rows to populate the merit function")
 
 
@@ -31,7 +31,7 @@ class RunOptimizationResponse(BaseModel):
     algorithm: Optional[str] = Field(default=None, description="Optimization algorithm used")
     merit_before: Optional[float] = Field(default=None, description="Merit function value before optimization")
     merit_after: Optional[float] = Field(default=None, description="Merit function value after optimization")
-    cycles_completed: Optional[int] = Field(default=None, description="Number of optimization cycles completed (local only)")
+    cycles_requested: Optional[int] = Field(default=None, description="Number of optimization cycles requested (local only; None = Automatic)")
     operand_results: Optional[list[dict[str, Any]]] = Field(default=None, description="Per-operand results after optimization")
     variable_states: Optional[list[VariableState]] = Field(default=None, description="Variable parameter states after optimization")
     best_solutions: Optional[list[float]] = Field(default=None, description="Best merit function values from global optimization")
