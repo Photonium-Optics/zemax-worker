@@ -21,6 +21,27 @@ _STREHL_RE = re.compile(
 )
 
 
+def _cutoff_frequency(wavelength_um: float, fno: Optional[float]) -> Optional[float]:
+    """Calculate diffraction cutoff frequency: fc = 1 / (wavelength_mm * f/#)."""
+    if not fno or fno <= 0:
+        return None
+    wavelength_mm = wavelength_um / 1000.0
+    return 1.0 / (wavelength_mm * fno)
+
+
+def _diffraction_limit_curve(freq_arr: np.ndarray, cutoff: Optional[float]) -> list[float]:
+    """Compute the ideal diffraction-limited MTF curve for circular aperture."""
+    if not cutoff or cutoff <= 0:
+        return []
+    fn = np.clip(freq_arr / cutoff, 0.0, 1.0)
+    dl = np.where(
+        fn >= 1.0,
+        0.0,
+        (2.0 / np.pi) * (np.arccos(fn) - fn * np.sqrt(1.0 - fn * fn)),
+    )
+    return dl.tolist()
+
+
 def _parse_strehl_from_header(header_lines) -> Optional[float]:
     """Parse Strehl ratio from analysis header lines using regex.
 
@@ -716,12 +737,11 @@ class PerformanceMixin:
             if fno is None or fno <= 0:
                 logger.warning(f"MTF: Could not determine F/# (got {fno}), diffraction limit and cutoff will be omitted")
 
-            # Calculate cutoff frequency: fc = 1 / (wavelength_mm * fno)
-            wavelength_mm = wavelength_um / 1000.0
-            cutoff_frequency = (1.0 / (wavelength_mm * fno)) if fno and fno > 0 else None
+            cutoff_frequency = _cutoff_frequency(wavelength_um, fno)
 
             all_fields_data = []
             frequency = None
+            diffraction_limit_from_api: list[float] = []
 
             for fi in field_indices:
                 field = fields.GetField(fi)
@@ -751,6 +771,9 @@ class PerformanceMixin:
                             settings.MaximumFrequency = maximum_frequency
                         except Exception:
                             pass
+                    # Ask ZOS-API to include diffraction limit as a data series
+                    if hasattr(settings, 'ShowDiffractionLimit'):
+                        settings.ShowDiffractionLimit = True
 
                     mtf_start = time.perf_counter()
                     try:
@@ -779,7 +802,12 @@ class PerformanceMixin:
                                 desc_lower = desc.lower()
 
                                 if "diffrac" in desc_lower or "limit" in desc_lower:
-                                    logger.debug(f"MTF field {fi} series {si}: skipping (diffraction limit)")
+                                    dl_x, dl_y, _ = self._extract_mtf_series(series)
+                                    if dl_y and not diffraction_limit_from_api:
+                                        diffraction_limit_from_api = dl_y
+                                        if not freq_data:
+                                            freq_data = dl_x
+                                        logger.debug(f"MTF field {fi}: extracted diffraction limit from API ({len(dl_y)} pts)")
                                     continue
 
                                 series_x, series_tang, series_sag = self._extract_mtf_series(series)
@@ -854,17 +882,9 @@ class PerformanceMixin:
                 grid_size = int(sampling.split('x')[0]) if 'x' in sampling else 64
                 frequency = list(np.linspace(0, max_freq, grid_size))
 
-            # Compute diffraction limit if cutoff frequency is available
+            # Use diffraction limit from API if available, else compute manually
             freq_arr = np.array(frequency)
-            diffraction_limit: list[float] = []
-            if cutoff_frequency and cutoff_frequency > 0:
-                fn = np.clip(freq_arr / cutoff_frequency, 0.0, 1.0)
-                dl = np.where(
-                    fn >= 1.0,
-                    0.0,
-                    (2.0 / np.pi) * (np.arccos(fn) - fn * np.sqrt(1.0 - fn * fn)),
-                )
-                diffraction_limit = dl.tolist()
+            diffraction_limit = diffraction_limit_from_api or _diffraction_limit_curve(freq_arr, cutoff_frequency)
 
             result = {
                 "success": True,
@@ -937,12 +957,11 @@ class PerformanceMixin:
             if fno is None or fno <= 0:
                 logger.warning(f"Huygens MTF: Could not determine F/# (got {fno}), diffraction limit and cutoff will be omitted")
 
-            # Calculate cutoff frequency: fc = 1 / (wavelength_mm * fno)
-            wavelength_mm = wavelength_um / 1000.0
-            cutoff_frequency = (1.0 / (wavelength_mm * fno)) if fno and fno > 0 else None
+            cutoff_frequency = _cutoff_frequency(wavelength_um, fno)
 
             all_fields_data = []
             frequency = None
+            diffraction_limit_from_api: list[float] = []
 
             for fi in field_indices:
                 field = fields.GetField(fi)
@@ -973,6 +992,8 @@ class PerformanceMixin:
                             settings.MaximumFrequency = maximum_frequency
                         except Exception:
                             pass
+                    if hasattr(settings, 'ShowDiffractionLimit'):
+                        settings.ShowDiffractionLimit = True
 
                     mtf_start = time.perf_counter()
                     try:
@@ -1002,9 +1023,14 @@ class PerformanceMixin:
                                 n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
                                 logger.debug(f"Huygens MTF field {fi} series {si}: desc='{desc}', points={n_points}")
 
-                                # Skip diffraction limit series before extracting points
+                                # Extract diffraction limit from API series
                                 if "diffrac" in desc_lower or "limit" in desc_lower:
-                                    logger.debug(f"Huygens MTF field {fi} series {si}: skipping (diffraction limit)")
+                                    dl_x, dl_y, _ = self._extract_mtf_series(series)
+                                    if dl_y and not diffraction_limit_from_api:
+                                        diffraction_limit_from_api = dl_y
+                                        if not freq_data:
+                                            freq_data = dl_x
+                                        logger.debug(f"Huygens MTF field {fi}: extracted diffraction limit from API ({len(dl_y)} pts)")
                                     continue
 
                                 series_x = []
@@ -1076,17 +1102,9 @@ class PerformanceMixin:
                 grid_size = int(sampling.split('x')[0]) if 'x' in sampling else 64
                 frequency = list(np.linspace(0, max_freq, grid_size))
 
-            # Compute diffraction limit if cutoff frequency is available
+            # Use diffraction limit from API if available, else compute manually
             freq_arr = np.array(frequency)
-            diffraction_limit: list[float] = []
-            if cutoff_frequency and cutoff_frequency > 0:
-                fn = np.clip(freq_arr / cutoff_frequency, 0.0, 1.0)
-                dl = np.where(
-                    fn >= 1.0,
-                    0.0,
-                    (2.0 / np.pi) * (np.arccos(fn) - fn * np.sqrt(1.0 - fn * fn)),
-                )
-                diffraction_limit = dl.tolist()
+            diffraction_limit = diffraction_limit_from_api or _diffraction_limit_curve(freq_arr, cutoff_frequency)
 
             result = {
                 "success": True,
