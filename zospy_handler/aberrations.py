@@ -7,7 +7,12 @@ import os
 import re
 import tempfile
 import time
-from typing import Any
+from __future__ import annotations
+
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 from config import SEIDEL_TEMP_FILENAME
 from zospy_handler._base import _extract_value, _log_raw_output, _parse_zernike_term_number
@@ -626,7 +631,7 @@ class AberrationsMixin:
         wavelength_index: int,
         field_density: int,
         sampling: str = "64x64",
-    ) -> "pd.DataFrame | None":
+    ) -> pd.DataFrame | None:
         """
         Run ZernikeCoefficientsVsField via the raw new_analysis API.
 
