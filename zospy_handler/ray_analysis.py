@@ -92,7 +92,7 @@ class RayAnalysisMixin:
             wl = wavelengths.GetWavelength(wi)
             wavelength_info.append({
                 "index": wi - 1,  # 0-based for response
-                "wavelength_um": _extract_value(wl.Value),
+                "wavelength_um": _extract_value(wl.Wavelength, 0.5876),
             })
 
         # Calculate max field extent for Hx/Hy normalization (must use ALL fields)
@@ -213,6 +213,12 @@ class RayAnalysisMixin:
         except Exception as e:
             logger.error(
                 f"BatchRayTrace FAILED: {type(e).__name__}: {e}", exc_info=True
+            )
+            # Discard partial results — they may be incomplete/misleading
+            raw_rays = []
+            return self._ray_analysis_error_result(
+                paraxial, num_surfaces, num_fields, num_wavelengths,
+                wavelength_info, surface_semi_diameters,
             )
         finally:
             if batch_trace is not None:
