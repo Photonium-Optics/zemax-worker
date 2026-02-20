@@ -442,6 +442,22 @@ class ZosPyHandlerBase:
         # Get system info after loading
         num_surfaces = self.oss.LDE.NumberOfSurfaces - 1  # Exclude object surface
 
+        # Log which wavelength OpticStudio considers primary after loading
+        try:
+            wls = self.oss.SystemData.Wavelengths
+            n_wl = _extract_value(wls.NumberOfWavelengths, 0)
+            primary_idx = None
+            for i in range(1, n_wl + 1):
+                wl = wls.GetWavelength(i)
+                if _extract_value(wl.IsPrimary, False):
+                    primary_idx = i
+                    logger.info(f"load_zmx_file: OpticStudio primary wavelength after load = #{i} ({_extract_value(wl.Wavelength, 0):.6f} µm) out of {n_wl} wavelengths")
+                    break
+            if primary_idx is None:
+                logger.warning(f"load_zmx_file: No primary wavelength found among {n_wl} wavelengths")
+        except Exception as e:
+            logger.debug(f"load_zmx_file: Could not read primary wavelength: {e}")
+
         return {
             "num_surfaces": num_surfaces,
             "efl": self._get_efl(),
@@ -488,12 +504,36 @@ class ZosPyHandlerBase:
         Used after any operation that modifies the LDE (optimization, scale, quick-focus)
         so the caller can round-trip back to canonical LLM JSON via zmxToLlm.
         """
+        # Log which wavelength OpticStudio considers primary before saving
+        try:
+            wls = self.oss.SystemData.Wavelengths
+            n_wl = _extract_value(wls.NumberOfWavelengths, 0)
+            for i in range(1, n_wl + 1):
+                wl = wls.GetWavelength(i)
+                if _extract_value(wl.IsPrimary, False):
+                    logger.info(f"_save_modified_system: OpticStudio primary wavelength = #{i} ({_extract_value(wl.Wavelength, 0):.6f} µm)")
+                    break
+        except Exception as e:
+            logger.debug(f"_save_modified_system: Could not read primary wavelength: {e}")
+
         with tempfile.NamedTemporaryFile(suffix='.zmx', delete=False) as f:
             temp_path = f.name
         try:
             self.oss.save_as(temp_path)
             with open(temp_path, 'rb') as f:
                 zmx_bytes = f.read()
+
+            # Diagnostic: check what PWAV OpticStudio wrote
+            try:
+                zmx_text = zmx_bytes.decode('utf-16-le', errors='replace')
+                pwav_match = re.search(r'^PWAV\s+(\d+)', zmx_text, re.MULTILINE)
+                if pwav_match:
+                    logger.info(f"_save_modified_system: ZMX contains PWAV {pwav_match.group(1)}")
+                else:
+                    logger.warning("_save_modified_system: ZMX does NOT contain PWAV keyword — converter will default to 1")
+            except Exception as e:
+                logger.debug(f"_save_modified_system: Could not inspect ZMX for PWAV: {e}")
+
             return base64.b64encode(zmx_bytes).decode('ascii')
         finally:
             if os.path.exists(temp_path):

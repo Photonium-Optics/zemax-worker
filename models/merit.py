@@ -49,7 +49,7 @@ class OptimizationWizardRequest(BaseModel):
     # Pupil sampling mode
     use_gaussian_quadrature: bool = Field(default=False, description="Use Gaussian quadrature sampling")
     use_rectangular_array: bool = Field(default=False, description="Use rectangular NxN grid instead of ring/arm sampling")
-    grid_size_nxn: int = Field(default=32, ge=1, le=128, description="Grid size NxN when use_rectangular_array is true")
+    grid_size_nxn: int = Field(default=32, ge=4, le=204, description="Grid size NxN when use_rectangular_array is true (must be even, 4-204)")
     # Glass boundary values
     use_glass_boundary_values: bool = Field(default=True, description="Apply glass thickness constraints (MNEG/MXEG)")
     glass_min: float = Field(default=1.0, ge=0, description="Minimum glass center thickness (mm)")

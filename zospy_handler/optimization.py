@@ -263,6 +263,8 @@ class OptimizationMixin:
         mfe = self.oss.MFE
 
         # Cross-field validations (single-field constraints enforced by Pydantic)
+        if use_gaussian_quadrature and use_rectangular_array:
+            return _wizard_error("use_gaussian_quadrature and use_rectangular_array are mutually exclusive")
         if use_glass_boundary_values and glass_min >= glass_max:
             return _wizard_error(f"glass_min ({glass_min}) must be < glass_max ({glass_max})")
         if use_air_boundary_values and air_min >= air_max:
@@ -329,7 +331,7 @@ class OptimizationMixin:
             if use_air_boundary_values:
                 wizard.AirMin = float(air_min)
                 wizard.AirMax = float(air_max)
-                wizard.AirEdgeThickness = float(air_edge_thickness)
+                _set_wizard_prop("AirEdgeThickness", float(air_edge_thickness))
 
             # Type — ZOSAPI.Wizards.OptimizationTypes: RMS=0, PTV=1
             if hasattr(wizard_enums, "OptimizationTypes"):
@@ -353,23 +355,27 @@ class OptimizationMixin:
             # Pupil Integration
             _set_wizard_prop("Obscuration", float(obscuration))
 
-            # Optimization Goal — check availability before enabling manufacturing yield
+            # Optimization Goal — manufacturing yield requires license check
+            use_manufacturing = False
             if optimization_goal == "manufacturing_yield":
                 is_available = getattr(wizard, "IsHighManufacturingYieldAvailable", None)
-                if is_available is False:
+                if is_available is None:
+                    logger.warning(
+                        "IsHighManufacturingYieldAvailable not found; "
+                        "OpticStudio version may not support it. Falling back to nominal."
+                    )
+                elif not _extract_value(is_available, False):
                     logger.warning(
                         "Manufacturing yield optimization not available in this license; "
                         "falling back to nominal"
                     )
-                    _set_wizard_prop("OptimizeForBestNominalPerformance", True)
-                    _set_wizard_prop("OptimizeForManufacturingYield", False)
                 else:
-                    _set_wizard_prop("OptimizeForBestNominalPerformance", False)
-                    _set_wizard_prop("OptimizeForManufacturingYield", True)
-                    _set_wizard_prop("ManufacturingYieldWeight", float(manufacturing_yield_weight))
-            else:
-                _set_wizard_prop("OptimizeForBestNominalPerformance", True)
-                _set_wizard_prop("OptimizeForManufacturingYield", False)
+                    use_manufacturing = True
+
+            _set_wizard_prop("OptimizeForBestNominalPerformance", not use_manufacturing)
+            _set_wizard_prop("OptimizeForManufacturingYield", use_manufacturing)
+            if use_manufacturing:
+                _set_wizard_prop("ManufacturingYieldWeight", float(manufacturing_yield_weight))
 
             # Bottom bar params
             _set_wizard_prop("StartAt", int(start_at))
@@ -670,20 +676,19 @@ class OptimizationMixin:
         return OptimizationMixin._resolve_enum(cycles_enum, attr_name, fallback, "Cycles")
 
     @staticmethod
-    def _resolve_save_count(zp_module, num_to_save: int | None):
-        """Map save count to OptimizationSaveCount enum value.
-
-        Picks the closest supported value (10, 20, 30, ..., 100).
-        """
-        save_enum = zp_module.constants.Tools.Optimization.OptimizationSaveCount
-        fallback = "Save_10"
+    def _round_to_save_count(num_to_save: int | None) -> int:
+        """Round to nearest valid save count (10, 20, ..., 100)."""
         if num_to_save is None:
-            return getattr(save_enum, fallback, None)
-        # API supports Save_10 through Save_100 in steps of 10
-        valid = list(range(10, 101, 10))
-        closest = min(valid, key=lambda k: abs(k - num_to_save))
-        attr_name = f"Save_{closest}"
-        return OptimizationMixin._resolve_enum(save_enum, attr_name, fallback, "SaveCount")
+            return 10
+        return max(10, min(round(num_to_save / 10) * 10, 100))
+
+    @staticmethod
+    def _resolve_save_count(zp_module, num_to_save: int | None):
+        """Map save count to OptimizationSaveCount enum value."""
+        save_enum = zp_module.constants.Tools.Optimization.OptimizationSaveCount
+        rounded = OptimizationMixin._round_to_save_count(num_to_save)
+        attr_name = f"Save_{rounded}"
+        return OptimizationMixin._resolve_enum(save_enum, attr_name, "Save_10", "SaveCount")
 
     @staticmethod
     def _read_systems_evaluated(opt_tool) -> int | None:
@@ -698,18 +703,19 @@ class OptimizationMixin:
         """Read the best N merit values from a global optimizer.
 
         CurrentMeritFunction(j) is 1-indexed and returns the j-th best solution's merit.
-        Must be called before opt_tool.Close() — solutions are lost after that.
+        Must be called before opt_tool.Close() -- solutions are lost after that.
         """
-        # Round up to the actual enum count we set (multiples of 10)
-        count = max(10, min(((num_to_save + 9) // 10) * 10, 100))
+        count = self._round_to_save_count(num_to_save)
         solutions: list[float] = []
-        try:
-            for j in range(1, count + 1):
+        for j in range(1, count + 1):
+            try:
                 mf_val = _extract_value(opt_tool.CurrentMeritFunction(j))
-                if mf_val is not None and mf_val > 0:
-                    solutions.append(mf_val)
-        except Exception as e:
-            logger.warning(f"Failed to read CurrentMeritFunction({len(solutions) + 1}): {e}")
+            except Exception as e:
+                logger.debug(f"CurrentMeritFunction({j}) unavailable, stopping at {len(solutions)} solutions")
+                break
+            if mf_val is None or mf_val <= 0:
+                break
+            solutions.append(mf_val)
         if not solutions:
             try:
                 mf_val = _extract_value(mfe.CalculateMeritFunction())

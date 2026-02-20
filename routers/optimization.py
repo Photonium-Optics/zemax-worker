@@ -45,6 +45,7 @@ async def run_optimization(
             variable_states=variable_states,
             best_solutions=result.get("best_solutions"),
             systems_evaluated=result.get("systems_evaluated"),
+            modified_zmx_content=result.get("modified_zmx_content"),
         )
 
     def _call_handler():
