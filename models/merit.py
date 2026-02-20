@@ -1,5 +1,5 @@
 from typing import Any, Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class MeritFunctionOperandRow(BaseModel):
@@ -50,6 +50,14 @@ class OptimizationWizardRequest(BaseModel):
     use_gaussian_quadrature: bool = Field(default=False, description="Use Gaussian quadrature sampling")
     use_rectangular_array: bool = Field(default=False, description="Use rectangular NxN grid instead of ring/arm sampling")
     grid_size_nxn: int = Field(default=32, ge=4, le=204, description="Grid size NxN when use_rectangular_array is true (must be even, 4-204)")
+
+    @field_validator("grid_size_nxn")
+    @classmethod
+    def grid_size_must_be_even(cls, v: int) -> int:
+        if v % 2 != 0:
+            raise ValueError(f"grid_size_nxn must be even, got {v}")
+        return v
+
     # Glass boundary values
     use_glass_boundary_values: bool = Field(default=True, description="Apply glass thickness constraints (MNEG/MXEG)")
     glass_min: float = Field(default=1.0, ge=0, description="Minimum glass center thickness (mm)")
