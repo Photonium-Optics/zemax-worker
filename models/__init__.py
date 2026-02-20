@@ -2,6 +2,7 @@
 
 from models.base import *
 from models.core import *
+from models.ray_analysis import *
 from models.aberrations import *
 from models.performance import *
 from models.field_analysis import *

@@ -1,13 +1,12 @@
-"""Ray-tracing mixin – single-ray diagnostic trace."""
+"""Ray-tracing mixin – batch ray diagnostic trace."""
 
 import logging
 import time
 from typing import Any
 
-import numpy as np
-
 from config import RAY_ERROR_CODES
-from zospy_handler._base import _extract_value, _log_raw_output, _safe_int
+from zospy_handler._base import _extract_value, _log_raw_output
+from zospy_handler.pupil import generate_hexapolar_coords, generate_square_grid_coords
 from utils.timing import log_timing
 
 logger = logging.getLogger(__name__)
@@ -30,7 +29,7 @@ class RayTracingMixin:
 
         Args:
             num_rays: Number of rays per field (determines grid density)
-            distribution: Ray distribution type (currently uses square grid)
+            distribution: Ray distribution type ('hexapolar' or 'square')
 
         Returns:
             Dict with:
@@ -40,13 +39,12 @@ class RayTracingMixin:
                 - raw_rays: List of per-ray results with field, pupil coords, success/failure info
                 - surface_semi_diameters: List of semi-diameters from LDE
         """
-        # Note: 'distribution' parameter is accepted for API compatibility but only square grid
-        # is currently implemented. Log warning if hexapolar is requested.
-        if distribution not in ("square", "grid"):
-            logger.warning(
-                f"Distribution '{distribution}' requested but only square grid is implemented. "
-                "Using square grid instead."
-            )
+        # Generate pupil coordinates based on distribution
+        if distribution in ("square", "grid"):
+            pupil_coords = generate_square_grid_coords(num_rays)
+        else:
+            pupil_coords = generate_hexapolar_coords(num_rays)
+        logger.info(f"Ray trace: distribution={distribution}, requested={num_rays}, actual={len(pupil_coords)} rays/field")
 
         # Get paraxial data
         paraxial = self.get_paraxial_data()
@@ -64,90 +62,99 @@ class RayTracingMixin:
             surface = lde.GetSurfaceAt(i)
             surface_semi_diameters.append(_extract_value(surface.SemiDiameter))
 
-        # Calculate grid size from num_rays
-        grid_size = int(np.sqrt(num_rays))
-
-        # Collect raw ray results
+        # Collect raw ray results using batch ray trace (single COM roundtrip)
         raw_rays = []
 
+        # Calculate max field extent for Hx/Hy normalization (must use ALL fields)
+        max_field_x = 0.0
+        max_field_y = 0.0
+        field_coords: dict[int, tuple[float, float]] = {}
+        for fi in range(1, num_fields + 1):
+            field = fields.GetField(fi)
+            fx = _extract_value(field.X)
+            fy = _extract_value(field.Y)
+            field_coords[fi] = (fx, fy)
+            max_field_x = max(max_field_x, abs(fx))
+            max_field_y = max(max_field_y, abs(fy))
+
         ray_trace_start = time.perf_counter()
+        batch_trace = None
         try:
+            batch_trace = self.oss.Tools.OpenBatchRayTrace()
+            if batch_trace is None:
+                logger.error("Could not open BatchRayTrace tool")
+                return {"paraxial": {}, "num_surfaces": num_surfaces, "num_fields": num_fields, "raw_rays": [], "surface_semi_diameters": surface_semi_diameters}
+
+            total_rays = num_fields * len(pupil_coords)
+            norm_unpol = batch_trace.CreateNormUnpol(
+                total_rays,
+                self._zp.constants.Tools.RayTrace.RaysType.Real,
+                self.oss.LDE.NumberOfSurfaces,
+            )
+            if norm_unpol is None:
+                logger.error("Could not create NormUnpol ray trace")
+                return {"paraxial": {}, "num_surfaces": num_surfaces, "num_fields": num_fields, "raw_rays": [], "surface_semi_diameters": surface_semi_diameters}
+
+            opd_none = self._zp.constants.Tools.RayTrace.OPDMode.None_
+
+            # Add all rays in one batch — order must match read loop below
+            rays_added = 0
             for fi in range(1, num_fields + 1):
-                field = fields.GetField(fi)
-                # Use _extract_value for UnitField objects
-                field_x = _extract_value(field.X)
-                field_y = _extract_value(field.Y)
+                fx, fy = field_coords[fi]
+                hx = float(fx / max_field_x) if max_field_x > 1e-10 else 0.0
+                hy = float(fy / max_field_y) if max_field_y > 1e-10 else 0.0
+                for px, py in pupil_coords:
+                    norm_unpol.AddRay(1, hx, hy, float(px), float(py), opd_none)
+                    rays_added += 1
 
-                # Trace a grid of rays using ZosPy's single ray trace
-                for px in np.linspace(-1, 1, grid_size):
-                    for py in np.linspace(-1, 1, grid_size):
-                        if px**2 + py**2 > 1:
-                            continue  # Skip rays outside pupil
+            logger.debug(f"BatchRayTrace: added {rays_added} rays ({num_fields} fields x {len(pupil_coords)} pupil)")
 
-                        ray_result = {
-                            "field_index": fi - 1,  # 0-indexed
-                            "field_x": field_x,
-                            "field_y": field_y,
-                            "px": float(px),
-                            "py": float(py),
-                            "reached_image": False,
-                            "failed_surface": None,
-                            "failure_mode": None,
-                        }
+            batch_trace.RunAndWaitForCompletion()
+            norm_unpol.StartReadingResults()
 
-                        try:
-                            # ZosPy SingleRayTrace: px/py are normalized pupil coordinates (-1 to 1)
-                            # hx/hy are normalized field coordinates (set to 0 when using field index)
-                            # CRITICAL: px/py must be Python float(), not numpy.float64, for COM interop
-                            ray_trace = self._zp.analyses.raysandspots.SingleRayTrace(
-                                hx=0.0,
-                                hy=0.0,
-                                px=float(px),
-                                py=float(py),
-                                wavelength=1,
-                                field=fi,
-                            )
-                            result = ray_trace.run(self.oss)
+            # Read results in same order as AddRay calls
+            total_success = 0
+            total_failed = 0
+            for fi in range(1, num_fields + 1):
+                fx, fy = field_coords[fi]
+                for px, py in pupil_coords:
+                    result = norm_unpol.ReadNextResult()
+                    success, err_code, vignette_code = result[0], result[2], result[3]
 
-                            # Check result - ZosPy returns data in result.data.real_ray_trace_data
-                            if hasattr(result, 'data') and result.data is not None:
-                                ray_data = result.data
-                                # Access real_ray_trace_data if available (DataFrame)
-                                if hasattr(ray_data, 'real_ray_trace_data'):
-                                    df = ray_data.real_ray_trace_data
-                                else:
-                                    df = ray_data  # Fallback for older versions
+                    ray_result = {
+                        "field_index": fi - 1,
+                        "field_x": fx,
+                        "field_y": fy,
+                        "px": float(px),
+                        "py": float(py),
+                        "reached_image": False,
+                        "failed_surface": None,
+                        "failure_mode": None,
+                    }
 
-                                # Check if ray reached image
-                                if hasattr(df, '__len__') and len(df) > 0:
-                                    # Check for error codes - vignetted rays have error_code != 0
-                                    if hasattr(df, 'columns') and 'error_code' in df.columns:
-                                        # Find first surface with error
-                                        error_rows = df[df['error_code'] != 0]
-                                        if len(error_rows) > 0:
-                                            first_error = error_rows.iloc[0]
-                                            ray_result["reached_image"] = False
-                                            # Use _safe_int to handle NaN values from DataFrame
-                                            ray_result["failed_surface"] = _safe_int(first_error.get('surface', 0), 0)
-                                            # Map error code to failure mode string
-                                            error_code = _safe_int(first_error.get('error_code', 0), 0)
-                                            ray_result["failure_mode"] = self._error_code_to_mode(error_code)
-                                        else:
-                                            ray_result["reached_image"] = True
-                                    else:
-                                        # No error column in ZosPy 2.x - assume success if ray data exists
-                                        ray_result["reached_image"] = True
-                                else:
-                                    ray_result["failure_mode"] = "NO_DATA"
-                            else:
-                                ray_result["failure_mode"] = "NO_RESULT"
+                    if success and err_code == 0 and vignette_code == 0:
+                        ray_result["reached_image"] = True
+                        total_success += 1
+                    else:
+                        total_failed += 1
+                        if vignette_code > 0:
+                            ray_result["failed_surface"] = int(vignette_code)
+                            ray_result["failure_mode"] = "VIGNETTE" if err_code == 0 else RAY_ERROR_CODES.get(err_code, f"ERROR_{err_code}")
+                        else:
+                            ray_result["failure_mode"] = RAY_ERROR_CODES.get(err_code, f"ERROR_{err_code}")
 
-                        except Exception as e:
-                            logger.debug(f"Ray trace failed for field {fi}, pupil ({px:.2f}, {py:.2f}): {e}")
-                            ray_result["failure_mode"] = "EXCEPTION"
+                    raw_rays.append(ray_result)
 
-                        raw_rays.append(ray_result)
+            logger.info(f"BatchRayTrace: {total_success} success, {total_failed} failed out of {rays_added}")
+
+        except Exception as e:
+            logger.error(f"BatchRayTrace FAILED: {type(e).__name__}: {e}", exc_info=True)
         finally:
+            if batch_trace is not None:
+                try:
+                    batch_trace.Close()
+                except Exception:
+                    pass
             ray_trace_elapsed_ms = (time.perf_counter() - ray_trace_start) * 1000
             log_timing(logger, "ray_trace_all", ray_trace_elapsed_ms)
 
@@ -166,22 +173,3 @@ class RayTracingMixin:
         _log_raw_output("/ray-trace-diagnostic", result)
         return result
 
-    def _error_code_to_mode(self, error_code: int) -> str:
-        """
-        Map ZosPy/OpticStudio error codes to human-readable failure modes.
-
-        Common error codes (may vary by OpticStudio version):
-            0 = No error (ray traced successfully)
-            1 = Ray missed surface
-            2 = TIR (Total Internal Reflection)
-            3 = Ray reversed
-            4 = Ray vignetted
-            5+ = Other errors
-
-        Args:
-            error_code: Numeric error code from ray trace
-
-        Returns:
-            String describing the failure mode
-        """
-        return RAY_ERROR_CODES.get(error_code, f"ERROR_{error_code}")

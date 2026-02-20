@@ -10,6 +10,7 @@ from zospy_handler.geometry import GeometryMixin
 from zospy_handler.aberrations import AberrationsMixin
 from zospy_handler.performance import PerformanceMixin
 from zospy_handler.ray_tracing import RayTracingMixin
+from zospy_handler.ray_analysis import RayAnalysisMixin
 from zospy_handler.optimization import OptimizationMixin
 from zospy_handler.physical_optics import PhysicalOpticsMixin
 from zospy_handler.polarization import PolarizationMixin
@@ -20,6 +21,7 @@ class ZosPyHandler(
     AberrationsMixin,
     PerformanceMixin,
     RayTracingMixin,
+    RayAnalysisMixin,
     OptimizationMixin,
     PhysicalOpticsMixin,
     PolarizationMixin,

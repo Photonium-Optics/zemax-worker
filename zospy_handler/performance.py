@@ -10,6 +10,7 @@ from typing import Any, Optional
 import numpy as np
 
 from zospy_handler._base import _extract_value, _log_raw_output, _extract_dataframe, GridWithMetadata
+from zospy_handler.pupil import generate_random_coords
 from utils.timing import log_timing
 
 logger = logging.getLogger(__name__)
@@ -376,17 +377,7 @@ class PerformanceMixin:
         # random sampling — not a grid — to avoid grid-like artifacts.
         # ray_density maps to num_rays = (ray_density + 1)^2 per field/wavelength.
         num_rays = (ray_density + 1) ** 2
-        rng = np.random.default_rng(seed=42)  # deterministic for reproducibility
-        pupil_coords: list[tuple[float, float]] = []
-        while len(pupil_coords) < num_rays:
-            batch = max(num_rays - len(pupil_coords), 64)
-            px = rng.uniform(-1, 1, batch)
-            py = rng.uniform(-1, 1, batch)
-            mask = px ** 2 + py ** 2 <= 1.0
-            for p, q in zip(px[mask], py[mask]):
-                if len(pupil_coords) >= num_rays:
-                    break
-                pupil_coords.append((float(p), float(q)))
+        pupil_coords = generate_random_coords(num_rays, seed=42)
         logger.debug(f"[SPOT] Random pupil sampling: {len(pupil_coords)} rays (density={ray_density})")
 
         # Calculate max field extent for normalization (must use ALL fields,

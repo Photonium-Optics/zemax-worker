@@ -1,4 +1,4 @@
-"""Core router – health, cross-section, semi-diameters, ray-trace diagnostic."""
+"""Core router – health, cross-section, semi-diameters, ray-trace diagnostic, ray analysis."""
 
 import asyncio
 
@@ -9,6 +9,7 @@ from models import (
     HealthResponse, CrossSectionRequest, CrossSectionResponse,
     SystemRequest, SemiDiametersResponse,
     RayTraceDiagnosticRequest, RayTraceDiagnosticResponse,
+    RayAnalysisRequest, RayAnalysisResponse,
 )
 from config import WORKER_COUNT
 
@@ -117,5 +118,27 @@ async def ray_trace_diagnostic(
         lambda: main.zospy_handler.ray_trace_diagnostic(
             num_rays=request.num_rays,
             distribution=request.distribution,
+        ),
+    )
+
+
+@router.post("/ray-analysis", response_model=RayAnalysisResponse)
+async def ray_analysis(
+    request: RayAnalysisRequest,
+    _: None = Depends(main.verify_api_key),
+) -> RayAnalysisResponse:
+    """
+    Unified ray analysis: combined spot diagram + diagnostic in one batch trace.
+
+    Returns both image-plane positions (for spot plots) and ray failure data
+    (for diagnostic analysis) from a single IBatchRayTrace call.
+    """
+    return await main._run_endpoint(
+        "/ray-analysis", RayAnalysisResponse, request,
+        lambda: main.zospy_handler.unified_ray_analysis(
+            num_rays=request.num_rays,
+            distribution=request.distribution,
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
         ),
     )
