@@ -77,7 +77,7 @@ RAY_ERROR_CODES = {
 # Aperture types where ApertureValue directly returns the F/#
 # Note: FloatByStopSize is NOT included — its ApertureValue is the stop
 # semi-diameter scaling factor (often 0), not the F/#.
-FNO_APERTURE_TYPES = ["ImageSpaceFNumber", "ParaxialWorkingFNumber"]
+FNO_APERTURE_TYPES = ["ImageSpaceFNum", "ParaxialWorkingFNum"]
 
 # =============================================================================
 # Logging/output formatting

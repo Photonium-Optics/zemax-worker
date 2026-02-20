@@ -237,12 +237,12 @@ class GeometryMixin:
             paraxial["field_type"] = ft_type
             paraxial["field_unit"] = ft_unit
 
-            # Calculate total track from LDE - use _extract_value for UnitField objects
+            # Calculate total track (algebraic sum of thicknesses, not abs)
             lde = self.oss.LDE
             total_track = 0.0
             for i in range(1, lde.NumberOfSurfaces):
                 surface = lde.GetSurfaceAt(i)
-                total_track += abs(_extract_value(surface.Thickness))
+                total_track += _extract_value(surface.Thickness)
             paraxial["total_track"] = total_track
 
             return paraxial

@@ -777,6 +777,7 @@ class OptimizationMixin:
         # Step 3: Run optimization (method-specific)
         best_solutions: list[float] | None = None
         systems_evaluated: int | None = None
+        merit_after: float | None = None
 
         try:
             tools = self.oss.Tools
@@ -801,6 +802,10 @@ class OptimizationMixin:
                     opt_tool.Cancel()
                     opt_tool.WaitForCompletion()
                 finally:
+                    # Check Succeeded/ErrorMessage (available on Hammer, not Global)
+                    if hasattr(opt_tool, 'Succeeded') and not opt_tool.Succeeded:
+                        err_msg = getattr(opt_tool, 'ErrorMessage', 'unknown error')
+                        logger.warning(f"{method} optimization did not succeed: {err_msg}")
                     if method == "global":
                         best_solutions = self._read_best_solutions(opt_tool, mfe, num_to_save or 10)
                     systems_evaluated = self._read_systems_evaluated(opt_tool)
@@ -818,18 +823,27 @@ class OptimizationMixin:
                 try:
                     opt_tool.RunAndWaitForCompletion()
                 finally:
+                    if hasattr(opt_tool, 'Succeeded') and not opt_tool.Succeeded:
+                        err_msg = getattr(opt_tool, 'ErrorMessage', 'unknown error')
+                        logger.warning(f"Local optimization did not succeed: {err_msg}")
+                    # Use CurrentMeritFunction from the tool (avoids redundant MFE call)
+                    try:
+                        merit_after = _extract_value(opt_tool.CurrentMeritFunction)
+                    except Exception:
+                        pass
                     opt_tool.Close()
 
         except Exception as e:
             logger.error(f"Optimization run failed: {e}")
             return {"success": False, "error": f"Optimization failed: {e}"}
 
-        # Step 4: Read final merit
-        try:
-            merit_after = _extract_value(mfe.CalculateMeritFunction())
-        except Exception as e:
-            merit_after = merit_before
-            logger.warning(f"Post-optimization merit calculation failed: {e}")
+        # Step 4: Read final merit (use tool's CurrentMeritFunction if available, else MFE)
+        if merit_after is None:
+            try:
+                merit_after = _extract_value(mfe.CalculateMeritFunction())
+            except Exception as e:
+                merit_after = merit_before
+                logger.warning(f"Post-optimization merit calculation failed: {e}")
 
         # Step 5: Read operand results from MFE
         operand_results = []
@@ -974,7 +988,7 @@ class OptimizationMixin:
         the chosen focus criterion in a single internal call.
 
         Args:
-            criterion: "SpotSizeRadial" or "RMSSpotSizeRadial"
+            criterion: "SpotSizeRadial", "SpotSizeXOnly", "SpotSizeYOnly", or "RMSWavefront"
             use_centroid: Whether to use centroid reference (True) or chief ray
 
         Returns:

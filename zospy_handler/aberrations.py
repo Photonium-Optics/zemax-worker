@@ -262,11 +262,8 @@ class AberrationsMixin:
                     except Exception as e:
                         logger.warning(f"ZernikeStandardCoefficients: Could not set Surface: {e}")
 
-                # ZOS-API uses "OBD" not "OPD" (naming quirk)
                 if hasattr(settings, 'ReferenceOBDToVertex'):
                     settings.ReferenceOBDToVertex = False
-                elif hasattr(settings, 'ReferenceOPDToVertex'):
-                    settings.ReferenceOPDToVertex = False
 
                 zernike_start = time.perf_counter()
                 try:
@@ -649,10 +646,10 @@ class AberrationsMixin:
         )
         try:
             settings = analysis.Settings
-            if hasattr(settings, 'MaximumNumberOfTerms'):
-                settings.MaximumNumberOfTerms = maximum_term
-            elif hasattr(settings, 'MaximumTerm'):
-                settings.MaximumTerm = maximum_term
+            # IAS_ZernikeCoefficientsVsField uses Coefficients (comma-separated string),
+            # not MaximumNumberOfTerms (which only exists on IAS_ZernikeStandardCoefficients)
+            if hasattr(settings, 'Coefficients'):
+                settings.Coefficients = ",".join(str(i) for i in range(1, maximum_term + 1))
             self._configure_analysis_settings(settings, wavelength_index=wavelength_index, sampling=sampling)
             if hasattr(settings, 'FieldDensity'):
                 settings.FieldDensity = field_density
@@ -682,7 +679,7 @@ class AberrationsMixin:
         if results is None:
             return []
 
-        # Try data series extraction (graph-type result)
+        # Try data series extraction via XData.Data/YData.Data (correct IAR_DataSeries API)
         rows: list[dict] = []
         if hasattr(results, 'NumberOfDataSeries'):
             num_series = results.NumberOfDataSeries
@@ -692,16 +689,21 @@ class AberrationsMixin:
                 if series is None:
                     continue
                 desc = str(series.Description) if hasattr(series, 'Description') else f"Z{si+1}"
-                n_pts = getattr(series, 'NumberOfPoints', 0)
-                for pi in range(n_pts):
-                    pt = series.GetDataPoint(pi)
-                    if pt is None:
-                        continue
-                    x = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
-                    y = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
-                    if pi >= len(rows):
-                        rows.append({"field": x})
-                    rows[pi][desc] = y
+                try:
+                    x_raw = series.XData.Data
+                    y_raw = series.YData.Data
+                    n_pts = x_raw.GetLength(0)
+                    n_cols = y_raw.GetLength(0)
+                    n_y_pts = y_raw.GetLength(1)
+                    n_pts = min(n_pts, n_y_pts)
+                    for pi in range(n_pts):
+                        x = float(x_raw[pi])
+                        y = float(y_raw[0, pi])
+                        if pi >= len(rows):
+                            rows.append({"field": x})
+                        rows[pi][desc] = y
+                except Exception as e:
+                    logger.debug(f"ZernikeVsField fallback: series {si} extraction failed: {e}")
 
         # If no data series, try data grids
         if not rows and hasattr(results, 'NumberOfDataGrids'):
@@ -900,11 +902,8 @@ class AberrationsMixin:
                 except Exception as e:
                     logger.warning(f"ZernikeStandardCoefficients: Could not set Surface: {e}")
 
-            # ZOS-API uses "OBD" not "OPD" (naming quirk)
             if hasattr(settings, 'ReferenceOBDToVertex'):
                 settings.ReferenceOBDToVertex = False
-            elif hasattr(settings, 'ReferenceOPDToVertex'):
-                settings.ReferenceOPDToVertex = False
 
             zernike_start = time.perf_counter()
             try:

@@ -5,7 +5,7 @@ import time
 from typing import Any, Optional
 
 from config import RAY_ERROR_CODES
-from zospy_handler._base import _extract_value, _log_raw_output
+from zospy_handler._base import _extract_value, _log_raw_output, _compute_field_normalization, _normalize_field
 from zospy_handler.pupil import (
     generate_hexapolar_coords,
     generate_square_grid_coords,
@@ -95,17 +95,12 @@ class RayAnalysisMixin:
                 "wavelength_um": _extract_value(wl.Wavelength, 0.5876),
             })
 
-        # Calculate max field extent for Hx/Hy normalization (must use ALL fields)
-        max_field_x = 0.0
-        max_field_y = 0.0
+        # Compute field normalization parameters (respects Radial vs Rectangular)
+        is_radial, max_field_x, max_field_y, max_field_r = _compute_field_normalization(fields, num_fields)
         field_coords: dict[int, tuple[float, float]] = {}
         for fi in range(1, num_fields + 1):
             field = fields.GetField(fi)
-            fx = _extract_value(field.X)
-            fy = _extract_value(field.Y)
-            field_coords[fi] = (fx, fy)
-            max_field_x = max(max_field_x, abs(fx))
-            max_field_y = max(max_field_y, abs(fy))
+            field_coords[fi] = (_extract_value(field.X), _extract_value(field.Y))
 
         raw_rays: list[dict[str, Any]] = []
         ray_trace_start = time.perf_counter()
@@ -140,8 +135,7 @@ class RayAnalysisMixin:
             rays_added = 0
             for fi in field_indices:
                 fx, fy = field_coords[fi]
-                hx = float(fx / max_field_x) if max_field_x > 1e-10 else 0.0
-                hy = float(fy / max_field_y) if max_field_y > 1e-10 else 0.0
+                hx, hy = _normalize_field(fx, fy, is_radial, max_field_x, max_field_y, max_field_r)
                 for wi in wl_indices:
                     for px, py in pupil_coords:
                         norm_unpol.AddRay(wi, hx, hy, float(px), float(py), opd_none)

@@ -5,7 +5,7 @@ import time
 from typing import Any
 
 from config import RAY_ERROR_CODES
-from zospy_handler._base import _extract_value, _log_raw_output
+from zospy_handler._base import _extract_value, _log_raw_output, _compute_field_normalization, _normalize_field
 from zospy_handler.pupil import generate_hexapolar_coords, generate_square_grid_coords
 from utils.timing import log_timing
 
@@ -55,6 +55,14 @@ class RayTracingMixin:
         fields = self.oss.SystemData.Fields
         num_fields = fields.NumberOfFields
 
+        # Find primary wavelength index (don't hardcode to 1)
+        wavelengths = self.oss.SystemData.Wavelengths
+        primary_wl = 1
+        for wi in range(1, int(wavelengths.NumberOfWavelengths) + 1):
+            if wavelengths.GetWavelength(wi).IsPrimary:
+                primary_wl = wi
+                break
+
         # Extract surface semi-diameters from LDE
         # Use _extract_value for UnitField objects
         surface_semi_diameters = []
@@ -65,17 +73,12 @@ class RayTracingMixin:
         # Collect raw ray results using batch ray trace (single COM roundtrip)
         raw_rays = []
 
-        # Calculate max field extent for Hx/Hy normalization (must use ALL fields)
-        max_field_x = 0.0
-        max_field_y = 0.0
+        # Compute field normalization parameters (respects Radial vs Rectangular)
+        is_radial, max_field_x, max_field_y, max_field_r = _compute_field_normalization(fields, num_fields)
         field_coords: dict[int, tuple[float, float]] = {}
         for fi in range(1, num_fields + 1):
             field = fields.GetField(fi)
-            fx = _extract_value(field.X)
-            fy = _extract_value(field.Y)
-            field_coords[fi] = (fx, fy)
-            max_field_x = max(max_field_x, abs(fx))
-            max_field_y = max(max_field_y, abs(fy))
+            field_coords[fi] = (_extract_value(field.X), _extract_value(field.Y))
 
         ray_trace_start = time.perf_counter()
         batch_trace = None
@@ -101,10 +104,9 @@ class RayTracingMixin:
             rays_added = 0
             for fi in range(1, num_fields + 1):
                 fx, fy = field_coords[fi]
-                hx = float(fx / max_field_x) if max_field_x > 1e-10 else 0.0
-                hy = float(fy / max_field_y) if max_field_y > 1e-10 else 0.0
+                hx, hy = _normalize_field(fx, fy, is_radial, max_field_x, max_field_y, max_field_r)
                 for px, py in pupil_coords:
-                    norm_unpol.AddRay(1, hx, hy, float(px), float(py), opd_none)
+                    norm_unpol.AddRay(primary_wl, hx, hy, float(px), float(py), opd_none)
                     rays_added += 1
 
             logger.debug(f"BatchRayTrace: added {rays_added} rays ({num_fields} fields x {len(pupil_coords)} pupil)")

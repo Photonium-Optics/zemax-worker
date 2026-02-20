@@ -239,6 +239,50 @@ def _extract_value(obj: Any, default: float = 0.0, allow_inf: bool = False) -> f
         return default
 
 
+def _compute_field_normalization(fields, num_fields: int) -> tuple:
+    """Compute field normalization parameters respecting Fields.Normalization type.
+
+    OpticStudio uses either Radial (default) or Rectangular field normalization.
+    Under Radial normalization, Hx^2 + Hy^2 <= 1 (normalized to max radial extent).
+    Under Rectangular, Hx and Hy are independently bounded to [-1, 1].
+
+    Returns (is_radial, max_field_x, max_field_y, max_field_r) where callers should
+    use max_field_r for Radial and max_field_x/max_field_y for Rectangular.
+    """
+    is_radial = True
+    try:
+        norm_type = str(fields.Normalization)
+        is_radial = "Rectangular" not in norm_type
+    except Exception:
+        pass
+
+    max_field_x = 0.0
+    max_field_y = 0.0
+    max_field_r = 0.0
+    for fi in range(1, num_fields + 1):
+        field = fields.GetField(fi)
+        fx = abs(_extract_value(field.X))
+        fy = abs(_extract_value(field.Y))
+        max_field_x = max(max_field_x, fx)
+        max_field_y = max(max_field_y, fy)
+        max_field_r = max(max_field_r, (fx**2 + fy**2) ** 0.5)
+
+    return is_radial, max_field_x, max_field_y, max_field_r
+
+
+def _normalize_field(fx: float, fy: float, is_radial: bool,
+                     max_field_x: float, max_field_y: float, max_field_r: float) -> tuple[float, float]:
+    """Normalize field coordinates to Hx/Hy based on normalization type."""
+    if is_radial:
+        if max_field_r > 1e-10:
+            return float(fx / max_field_r), float(fy / max_field_r)
+        return 0.0, 0.0
+    else:
+        hx = float(fx / max_field_x) if max_field_x > 1e-10 else 0.0
+        hy = float(fy / max_field_y) if max_field_y > 1e-10 else 0.0
+        return hx, hy
+
+
 def _extract_dataframe(result: Any, label: str = "Analysis") -> Optional["pd.DataFrame"]:
     """
     Extract a pandas DataFrame from a ZOSPy AnalysisResult or typed result object.
@@ -445,11 +489,11 @@ class ZosPyHandlerBase:
         # Log which wavelength OpticStudio considers primary after loading
         try:
             wls = self.oss.SystemData.Wavelengths
-            n_wl = _extract_value(wls.NumberOfWavelengths, 0)
+            n_wl = int(wls.NumberOfWavelengths)
             primary_idx = None
             for i in range(1, n_wl + 1):
                 wl = wls.GetWavelength(i)
-                if _extract_value(wl.IsPrimary, False):
+                if wl.IsPrimary:
                     primary_idx = i
                     logger.info(f"load_zmx_file: OpticStudio primary wavelength after load = #{i} ({_extract_value(wl.Wavelength, 0):.6f} µm) out of {n_wl} wavelengths")
                     break
@@ -482,17 +526,24 @@ class ZosPyHandlerBase:
 
     def _get_bfl(self) -> Optional[float]:
         """
-        Get back focal length (distance from last surface to image plane).
+        Get back focal length using TTHI operand (total thickness from last
+        optical surface to image plane).
 
         Returns:
             Back focal length in lens units, or None if calculation fails.
         """
         try:
-            last_surf_idx = self.oss.LDE.NumberOfSurfaces - 1  # Image surface index
-            if last_surf_idx < 2:
+            num_surfaces = self.oss.LDE.NumberOfSurfaces
+            image_surf = num_surfaces - 1
+            last_surf = image_surf - 1
+            if last_surf < 1:
                 return None
-            # BFL = thickness of the surface before the image plane
-            bfl = _extract_value(self.oss.LDE.GetSurfaceAt(last_surf_idx - 1).Thickness, None)
+            tthi_type = self._zp.constants.Editors.MFE.MeritOperandType.TTHI
+            bfl = float(self.oss.MFE.GetOperandValue(
+                tthi_type, last_surf, image_surf, 0, 0, 0, 0, 0, 0
+            ))
+            if np.isnan(bfl) or np.isinf(bfl):
+                return None
             return bfl
         except Exception as e:
             logger.warning(f"_get_bfl failed: {e}")
@@ -507,10 +558,10 @@ class ZosPyHandlerBase:
         # Log which wavelength OpticStudio considers primary before saving
         try:
             wls = self.oss.SystemData.Wavelengths
-            n_wl = _extract_value(wls.NumberOfWavelengths, 0)
+            n_wl = int(wls.NumberOfWavelengths)
             for i in range(1, n_wl + 1):
                 wl = wls.GetWavelength(i)
-                if _extract_value(wl.IsPrimary, False):
+                if wl.IsPrimary:
                     logger.info(f"_save_modified_system: OpticStudio primary wavelength = #{i} ({_extract_value(wl.Wavelength, 0):.6f} µm)")
                     break
         except Exception as e:
@@ -716,9 +767,9 @@ class ZosPyHandlerBase:
                 logger.warning(f"Failed to set Wavelength={wavelength_index}: {e}")
         if sampling is not None:
             sample_value = self._resolve_sample_size(sampling)
-            # SampleSize is the standard attribute; Huygens analyses use
-            # PupilSampleSize/ImageSampleSize instead.
-            for attr in ('SampleSize', 'PupilSampleSize', 'ImageSampleSize'):
+            # SampleSize is the standard attribute; WavefrontMap uses Sampling;
+            # Huygens analyses use PupilSampleSize/ImageSampleSize instead.
+            for attr in ('SampleSize', 'Sampling', 'PupilSampleSize', 'ImageSampleSize'):
                 if hasattr(settings, attr):
                     try:
                         setattr(settings, attr, sample_value)

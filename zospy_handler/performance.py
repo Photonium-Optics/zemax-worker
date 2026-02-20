@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-from zospy_handler._base import _extract_value, _log_raw_output, _extract_dataframe, GridWithMetadata
+from zospy_handler._base import _extract_value, _log_raw_output, _extract_dataframe, GridWithMetadata, _compute_field_normalization, _normalize_field
 from zospy_handler.pupil import generate_random_coords
 from utils.timing import log_timing
 
@@ -197,14 +197,14 @@ class PerformanceMixin:
                 "weight": _extract_value(wl.Weight, 1.0),
             })
 
-        # Map reference parameter to OpticStudio ReferTo enum
+        # Map reference parameter to OpticStudio Spot.Reference enum
         refer_name = "ChiefRay" if reference == "chief_ray" else "Centroid"
         try:
             reference_value = getattr(
-                self._zp.constants.Analysis.Settings.RMS.ReferTo, refer_name
+                self._zp.constants.Analysis.Settings.Spot.Reference, refer_name
             )
         except Exception as e:
-            logger.warning(f"[SPOT] Could not resolve ReferTo.{refer_name}, falling back to integer: {e}")
+            logger.warning(f"[SPOT] Could not resolve Spot.Reference.{refer_name}, falling back to integer: {e}")
             reference_value = 0 if reference == "chief_ray" else 1
 
         try:
@@ -296,7 +296,7 @@ class PerformanceMixin:
         Args:
             settings: OpticStudio analysis settings object
             ray_density: Rays per axis (1-20)
-            reference_value: RMS.ReferTo enum value (ChiefRay or Centroid)
+            reference_value: Spot.Reference enum value (ChiefRay or Centroid)
             field_index: Field index (1-indexed). None = all fields.
             wavelength_index: Wavelength index (1-indexed). None = all wavelengths.
         """
@@ -389,14 +389,9 @@ class PerformanceMixin:
         pupil_coords = generate_random_coords(num_rays, seed=42)
         logger.debug(f"[SPOT] Random pupil sampling: {len(pupil_coords)} rays (density={ray_density})")
 
-        # Calculate max field extent for normalization (must use ALL fields,
-        # not just filtered ones, because Hx/Hy are normalized to full extent)
-        max_field_x = 0.0
-        max_field_y = 0.0
-        for fi in range(1, num_fields + 1):
-            max_field_x = max(max_field_x, abs(_extract_value(fields.GetField(fi).X)))
-            max_field_y = max(max_field_y, abs(_extract_value(fields.GetField(fi).Y)))
-        logger.debug(f"[SPOT] Field extents: max_x={max_field_x}, max_y={max_field_y}")
+        # Compute field normalization (must use ALL fields, respects Radial vs Rectangular)
+        is_radial, max_field_x, max_field_y, max_field_r = _compute_field_normalization(fields, num_fields)
+        logger.debug(f"[SPOT] Field extents: max_x={max_field_x}, max_y={max_field_y}, max_r={max_field_r}, radial={is_radial}")
 
         ray_trace = None
         try:
@@ -430,8 +425,7 @@ class PerformanceMixin:
                 field_x = _extract_value(field.X)
                 field_y = _extract_value(field.Y)
                 field_coords[fi] = (field_x, field_y)
-                hx_norm = float(field_x / max_field_x) if max_field_x > 1e-10 else 0.0
-                hy_norm = float(field_y / max_field_y) if max_field_y > 1e-10 else 0.0
+                hx_norm, hy_norm = _normalize_field(field_x, field_y, is_radial, max_field_x, max_field_y, max_field_r)
                 logger.debug(f"[SPOT] Field {fi}: raw=({field_x}, {field_y}), norm=({hx_norm}, {hy_norm})")
                 for wi in wl_indices:
                     for px, py in pupil_coords:
