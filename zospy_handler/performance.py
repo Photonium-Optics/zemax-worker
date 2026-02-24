@@ -42,21 +42,32 @@ def _parse_strehl_from_header(header_lines) -> Optional[float]:
       "Strehl = 8.532e-01"
     """
     if not header_lines:
+        logger.debug(f"_parse_strehl_from_header: input is falsy ({type(header_lines).__name__}: {header_lines!r})")
         return None
     # Handle a single multi-line string (some ZOS-API versions)
     if isinstance(header_lines, str):
         lines_iter = header_lines.splitlines()
+        logger.debug(f"_parse_strehl_from_header: str input, {len(lines_iter)} lines")
     elif hasattr(header_lines, '__iter__'):
-        lines_iter = header_lines
+        lines_iter = list(header_lines)  # materialize .NET IList once
+        logger.debug(f"_parse_strehl_from_header: iterable input ({type(header_lines).__name__}), {len(lines_iter)} items")
     else:
+        logger.debug(f"_parse_strehl_from_header: non-iterable input ({type(header_lines).__name__}), returning None")
         return None
     for line in lines_iter:
-        m = _STREHL_RE.search(str(line))
+        line_str = str(line)
+        m = _STREHL_RE.search(line_str)
         if m:
             try:
-                return float(m.group(1))
+                val = float(m.group(1))
+                logger.debug(f"_parse_strehl_from_header: matched Strehl={val} in line: {line_str!r}")
+                return val
             except ValueError:
                 pass
+        # Log lines that contain "strehl" but didn't match the regex
+        elif 'strehl' in line_str.lower():
+            logger.warning(f"_parse_strehl_from_header: UNMATCHED Strehl-like line: {line_str!r}")
+    logger.debug(f"_parse_strehl_from_header: no Strehl found in {len(lines_iter)} lines")
     return None
 
 
@@ -1434,9 +1445,26 @@ class PerformanceMixin:
                     # becomes invalid after Close).
                     try:
                         if hasattr(results, 'HeaderData'):
-                            fft_header_lines = results.HeaderData.Lines
-                    except Exception:
-                        pass
+                            hd = results.HeaderData
+                            if hd is not None and hasattr(hd, 'Lines'):
+                                fft_header_lines = hd.Lines
+                                # Log what we actually got back
+                                if fft_header_lines is None:
+                                    logger.debug("FFT PSF: HeaderData.Lines returned None")
+                                else:
+                                    try:
+                                        line_count = len(list(fft_header_lines)) if hasattr(fft_header_lines, '__iter__') else 'non-iterable'
+                                        logger.debug(f"FFT PSF: HeaderData.Lines returned {line_count} lines, type={type(fft_header_lines).__name__}")
+                                        for i, hl in enumerate(fft_header_lines):
+                                            logger.debug(f"FFT PSF: header[{i}]: {str(hl)!r}")
+                                    except Exception as e:
+                                        logger.debug(f"FFT PSF: HeaderData.Lines iteration failed: {e}")
+                            else:
+                                logger.debug(f"FFT PSF: HeaderData is None or has no Lines (HeaderData={hd})")
+                        else:
+                            logger.debug("FFT PSF: results has no HeaderData attribute")
+                    except Exception as e:
+                        logger.warning(f"FFT PSF: HeaderData extraction failed: {e}")
             finally:
                 try:
                     analysis.Close()
@@ -1449,6 +1477,10 @@ class PerformanceMixin:
             # Try to get Strehl ratio — check FFT header first (cheap),
             # then fall back to a minimal 32x32 Huygens run.
             strehl_ratio = _parse_strehl_from_header(fft_header_lines)
+            if strehl_ratio is not None:
+                logger.debug(f"FFT PSF: Strehl parsed from FFT header: {strehl_ratio}")
+            else:
+                logger.debug("FFT PSF: Strehl not found in FFT header, trying Huygens fallback")
 
             if strehl_ratio is None:
                 huygens = None
@@ -1477,17 +1509,31 @@ class PerformanceMixin:
                     if h_results is not None:
                         try:
                             header_text = h_results.HeaderData.Lines if hasattr(h_results, 'HeaderData') else ""
+                            # Log Huygens header too
+                            if header_text:
+                                try:
+                                    for i, hl in enumerate(header_text if hasattr(header_text, '__iter__') else header_text.splitlines()):
+                                        logger.debug(f"Huygens PSF (Strehl-only): header[{i}]: {str(hl)!r}")
+                                except Exception:
+                                    logger.debug(f"Huygens PSF (Strehl-only): header_text={header_text!r}")
+                            else:
+                                logger.debug("Huygens PSF (Strehl-only): HeaderData.Lines empty/None")
                             strehl_ratio = _parse_strehl_from_header(header_text)
-                        except Exception:
-                            pass
+                            if strehl_ratio is not None:
+                                logger.debug(f"Huygens PSF (Strehl-only): Strehl parsed: {strehl_ratio}")
+                        except Exception as e:
+                            logger.warning(f"Huygens PSF (Strehl-only): header extraction failed: {e}")
                 except Exception as e:
-                    logger.debug(f"PSF: Huygens Strehl ratio extraction failed (non-critical): {e}")
+                    logger.warning(f"PSF: Huygens Strehl ratio extraction failed: {e}")
                 finally:
                     if huygens is not None:
                         try:
                             huygens.Close()
                         except Exception:
                             pass
+
+            if strehl_ratio is None:
+                logger.warning("FFT PSF: Strehl extraction failed — not found in FFT or Huygens HeaderData.Lines")
 
             result = {
                 "success": True,
@@ -1599,10 +1645,25 @@ class PerformanceMixin:
 
                     # Extract Strehl ratio from header text
                     try:
-                        header_text = results.HeaderData.Lines if hasattr(results, 'HeaderData') else ""
-                        strehl_ratio = _parse_strehl_from_header(header_text)
+                        header_text = None
+                        if hasattr(results, 'HeaderData') and results.HeaderData is not None:
+                            header_text = results.HeaderData.Lines
+                        if header_text:
+                            try:
+                                for i, hl in enumerate(header_text if hasattr(header_text, '__iter__') else str(header_text).splitlines()):
+                                    logger.debug(f"Huygens PSF: header[{i}]: {str(hl)!r}")
+                            except Exception:
+                                logger.debug(f"Huygens PSF: header_text={header_text!r}")
+                            strehl_ratio = _parse_strehl_from_header(header_text)
+                            if strehl_ratio is not None:
+                                logger.debug(f"Huygens PSF: Strehl parsed from header: {strehl_ratio}")
+                        else:
+                            logger.debug("Huygens PSF: HeaderData.Lines is None or empty")
                     except Exception as e:
-                        logger.debug(f"Huygens PSF: Could not extract Strehl ratio from header: {e}")
+                        logger.warning(f"Huygens PSF: Could not extract Strehl ratio from header: {e}")
+
+                if strehl_ratio is None:
+                    logger.warning("Huygens PSF: Strehl extraction failed — not found in HeaderData.Lines")
             finally:
                 try:
                     analysis.Close()

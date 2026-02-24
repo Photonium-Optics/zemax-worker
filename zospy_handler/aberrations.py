@@ -39,6 +39,8 @@ def _parse_zernike_full_text(text: str) -> dict:
         dict with keys: coefficients, rms_to_chief, rms_to_centroid,
         pv_to_chief, pv_to_centroid, strehl_ratio
     """
+    logger = logging.getLogger(__name__)
+
     result = {
         "coefficients": [],
         "rms_to_chief": None,
@@ -48,7 +50,10 @@ def _parse_zernike_full_text(text: str) -> dict:
         "strehl_ratio": None,
     }
 
-    for line in text.splitlines():
+    lines = text.splitlines()
+    logger.debug(f"_parse_zernike_full_text: parsing {len(lines)} lines")
+
+    for line in lines:
         line_stripped = line.strip()
 
         # Match coefficient lines: Z   N      value     formula
@@ -73,6 +78,7 @@ def _parse_zernike_full_text(text: str) -> dict:
             key = f"rms_to_{m.group(1).lower()}"
             try:
                 result[key] = float(m.group(2))
+                logger.debug(f"_parse_zernike_full_text: matched {key}={result[key]}")
             except ValueError:
                 pass
             continue
@@ -86,6 +92,7 @@ def _parse_zernike_full_text(text: str) -> dict:
             key = f"pv_to_{m.group(1).lower()}"
             try:
                 result[key] = float(m.group(2))
+                logger.debug(f"_parse_zernike_full_text: matched {key}={result[key]}")
             except ValueError:
                 pass
             continue
@@ -98,9 +105,20 @@ def _parse_zernike_full_text(text: str) -> dict:
         if m:
             try:
                 result["strehl_ratio"] = float(m.group(1))
+                logger.debug(f"_parse_zernike_full_text: matched strehl_ratio={result['strehl_ratio']}")
             except ValueError:
                 pass
 
+        # Log unmatched lines that look like they SHOULD be metrics (helps debug regex mismatches)
+        elif any(kw in line_stripped.lower() for kw in ['p-v', 'p–v', 'p−v', 'p‐v', 'peak-to', 'strehl']):
+            logger.warning(f"_parse_zernike_full_text: UNMATCHED metric-like line: {line_stripped!r} (bytes: {line_stripped.encode('utf-8')!r})")
+
+    logger.debug(
+        f"_parse_zernike_full_text: result — "
+        f"rms_chief={result['rms_to_chief']}, rms_centroid={result['rms_to_centroid']}, "
+        f"pv_chief={result['pv_to_chief']}, pv_centroid={result['pv_to_centroid']}, "
+        f"strehl={result['strehl_ratio']}, coeffs={len(result['coefficients'])}"
+    )
     return result
 
 
@@ -280,8 +298,11 @@ class AberrationsMixin:
                     # Extract metrics from text output
                     zernike_analysis.Results.GetTextFile(zernike_temp_path)
                     if os.path.exists(zernike_temp_path):
+                        file_size = os.path.getsize(zernike_temp_path)
+                        logger.debug(f"ZernikeStandardCoefficients: GetTextFile wrote {file_size} bytes to {zernike_temp_path}")
                         text = self._read_opticstudio_text_file(zernike_temp_path)
                         if text:
+                            logger.debug(f"ZernikeStandardCoefficients: text file read OK, {len(text)} chars, {len(text.splitlines())} lines")
                             # Log the metric-containing lines for debugging
                             for dbg_line in text.splitlines():
                                 ls = dbg_line.strip()
@@ -293,8 +314,10 @@ class AberrationsMixin:
                             strehl_ratio = metrics["strehl_ratio"]
                             if pv_waves is None or strehl_ratio is None:
                                 logger.warning(f"ZernikeStandardCoefficients: parsed metrics incomplete — rms={rms_waves}, pv={pv_waves}, strehl={strehl_ratio}")
+                        else:
+                            logger.warning(f"ZernikeStandardCoefficients: _read_opticstudio_text_file returned empty string (file was {file_size} bytes)")
                     else:
-                        logger.warning("ZernikeStandardCoefficients: GetTextFile produced no output")
+                        logger.warning("ZernikeStandardCoefficients: GetTextFile produced no output file")
 
             except Exception as e:
                 logger.warning(f"ZernikeStandardCoefficients failed: {e}")
@@ -356,22 +379,11 @@ class AberrationsMixin:
                 self._cleanup_analysis(wfm_analysis)
                 wfm_analysis = None
 
-            # Fallback: compute P-V from wavefront map if text parsing missed it
-            if pv_waves is None and image_b64 is not None and array_shape is not None:
-                try:
-                    import numpy as np
-                    wfm_arr = np.frombuffer(base64.b64decode(image_b64), dtype=array_dtype).reshape(array_shape)
-                    valid = wfm_arr[wfm_arr != 0]  # zero = outside pupil
-                    if valid.size > 0:
-                        pv_waves = float(np.max(valid) - np.min(valid))
-                        logger.info(f"P-V computed from wavefront map: {pv_waves:.6f}")
-                except Exception as e:
-                    logger.warning(f"P-V fallback computation failed: {e}")
-
-            # Fallback: compute Strehl from RMS via Marechal approximation
-            if strehl_ratio is None and rms_waves is not None:
-                strehl_ratio = math.exp(-(2.0 * math.pi * rms_waves) ** 2)
-                logger.info(f"Strehl computed from RMS (Marechal approx): {strehl_ratio:.6e}")
+            # Log extraction failures so callers know the ZOS-API text parse is broken
+            if pv_waves is None:
+                logger.warning("ZernikeStandardCoefficients: P-V extraction failed — text parser did not match P-V line from GetTextFile output")
+            if strehl_ratio is None:
+                logger.warning("ZernikeStandardCoefficients: Strehl extraction failed — text parser did not match Strehl line from GetTextFile output")
 
             result = {
                 "success": True,
