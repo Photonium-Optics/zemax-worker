@@ -151,6 +151,130 @@ class PerformanceMixin:
             return "sagittal"
         return None
 
+    def _extract_mtf_field_data(
+        self,
+        results,
+        fi: int,
+        label: str,
+        diffraction_limit_from_api: list[float],
+    ) -> tuple[list[float], list[float], list[float], list[float]]:
+        """Extract tangential, sagittal, frequency, and diffraction limit data from MTF results.
+
+        Iterates over all data series in the analysis results, classifying each as
+        diffraction limit, tangential, sagittal, or unclassified. Unclassified series
+        are assigned to missing slots as a positional fallback.
+
+        Args:
+            results: The analysis Results object from ZOS-API.
+            fi: 1-indexed field number (for log messages).
+            label: Log prefix, e.g. "MTF" or "Huygens MTF".
+            diffraction_limit_from_api: Mutable list; populated in-place if a
+                diffraction limit series is found and the list is still empty.
+
+        Returns:
+            (tangential, sagittal, freq_data, diffraction_limit_from_api)
+        """
+        tangential: list[float] = []
+        sagittal: list[float] = []
+        freq_data: list[float] = []
+
+        if results is None:
+            return tangential, sagittal, freq_data, diffraction_limit_from_api
+
+        try:
+            num_series = results.NumberOfDataSeries
+            logger.info(f"{label} field {fi}: {num_series} data series")
+            unclassified = []
+            for si in range(num_series):
+                series = results.GetDataSeries(si)
+                if series is None:
+                    continue
+
+                desc = str(series.Description) if hasattr(series, 'Description') else ""
+                desc_lower = desc.lower()
+
+                if "diffrac" in desc_lower or "limit" in desc_lower:
+                    dl_x, dl_y, _ = self._extract_mtf_series(series)
+                    if dl_y and not diffraction_limit_from_api:
+                        diffraction_limit_from_api = dl_y
+                        if not freq_data:
+                            freq_data = dl_x
+                        logger.debug(f"{label} field {fi}: extracted diffraction limit from API ({len(dl_y)} pts)")
+                    continue
+
+                series_x, series_tang, series_sag = self._extract_mtf_series(series)
+
+                # 2D bulk extraction yields both tang and sag from one series
+                if series_sag:
+                    if not tangential:
+                        tangential = series_tang
+                    if not sagittal:
+                        sagittal = series_sag
+                    if not freq_data:
+                        freq_data = series_x
+                    continue
+
+                # Single-column: classify by description
+                category = self._classify_mtf_series(desc_lower)
+                if category == "tangential" and not tangential:
+                    tangential = series_tang
+                elif category == "sagittal" and not sagittal:
+                    sagittal = series_tang
+                else:
+                    unclassified.append((series_x, series_tang))
+                    continue
+                if not freq_data:
+                    freq_data = series_x
+
+            # Fallback: assign unclassified series to missing slots
+            if unclassified and (not tangential or not sagittal):
+                logger.info(f"{label} field {fi}: using positional fallback for {len(unclassified)} unclassified series")
+                idx = 0
+                if not tangential and idx < len(unclassified):
+                    x, tangential = unclassified[idx]
+                    if not freq_data:
+                        freq_data = x
+                    idx += 1
+                if not sagittal and idx < len(unclassified):
+                    _, sagittal = unclassified[idx]
+        except Exception as e:
+            logger.warning(f"{label}: Could not extract data series for field {fi}: {e}")
+
+        return tangential, sagittal, freq_data, diffraction_limit_from_api
+
+    @staticmethod
+    def _validate_mtf_results(
+        label: str,
+        frequency: Optional[list[float]],
+        all_fields_data: list[dict],
+    ) -> Optional[dict[str, Any]]:
+        """Validate MTF extraction results, returning an error dict if validation fails.
+
+        Returns None if validation passes, or a {"success": False, "error": ...} dict.
+        """
+        if not all_fields_data:
+            return {
+                "success": False,
+                "error": f"{label}: no field data collected. Field iteration may have failed.",
+            }
+
+        if frequency is None or len(frequency) == 0:
+            return {
+                "success": False,
+                "error": f"{label}: no frequency data extracted from analysis results. "
+                         "ZOS-API data series may use an unexpected format.",
+            }
+
+        has_any_data = any(f["tangential"] or f["sagittal"] for f in all_fields_data)
+        if not has_any_data:
+            return {
+                "success": False,
+                "error": f"{label}: analysis ran but returned no tangential/sagittal data "
+                         "for any field. Data extraction from ZOS-API series failed.",
+            }
+
+        return None
+
     def get_spot_diagram(
         self,
         ray_density: int = 20,
@@ -785,71 +909,10 @@ class PerformanceMixin:
                         mtf_elapsed_ms = (time.perf_counter() - mtf_start) * 1000
                         log_timing(logger, f"FFTMtf.run (field={fi})", mtf_elapsed_ms)
 
-                    # Extract data from results
-                    results = analysis.Results
-                    tangential = []
-                    sagittal = []
-                    freq_data = []
-
-                    if results is not None:
-                        try:
-                            num_series = results.NumberOfDataSeries
-                            logger.info(f"MTF field {fi}: {num_series} data series")
-                            unclassified = []
-                            for si in range(num_series):
-                                series = results.GetDataSeries(si)
-                                if series is None:
-                                    continue
-
-                                desc = str(series.Description) if hasattr(series, 'Description') else ""
-                                desc_lower = desc.lower()
-
-                                if "diffrac" in desc_lower or "limit" in desc_lower:
-                                    dl_x, dl_y, _ = self._extract_mtf_series(series)
-                                    if dl_y and not diffraction_limit_from_api:
-                                        diffraction_limit_from_api = dl_y
-                                        if not freq_data:
-                                            freq_data = dl_x
-                                        logger.debug(f"MTF field {fi}: extracted diffraction limit from API ({len(dl_y)} pts)")
-                                    continue
-
-                                series_x, series_tang, series_sag = self._extract_mtf_series(series)
-
-                                # 2D bulk extraction yields both tang and sag from one series
-                                if series_sag:
-                                    if not tangential:
-                                        tangential = series_tang
-                                    if not sagittal:
-                                        sagittal = series_sag
-                                    if not freq_data:
-                                        freq_data = series_x
-                                    continue
-
-                                # Single-column: classify by description
-                                category = self._classify_mtf_series(desc_lower)
-                                if category == "tangential" and not tangential:
-                                    tangential = series_tang
-                                elif category == "sagittal" and not sagittal:
-                                    sagittal = series_tang
-                                else:
-                                    unclassified.append((series_x, series_tang))
-                                    continue
-                                if not freq_data:
-                                    freq_data = series_x
-
-                            # Fallback: assign unclassified series to missing slots
-                            if unclassified and (not tangential or not sagittal):
-                                logger.info(f"MTF field {fi}: using positional fallback for {len(unclassified)} unclassified series")
-                                idx = 0
-                                if not tangential and idx < len(unclassified):
-                                    x, tangential = unclassified[idx]
-                                    if not freq_data:
-                                        freq_data = x
-                                    idx += 1
-                                if not sagittal and idx < len(unclassified):
-                                    _, sagittal = unclassified[idx]
-                        except Exception as e:
-                            logger.warning(f"MTF: Could not extract data series for field {fi}: {e}")
+                    tangential, sagittal, freq_data, diffraction_limit_from_api = \
+                        self._extract_mtf_field_data(
+                            analysis.Results, fi, "MTF", diffraction_limit_from_api,
+                        )
 
                     if frequency is None and freq_data:
                         frequency = freq_data
@@ -878,12 +941,9 @@ class PerformanceMixin:
                         except Exception:
                             pass
 
-            # Generate frequency array if not obtained from analysis
-            if frequency is None or len(frequency) == 0:
-                max_freq = maximum_frequency if maximum_frequency > 0 else (cutoff_frequency or 100.0)
-                # Match grid size from sampling (e.g. "128x128" → 128 points)
-                grid_size = int(sampling.split('x')[0]) if 'x' in sampling else 64
-                frequency = list(np.linspace(0, max_freq, grid_size))
+            validation_error = self._validate_mtf_results("FFT MTF", frequency, all_fields_data)
+            if validation_error:
+                return validation_error
 
             freq_arr = np.array(frequency)
 
@@ -1003,72 +1063,10 @@ class PerformanceMixin:
                         mtf_elapsed_ms = (time.perf_counter() - mtf_start) * 1000
                         log_timing(logger, f"HuygensMtf.run (field={fi})", mtf_elapsed_ms)
 
-                    # Extract data from results (same structure as FFT MTF)
-                    results = analysis.Results
-                    tangential = []
-                    sagittal = []
-                    freq_data = []
-
-                    if results is not None:
-                        try:
-                            num_series = results.NumberOfDataSeries
-                            logger.debug(f"Huygens MTF field {fi}: {num_series} data series")
-                            unclassified = []
-                            for si in range(num_series):
-                                series = results.GetDataSeries(si)
-                                if series is None:
-                                    continue
-
-                                desc = str(series.Description) if hasattr(series, 'Description') else ""
-                                desc_lower = desc.lower()
-                                n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
-                                logger.debug(f"Huygens MTF field {fi} series {si}: desc='{desc}', points={n_points}")
-
-                                # Extract diffraction limit from API series
-                                if "diffrac" in desc_lower or "limit" in desc_lower:
-                                    dl_x, dl_y, _ = self._extract_mtf_series(series)
-                                    if dl_y and not diffraction_limit_from_api:
-                                        diffraction_limit_from_api = dl_y
-                                        if not freq_data:
-                                            freq_data = dl_x
-                                        logger.debug(f"Huygens MTF field {fi}: extracted diffraction limit from API ({len(dl_y)} pts)")
-                                    continue
-
-                                series_x = []
-                                series_y = []
-                                for pi in range(n_points):
-                                    pt = series.GetDataPoint(pi)
-                                    if pt is not None:
-                                        x_val = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
-                                        y_val = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
-                                        series_x.append(x_val)
-                                        series_y.append(y_val)
-
-                                # Classify series by description prefix
-                                if desc_lower.startswith(("ts ", "ts,", "tangential")):
-                                    tangential = series_y
-                                    if not freq_data:
-                                        freq_data = series_x
-                                elif desc_lower.startswith(("ss ", "ss,", "sagittal")):
-                                    sagittal = series_y
-                                    if not freq_data:
-                                        freq_data = series_x
-                                else:
-                                    unclassified.append((series_x, series_y))
-
-                            # Fallback: assign unclassified series to missing slots
-                            if unclassified and (not tangential or not sagittal):
-                                logger.info(f"Huygens MTF field {fi}: using positional fallback for {len(unclassified)} unclassified series")
-                                idx = 0
-                                if not tangential and idx < len(unclassified):
-                                    x, tangential = unclassified[idx]
-                                    if not freq_data:
-                                        freq_data = x
-                                    idx += 1
-                                if not sagittal and idx < len(unclassified):
-                                    _, sagittal = unclassified[idx]
-                        except Exception as e:
-                            logger.warning(f"Huygens MTF: Could not extract data series for field {fi}: {e}")
+                    tangential, sagittal, freq_data, diffraction_limit_from_api = \
+                        self._extract_mtf_field_data(
+                            analysis.Results, fi, "Huygens MTF", diffraction_limit_from_api,
+                        )
 
                     if frequency is None and freq_data:
                         frequency = freq_data
@@ -1097,11 +1095,9 @@ class PerformanceMixin:
                         except Exception:
                             pass
 
-            # Generate frequency array if not obtained from analysis
-            if frequency is None or len(frequency) == 0:
-                max_freq = maximum_frequency if maximum_frequency > 0 else (cutoff_frequency or 100.0)
-                grid_size = int(sampling.split('x')[0]) if 'x' in sampling else 64
-                frequency = list(np.linspace(0, max_freq, grid_size))
+            validation_error = self._validate_mtf_results("Huygens MTF", frequency, all_fields_data)
+            if validation_error:
+                return validation_error
 
             freq_arr = np.array(frequency)
 

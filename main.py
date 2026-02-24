@@ -307,6 +307,9 @@ def _load_system_from_request(request: BaseModel) -> dict[str, Any]:
     """
     Load optical system from request into OpticStudio.
 
+    Decodes base64 zmx_content, writes to a temp file, and delegates to
+    zospy_handler.load_zmx_file (which handles wavelength validation/recovery).
+
     Args:
         request: Request with zmx_content field (base64-encoded .zmx file)
 
@@ -318,7 +321,6 @@ def _load_system_from_request(request: BaseModel) -> dict[str, Any]:
         ZosPyError: If loading fails
     """
     zmx_content = getattr(request, 'zmx_content', None)
-
     if not zmx_content:
         raise ValueError("Request must include 'zmx_content'")
 
@@ -327,16 +329,7 @@ def _load_system_from_request(request: BaseModel) -> dict[str, Any]:
     except Exception as e:
         raise ValueError(f"Invalid base64 zmx_content: {e}") from e
 
-    logger.info(f"Loading system from ZMX: {len(zmx_bytes)} bytes (base64 {len(zmx_content)})")
-
-    # Quick sanity check: count WAVM/PWAV lines to verify wavelengths survived conversion
-    try:
-        zmx_text = zmx_bytes.decode('utf-16-le', errors='replace')
-        wavm_count = zmx_text.count('WAVM ')
-        pwav_lines = [l.strip() for l in zmx_text.split('\r\n') if l.strip().startswith('PWAV')]
-        logger.info(f"ZMX content: WAVM={wavm_count}, PWAV={pwav_lines}")
-    except Exception as e:
-        logger.debug(f"Could not inspect ZMX text: {e}")
+    logger.info(f"Loading system from ZMX: {len(zmx_bytes)} bytes")
 
     with tempfile.NamedTemporaryFile(mode='wb', suffix='.zmx', delete=False) as f:
         f.write(zmx_bytes)
@@ -346,7 +339,7 @@ def _load_system_from_request(request: BaseModel) -> dict[str, Any]:
         result = zospy_handler.load_zmx_file(temp_file)
         if result.get("num_surfaces", 0) == 0:
             raise ZosPyError("System loaded but has no surfaces")
-        logger.info(f"Loaded system: {result.get('num_surfaces')} surfaces, EFL={result.get('efl')}")
+        logger.info(f"Loaded system: {result['num_surfaces']} surfaces, EFL={result.get('efl')}")
         return result
     finally:
         if os.path.exists(temp_file):

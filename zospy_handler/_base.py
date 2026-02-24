@@ -458,12 +458,38 @@ class ZosPyHandlerBase:
             "zospy_version": zospy_version,
         }
 
+    @staticmethod
+    def _parse_zmx_wavelengths(file_path: str) -> tuple[list[tuple[int, float, float]], int]:
+        """
+        Pre-parse WAVM/PWAV keywords from a raw ZMX file.
+
+        Returns:
+            Tuple of (wavm_entries, primary_index) where wavm_entries is a list
+            of (slot, wavelength_um, weight) tuples and primary_index is 1-based.
+        """
+        wavelengths: list[tuple[int, float, float]] = []
+        primary_idx = 1
+        with open(file_path, 'rb') as f:
+            zmx_text = f.read().decode('utf-16-le', errors='replace')
+        for line in zmx_text.split('\r\n'):
+            parts = line.strip().lstrip('\ufeff').split()
+            if not parts:
+                continue
+            if parts[0] == 'WAVM' and len(parts) >= 4:
+                try:
+                    wavelengths.append((int(parts[1]), float(parts[2]), float(parts[3])))
+                except (ValueError, IndexError):
+                    pass
+            elif parts[0] == 'PWAV' and len(parts) >= 2:
+                try:
+                    primary_idx = int(parts[1])
+                except ValueError:
+                    pass
+        return wavelengths, primary_idx
+
     def load_zmx_file(self, file_path: str) -> dict[str, Any]:
         """
         Load an optical system from a .zmx file directly into OpticStudio.
-
-        This is the preferred method for loading systems as it uses Zemax's
-        native file format and avoids manual surface construction.
 
         After loading, validates that OpticStudio parsed all wavelengths from
         the ZMX file. If wavelengths are missing (common with generated ZMX
@@ -483,72 +509,24 @@ class ZosPyHandlerBase:
         expected_wavelengths: list[tuple[int, float, float]] = []
         expected_pwav = 1
         try:
-            with open(file_path, 'rb') as f:
-                zmx_text = f.read().decode('utf-16-le', errors='replace')
-            for line in zmx_text.split('\r\n'):
-                stripped = line.strip().lstrip('\ufeff')
-                parts = stripped.split()
-                if not parts:
-                    continue
-                if parts[0] == 'WAVM' and len(parts) >= 4:
-                    try:
-                        expected_wavelengths.append((int(parts[1]), float(parts[2]), float(parts[3])))
-                    except (ValueError, IndexError):
-                        pass
-                elif parts[0] == 'PWAV' and len(parts) >= 2:
-                    try:
-                        expected_pwav = int(parts[1])
-                    except ValueError:
-                        pass
+            expected_wavelengths, expected_pwav = self._parse_zmx_wavelengths(file_path)
             if expected_wavelengths:
                 logger.info(f"load_zmx_file: ZMX contains {len(expected_wavelengths)} WAVM lines, PWAV={expected_pwav}")
         except Exception as e:
             logger.debug(f"load_zmx_file: Could not pre-parse ZMX wavelengths: {e}")
 
-        # Load the file directly using ZosPy's load method
+        # Load the file via ZosPy
         load_start = time.perf_counter()
         try:
             self.oss.load(file_path)
         finally:
-            load_elapsed_ms = (time.perf_counter() - load_start) * 1000
-            log_timing(logger, "oss.load", load_elapsed_ms)
+            log_timing(logger, "oss.load", (time.perf_counter() - load_start) * 1000)
 
-        # Get system info after loading
         num_surfaces = self.oss.LDE.NumberOfSurfaces - 1  # Exclude object surface
 
-        # Check wavelengths loaded by OpticStudio vs expected from ZMX
+        # Validate and recover wavelengths if OpticStudio missed any
         try:
-            wls = self.oss.SystemData.Wavelengths
-            n_wl = int(wls.NumberOfWavelengths)
-            logger.info(f"load_zmx_file: OpticStudio NumberOfWavelengths = {n_wl}")
-
-            # If OpticStudio didn't parse all wavelengths, set them programmatically
-            if expected_wavelengths and n_wl < len(expected_wavelengths):
-                logger.warning(
-                    f"load_zmx_file: Wavelength mismatch! ZMX has {len(expected_wavelengths)} "
-                    f"WAVM lines but OpticStudio loaded only {n_wl}. "
-                    f"Setting wavelengths programmatically."
-                )
-                self._set_wavelengths_from_wavm(expected_wavelengths, expected_pwav)
-                # Re-read after fix
-                n_wl = int(wls.NumberOfWavelengths)
-                logger.info(f"load_zmx_file: After fix, NumberOfWavelengths = {n_wl}")
-
-            # Log final wavelength state
-            primary_idx = None
-            for i in range(1, n_wl + 1):
-                wl = wls.GetWavelength(i)
-                is_primary = getattr(wl, 'IsPrimary', False)
-                logger.info(
-                    f"load_zmx_file: Wavelength #{i}: {_extract_value(wl.Wavelength, 0):.6f} µm, "
-                    f"weight={_extract_value(wl.Weight, 0)}, is_primary={is_primary}"
-                )
-                if is_primary:
-                    primary_idx = i
-            if primary_idx is None:
-                logger.warning(f"load_zmx_file: No primary wavelength found among {n_wl}")
-            else:
-                logger.info(f"load_zmx_file: Primary wavelength = #{primary_idx}/{n_wl}")
+            self._validate_and_recover_wavelengths(expected_wavelengths, expected_pwav)
         except Exception as e:
             logger.error(f"load_zmx_file: Could not read/fix wavelengths after load: {e}", exc_info=True)
 
@@ -557,39 +535,80 @@ class ZosPyHandlerBase:
             "efl": self._get_efl(),
         }
 
+    def _validate_and_recover_wavelengths(
+        self,
+        expected: list[tuple[int, float, float]],
+        expected_pwav: int,
+    ) -> None:
+        """
+        Check loaded wavelengths against expected WAVM data and fix if needed.
+
+        Logs the final wavelength state for diagnostics.
+        """
+        wls = self.oss.SystemData.Wavelengths
+        n_wl = int(wls.NumberOfWavelengths)
+        logger.info(f"load_zmx_file: OpticStudio loaded {n_wl} wavelength(s)")
+
+        if expected and n_wl < len(expected):
+            logger.warning(
+                f"load_zmx_file: Wavelength mismatch -- ZMX has {len(expected)} "
+                f"WAVM lines but OpticStudio loaded only {n_wl}. Recovering via API."
+            )
+            self._set_wavelengths_from_wavm(expected, expected_pwav)
+            n_wl = int(wls.NumberOfWavelengths)
+            logger.info(f"load_zmx_file: After recovery, {n_wl} wavelength(s)")
+
+        # Log final wavelength state
+        primary_idx = None
+        for i in range(1, n_wl + 1):
+            wl = wls.GetWavelength(i)
+            is_primary = getattr(wl, 'IsPrimary', False)
+            logger.info(
+                f"  Wavelength #{i}: {_extract_value(wl.Wavelength, 0):.6f} um, "
+                f"weight={_extract_value(wl.Weight, 0)}, primary={is_primary}"
+            )
+            if is_primary:
+                primary_idx = i
+
+        if primary_idx is None:
+            logger.warning(f"load_zmx_file: No primary wavelength found among {n_wl}")
+        else:
+            logger.info(f"load_zmx_file: Primary wavelength = #{primary_idx}/{n_wl}")
+
     def _set_wavelengths_from_wavm(self, wavm_list: list[tuple[int, float, float]], pwav_idx: int) -> None:
         """
         Programmatically set wavelengths in OpticStudio from parsed WAVM data.
 
         Follows the ZOS-API pattern:
-          - GetWavelength(1) to set the first (always exists after load)
-          - AddWavelength(um, weight) for each additional wavelength
+          - GetWavelength(n) to overwrite existing slots
+          - AddWavelength(um, weight) for slots beyond current count
+          - RemoveWavelength to trim excess slots
           - MakePrimary() on the designated primary
 
         Args:
-            wavm_list: List of (index, wavelength_um, weight) tuples
+            wavm_list: List of (slot, wavelength_um, weight) tuples
             pwav_idx: 1-based index of the primary wavelength
         """
         wls = self.oss.SystemData.Wavelengths
-        wavm_list = sorted(wavm_list, key=lambda x: x[0])
+        sorted_wavm = sorted(wavm_list, key=lambda x: x[0])
+        target_count = len(sorted_wavm)
 
-        # Remove extra wavelengths (must keep >= 2 until new ones are added)
-        while int(wls.NumberOfWavelengths) > max(len(wavm_list), 2):
-            if not wls.RemoveWavelength(int(wls.NumberOfWavelengths)):
-                logger.warning("_set_wavelengths: RemoveWavelength refused (API constraint)")
-                break
+        def wl_count() -> int:
+            return int(wls.NumberOfWavelengths)
 
-        # Set wavelength #1 directly (slot always exists after load)
-        if wavm_list:
-            _, wl_um, weight = wavm_list[0]
-            wl = wls.GetWavelength(1)
-            wl.Wavelength = wl_um
-            wl.Weight = weight
-            logger.info(f"_set_wavelengths: #1 = {wl_um:.6f} µm, weight={weight}")
+        def _remove_trailing(keep_min: int) -> None:
+            """Remove wavelength slots from the end, keeping at least keep_min."""
+            while wl_count() > max(target_count, keep_min):
+                if not wls.RemoveWavelength(wl_count()):
+                    logger.warning("_set_wavelengths: RemoveWavelength refused (API constraint)")
+                    break
 
-        # Set or add remaining wavelengths
-        for i, (_, wl_um, weight) in enumerate(wavm_list[1:], start=2):
-            if i <= int(wls.NumberOfWavelengths):
+        # Trim excess slots first (keep >= 2 until new ones are added)
+        _remove_trailing(keep_min=2)
+
+        # Set or add each wavelength
+        for i, (_, wl_um, weight) in enumerate(sorted_wavm, start=1):
+            if i <= wl_count():
                 wl = wls.GetWavelength(i)
                 wl.Wavelength = wl_um
                 wl.Weight = weight
@@ -598,19 +617,16 @@ class ZosPyHandlerBase:
                 if wl is None:
                     logger.error(
                         f"_set_wavelengths: AddWavelength returned null for #{i} "
-                        f"({wl_um:.6f} µm) — may have hit API limit of 12"
+                        f"({wl_um:.6f} um) -- may have hit API limit"
                     )
                     break
-            logger.info(f"_set_wavelengths: #{i} = {wl_um:.6f} µm, weight={weight}")
+            logger.info(f"_set_wavelengths: #{i} = {wl_um:.6f} um, weight={weight}")
 
-        # Remove trailing slots if we have more than needed
-        while int(wls.NumberOfWavelengths) > len(wavm_list):
-            if not wls.RemoveWavelength(int(wls.NumberOfWavelengths)):
-                logger.warning("_set_wavelengths: RemoveWavelength refused (API constraint)")
-                break
+        # Remove any remaining trailing slots
+        _remove_trailing(keep_min=1)
 
         # Set primary wavelength
-        if 1 <= pwav_idx <= int(wls.NumberOfWavelengths):
+        if 1 <= pwav_idx <= wl_count():
             wls.GetWavelength(pwav_idx).MakePrimary()
             logger.info(f"_set_wavelengths: Primary = #{pwav_idx}")
 
