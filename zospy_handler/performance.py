@@ -448,24 +448,21 @@ class PerformanceMixin:
         except Exception as e:
             logger.warning(f"[SPOT] Failed to set ReferTo={reference_value}: {e}")
 
-        # Set field selection
+        # Set field selection — use SetFieldNumber(0) for "all fields" to match
+        # the official ZOS-API example (PythonStandalone_22).
         if hasattr(settings, 'Field'):
             try:
-                if field_index is not None:
-                    settings.Field.SetFieldNumber(field_index)
-                else:
-                    settings.Field.UseAllFields()
+                field_num = field_index if field_index is not None else 0
+                settings.Field.SetFieldNumber(field_num)
             except Exception as e:
                 logger.error(f"[SPOT] Failed to configure field selection (field_index={field_index}): {e}")
                 raise ValueError(f"Cannot configure field selection: {e}") from e
 
-        # Set wavelength selection
+        # Set wavelength selection — use SetWavelengthNumber(0) for "all wavelengths"
         if hasattr(settings, 'Wavelength'):
             try:
-                if wavelength_index is not None:
-                    settings.Wavelength.SetWavelengthNumber(wavelength_index)
-                else:
-                    settings.Wavelength.UseAllWavelengths()
+                wave_num = wavelength_index if wavelength_index is not None else 0
+                settings.Wavelength.SetWavelengthNumber(wave_num)
             except Exception as e:
                 logger.error(f"[SPOT] Failed to configure wavelength selection (wavelength_index={wavelength_index}): {e}")
                 raise ValueError(f"Cannot configure wavelength selection: {e}") from e
@@ -786,6 +783,12 @@ class PerformanceMixin:
             # ZOSAPI SpotData methods are 1-indexed for both field and wavelength.
             fi_1 = field_index + 1
             wi = wavelength_index if wavelength_index else 1
+
+            # Log matrix dimensions for debugging
+            if hasattr(spot_data, 'NumberOfFields') and hasattr(spot_data, 'NumberOfWavelengths'):
+                logger.info(f"[SPOT] SpotData matrix: NumberOfFields={spot_data.NumberOfFields}, NumberOfWavelengths={spot_data.NumberOfWavelengths}, querying fi_1={fi_1}, wi={wi}")
+            else:
+                logger.info(f"[SPOT] SpotData matrix dimensions unknown, querying fi_1={fi_1}, wi={wi}")
 
             # StandardSpot SpotData methods return values in µm (not lens units).
             # The ZOSAPI example (PythonStandalone_22) prints these raw with no conversion.
