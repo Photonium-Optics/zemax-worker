@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 def _parse_zernike_full_text(text: str) -> dict:
     """Parse full ZernikeStandardCoefficients text output.
 
-    Extracts individual coefficients plus RMS, P-V, and Strehl metrics.
+    Extracts individual coefficients plus RMS and Strehl metrics.
 
     The OpticStudio text output has coefficient lines like:
         Z   1      0.12345678     1
@@ -32,12 +32,11 @@ def _parse_zernike_full_text(text: str) -> dict:
 
     And metric lines like:
         RMS (to chief)     :   0.12345678
-        P-V (to chief)     :   0.56789012
         Strehl Ratio       :   0.90123456
 
     Returns:
         dict with keys: coefficients, rms_to_chief, rms_to_centroid,
-        pv_to_chief, pv_to_centroid, strehl_ratio
+        strehl_ratio
     """
     logger = logging.getLogger(__name__)
 
@@ -45,8 +44,6 @@ def _parse_zernike_full_text(text: str) -> dict:
         "coefficients": [],
         "rms_to_chief": None,
         "rms_to_centroid": None,
-        "pv_to_chief": None,
-        "pv_to_centroid": None,
         "strehl_ratio": None,
     }
 
@@ -83,21 +80,6 @@ def _parse_zernike_full_text(text: str) -> dict:
                 pass
             continue
 
-        # Match P-V lines (dash may be ASCII hyphen, en-dash, or Unicode minus)
-        # OpticStudio may insert "(Est)" or other text before the colon
-        m = re.match(
-            r'P[-\u2010\u2013\u2014\u2212]V\s*\(to\s+(chief|centroid)\)[^:]*:\s*([-\d.eE+]+)',
-            line_stripped, re.IGNORECASE,
-        )
-        if m:
-            key = f"pv_to_{m.group(1).lower()}"
-            try:
-                result[key] = float(m.group(2))
-                logger.debug(f"_parse_zernike_full_text: matched {key}={result[key]}")
-            except ValueError:
-                pass
-            continue
-
         # Match Strehl Ratio — OpticStudio may output "Strehl Ratio (Est)" with tab separators
         m = re.match(
             r'Strehl\s+Ratio[^:]*:\s*([\d.eE+-]+)',
@@ -111,13 +93,12 @@ def _parse_zernike_full_text(text: str) -> dict:
                 pass
 
         # Log unmatched lines that look like they SHOULD be metrics (helps debug regex mismatches)
-        elif any(kw in line_stripped.lower() for kw in ['p-v', 'p–v', 'p−v', 'p‐v', 'peak', 'valley', 'strehl', 'p.v', 'pv ']):
+        elif any(kw in line_stripped.lower() for kw in ['strehl']):
             logger.warning(f"_parse_zernike_full_text: UNMATCHED metric-like line: {line_stripped!r} (bytes: {line_stripped.encode('utf-8')!r})")
 
     logger.debug(
         f"_parse_zernike_full_text: result — "
         f"rms_chief={result['rms_to_chief']}, rms_centroid={result['rms_to_centroid']}, "
-        f"pv_chief={result['pv_to_chief']}, pv_centroid={result['pv_to_centroid']}, "
         f"strehl={result['strehl_ratio']}, coeffs={len(result['coefficients'])}"
     )
     return result
@@ -218,7 +199,6 @@ class AberrationsMixin:
             On success: {
                 "success": True,
                 "rms_waves": float,
-                "pv_waves": float,
                 "strehl_ratio": float or None,
                 "wavelength_um": float,
                 "field_x": float,
@@ -255,11 +235,10 @@ class AberrationsMixin:
             image_surf = self.oss.LDE.NumberOfSurfaces - 1
 
             # -----------------------------------------------------------------
-            # Part A: ZernikeStandardCoefficients → RMS, P-V, Strehl
+            # Part A: ZernikeStandardCoefficients → RMS, Strehl
             # Uses GetTextFile + text parsing (same pattern as get_seidel_native)
             # -----------------------------------------------------------------
             rms_waves = None
-            pv_waves = None
             strehl_ratio = None
 
             try:
@@ -312,10 +291,9 @@ class AberrationsMixin:
                                     logger.info(f"ZernikeText line: {ls!r}")
                             metrics = _parse_zernike_full_text(text)
                             rms_waves = metrics["rms_to_chief"]
-                            pv_waves = metrics["pv_to_chief"]
                             strehl_ratio = metrics["strehl_ratio"]
-                            if pv_waves is None or strehl_ratio is None:
-                                logger.warning(f"ZernikeStandardCoefficients: parsed metrics incomplete — rms={rms_waves}, pv={pv_waves}, strehl={strehl_ratio}")
+                            if strehl_ratio is None:
+                                logger.warning(f"ZernikeStandardCoefficients: parsed metrics incomplete — rms={rms_waves}, strehl={strehl_ratio}")
                         else:
                             logger.warning(f"ZernikeStandardCoefficients: _read_opticstudio_text_file returned empty string (file was {file_size} bytes)")
                     else:
@@ -327,7 +305,7 @@ class AberrationsMixin:
                 self._cleanup_analysis(zernike_analysis, zernike_temp_path)
                 zernike_analysis = None
 
-            if rms_waves is None and pv_waves is None:
+            if rms_waves is None:
                 return {"success": False, "error": "ZernikeStandardCoefficients returned no metrics"}
 
             # -----------------------------------------------------------------
@@ -381,16 +359,12 @@ class AberrationsMixin:
                 self._cleanup_analysis(wfm_analysis)
                 wfm_analysis = None
 
-            # Log extraction failures so callers know the ZOS-API text parse is broken
-            if pv_waves is None:
-                logger.warning("ZernikeStandardCoefficients: P-V extraction failed — text parser did not match P-V line from GetTextFile output")
             if strehl_ratio is None:
                 logger.warning("ZernikeStandardCoefficients: Strehl extraction failed — text parser did not match Strehl line from GetTextFile output")
 
             result = {
                 "success": True,
                 "rms_waves": rms_waves,
-                "pv_waves": pv_waves,
                 "strehl_ratio": strehl_ratio,
                 "wavelength_um": wavelength_um,
                 "field_x": field_x,
@@ -660,7 +634,7 @@ class AberrationsMixin:
         except Exception as e:
             return {"success": False, "error": f"RmsField analysis failed: {e}"}
 
-    def _run_zernike_vs_field_fallback(
+    def _run_zernike_vs_field(
         self,
         maximum_term: int,
         wavelength_index: int,
@@ -668,11 +642,11 @@ class AberrationsMixin:
         sampling: str = "64x64",
     ) -> pd.DataFrame | None:
         """
-        Run ZernikeCoefficientsVsField via the raw new_analysis API.
+        Run ZernikeCoefficientsVsField via the ZOS-API.
 
-        Used as a fallback when the ZOSPy wrapper fails. Extracts data from
-        either data series (graph-type) or data grids, and returns a DataFrame
-        with field positions as the index and Zernike terms as columns.
+        Extracts data from either data series (graph-type) or data grids,
+        and returns a DataFrame with field positions as the index and
+        Zernike terms as columns.
 
         Returns None if no data could be extracted.
         """
@@ -697,17 +671,17 @@ class AberrationsMixin:
                 analysis.ApplyAndWaitForCompletion()
             finally:
                 elapsed_ms = (time.perf_counter() - zernike_start) * 1000
-                log_timing(logger, "ZernikeCoefficientsVsField.run (fallback)", elapsed_ms)
+                log_timing(logger, "ZernikeCoefficientsVsField.run", elapsed_ms)
 
             results = analysis.Results
-            rows = self._extract_zernike_fallback_rows(results)
+            rows = self._extract_zernike_vs_field_rows(results)
             if not rows:
                 return None
             return pd.DataFrame(rows).set_index("field")
         finally:
             self._cleanup_analysis(analysis)
 
-    def _extract_zernike_fallback_rows(self, results: Any) -> list[dict]:
+    def _extract_zernike_vs_field_rows(self, results: Any) -> list[dict]:
         """
         Extract row dicts from ZOS-API analysis results for ZernikeVsField.
 
@@ -721,7 +695,7 @@ class AberrationsMixin:
         rows: list[dict] = []
         if hasattr(results, 'NumberOfDataSeries'):
             num_series = results.NumberOfDataSeries
-            logger.info(f"ZernikeVsField fallback: {num_series} data series")
+            logger.info(f"ZernikeVsField: {num_series} data series")
             for si in range(num_series):
                 series = results.GetDataSeries(si)
                 if series is None:
@@ -740,12 +714,12 @@ class AberrationsMixin:
                             rows.append({"field": x})
                         rows[pi][desc] = y
                 except Exception as e:
-                    logger.debug(f"ZernikeVsField fallback: series {si} extraction failed: {e}")
+                    logger.debug(f"ZernikeVsField: series {si} extraction failed: {e}")
 
         # If no data series, try data grids
         if not rows and hasattr(results, 'NumberOfDataGrids'):
             num_grids = results.NumberOfDataGrids
-            logger.info(f"ZernikeVsField fallback: {num_grids} data grids (no series)")
+            logger.info(f"ZernikeVsField: {num_grids} data grids (no series)")
             for gi in range(num_grids):
                 grid = results.GetDataGrid(gi)
                 if grid is None:
@@ -810,7 +784,7 @@ class AberrationsMixin:
             field_unit = "deg" if "angle" in field_type_str.lower() else "mm"
 
             # Run ZernikeCoefficientsVsField using raw ZOS-API (no ZosPy temp files)
-            df = self._run_zernike_vs_field_fallback(
+            df = self._run_zernike_vs_field(
                 maximum_term, wavelength_index, field_density, sampling,
             )
             if df is None:
@@ -971,8 +945,6 @@ class AberrationsMixin:
             result = {
                 "success": True,
                 "coefficients": parsed["coefficients"],
-                "pv_to_chief": parsed["pv_to_chief"],
-                "pv_to_centroid": parsed["pv_to_centroid"],
                 "rms_to_chief": parsed["rms_to_chief"],
                 "rms_to_centroid": parsed["rms_to_centroid"],
                 "strehl_ratio": parsed["strehl_ratio"],

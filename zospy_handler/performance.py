@@ -1474,66 +1474,11 @@ class PerformanceMixin:
             if not psf_fields:
                 return {"success": False, "error": "FFT PSF analysis did not produce data"}
 
-            # Try to get Strehl ratio — check FFT header first (cheap),
-            # then fall back to a minimal 32x32 Huygens run.
             strehl_ratio = _parse_strehl_from_header(fft_header_lines)
             if strehl_ratio is not None:
                 logger.debug(f"FFT PSF: Strehl parsed from FFT header: {strehl_ratio}")
             else:
-                logger.debug("FFT PSF: Strehl not found in FFT header, trying Huygens fallback")
-
-            if strehl_ratio is None:
-                huygens = None
-                try:
-                    huygens = self._zp.analyses.new_analysis(
-                        self.oss,
-                        idm.HuygensPsf,
-                        settings_first=True,
-                    )
-                    h_settings = huygens.Settings
-                    self._configure_analysis_settings(
-                        h_settings,
-                        field_index=field_index,
-                        wavelength_index=wavelength_index,
-                        sampling="32x32",
-                    )
-
-                    huygens_start = time.perf_counter()
-                    try:
-                        huygens.ApplyAndWaitForCompletion()
-                    finally:
-                        huygens_elapsed_ms = (time.perf_counter() - huygens_start) * 1000
-                        log_timing(logger, "HuygensPSF.run (Strehl-only, 32x32)", huygens_elapsed_ms)
-
-                    h_results = huygens.Results
-                    if h_results is not None:
-                        try:
-                            header_text = h_results.HeaderData.Lines if hasattr(h_results, 'HeaderData') else ""
-                            # Log Huygens header too
-                            if header_text:
-                                try:
-                                    for i, hl in enumerate(header_text if hasattr(header_text, '__iter__') else header_text.splitlines()):
-                                        logger.debug(f"Huygens PSF (Strehl-only): header[{i}]: {str(hl)!r}")
-                                except Exception:
-                                    logger.debug(f"Huygens PSF (Strehl-only): header_text={header_text!r}")
-                            else:
-                                logger.debug("Huygens PSF (Strehl-only): HeaderData.Lines empty/None")
-                            strehl_ratio = _parse_strehl_from_header(header_text)
-                            if strehl_ratio is not None:
-                                logger.debug(f"Huygens PSF (Strehl-only): Strehl parsed: {strehl_ratio}")
-                        except Exception as e:
-                            logger.warning(f"Huygens PSF (Strehl-only): header extraction failed: {e}")
-                except Exception as e:
-                    logger.warning(f"PSF: Huygens Strehl ratio extraction failed: {e}")
-                finally:
-                    if huygens is not None:
-                        try:
-                            huygens.Close()
-                        except Exception:
-                            pass
-
-            if strehl_ratio is None:
-                logger.warning("FFT PSF: Strehl extraction failed — not found in FFT or Huygens HeaderData.Lines")
+                logger.warning("FFT PSF: Strehl extraction failed — not found in HeaderData.Lines")
 
             result = {
                 "success": True,

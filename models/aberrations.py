@@ -16,13 +16,12 @@ class WavefrontResponse(BaseModel):
     Wavefront analysis response.
 
     Returns raw wavefront data including:
-    - RMS and P-V wavefront error in waves
+    - RMS wavefront error in waves
     - Strehl ratio (if available)
     - Wavefront map as numpy array (Mac side renders to PNG)
     """
     success: bool = Field(description="Whether the operation succeeded")
     rms_waves: Optional[float] = Field(default=None, description="RMS wavefront error in waves")
-    pv_waves: Optional[float] = Field(default=None, description="Peak-to-valley wavefront error in waves")
     strehl_ratio: Optional[float] = Field(default=None, description="Strehl ratio (0-1)")
     wavelength_um: Optional[float] = Field(default=None, description="Wavelength in micrometers")
     field_x: Optional[float] = Field(default=None, description="Field X coordinate")
@@ -60,8 +59,6 @@ class ZernikeCoefficientsDetailResponse(BaseModel):
     """Zernike Standard Coefficients response."""
     success: bool = Field(description="Whether the operation succeeded")
     coefficients: Optional[list[dict[str, Any]]] = Field(default=None, description="List of {term, value, formula} dicts")
-    pv_to_chief: Optional[float] = Field(default=None, description="P-V wavefront error to chief ray (waves)")
-    pv_to_centroid: Optional[float] = Field(default=None, description="P-V wavefront error to centroid (waves)")
     rms_to_chief: Optional[float] = Field(default=None, description="RMS wavefront error to chief ray (waves)")
     rms_to_centroid: Optional[float] = Field(default=None, description="RMS wavefront error to centroid (waves)")
     strehl_ratio: Optional[float] = Field(default=None, description="Strehl ratio (0-1)")
