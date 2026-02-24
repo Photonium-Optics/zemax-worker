@@ -6,7 +6,7 @@ import math
 import os
 import tempfile
 import time
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 import numpy as np
 
@@ -141,6 +141,15 @@ class GeometryMixin:
 
         temp_path = os.path.join(tempfile.gettempdir(), CROSS_SECTION_TEMP_FILENAME)
 
+        # Always collect paraxial data and surface geometry — these don't depend
+        # on the image export succeeding.
+        paraxial = self.get_paraxial_data()
+        surfaces_data = self._get_surface_geometry()
+        rays_total = number_of_rays * max(1, num_fields)
+
+        image_b64: Optional[str] = None
+        image_error: Optional[str] = None
+
         try:
             from zospy.analyses.systemviewers.cross_section import CrossSection
 
@@ -163,40 +172,37 @@ class GeometryMixin:
                 log_timing(logger, "CrossSection.run", cs_elapsed_ms)
 
             if not os.path.exists(temp_path):
-                return {"success": False, "error": "CrossSection analysis did not produce an image"}
-
-            with open(temp_path, 'rb') as f:
-                image_b64 = base64.b64encode(f.read()).decode('utf-8')
-            logger.info(f"Successfully exported CrossSection image, size = {len(image_b64)}")
-
-            # Get paraxial data and surface geometry
-            paraxial = self.get_paraxial_data()
-            surfaces_data = self._get_surface_geometry()
-
-            rays_total = number_of_rays * max(1, num_fields)
-
-            result = {
-                "success": True,
-                "image": image_b64,
-                "image_format": "png",
-                "array_shape": None,
-                "array_dtype": None,
-                "paraxial": paraxial,
-                "surfaces": surfaces_data,
-                "rays_total": rays_total,
-                "rays_through": rays_total,
-            }
-            _log_raw_output("/cross-section", result)
-            return result
+                image_error = "CrossSection analysis did not produce an image"
+            else:
+                with open(temp_path, 'rb') as f:
+                    image_b64 = base64.b64encode(f.read()).decode('utf-8')
+                logger.info(f"Successfully exported CrossSection image, size = {len(image_b64)}")
 
         except Exception as e:
-            return {"success": False, "error": f"CrossSection analysis failed: {e}"}
+            logger.warning(f"CrossSection image export failed: {e}")
+            image_error = f"Image export failed: {e}"
         finally:
             if os.path.exists(temp_path):
                 try:
                     os.remove(temp_path)
                 except OSError:
                     pass
+
+        result = {
+            "success": image_b64 is not None,
+            "image": image_b64,
+            "image_format": "png" if image_b64 else None,
+            "array_shape": None,
+            "array_dtype": None,
+            "paraxial": paraxial,
+            "surfaces": surfaces_data,
+            "rays_total": rays_total,
+            "rays_through": rays_total,
+        }
+        if image_error:
+            result["error"] = image_error
+        _log_raw_output("/cross-section", result)
+        return result
 
     def _get_paraxial_from_lde(self) -> dict[str, Any]:
         """
