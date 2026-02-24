@@ -385,7 +385,7 @@ class AberrationsMixin:
         ray_density: int = 5,
         num_field_points: int = 20,
         reference: str = "centroid",
-        wavelength_index: int = 1,
+        wavelength_index: int | None = None,
     ) -> dict[str, Any]:
         """
         Get RMS spot radius vs field using native RmsField analysis.
@@ -397,7 +397,7 @@ class AberrationsMixin:
             ray_density: Ray density (1-20, maps to RayDens_N enum)
             num_field_points: Number of field sample points (snapped to nearest FieldDensity enum: 5,10,...,100)
             reference: Reference point ('centroid' or 'chief_ray')
-            wavelength_index: Wavelength index (1-indexed)
+            wavelength_index: Wavelength index (1-indexed). None = use OpticStudio primary wavelength.
 
         Returns:
             On success: {
@@ -411,9 +411,33 @@ class AberrationsMixin:
         """
         try:
             wavelengths = self.oss.SystemData.Wavelengths
-            if wavelength_index > wavelengths.NumberOfWavelengths:
-                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
-            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+            num_wavelengths = int(wavelengths.NumberOfWavelengths)
+
+            resolved_wavelength_index = wavelength_index
+            if resolved_wavelength_index is None:
+                for wi in range(1, num_wavelengths + 1):
+                    try:
+                        if wavelengths.GetWavelength(wi).IsPrimary:
+                            resolved_wavelength_index = wi
+                            break
+                    except Exception:
+                        continue
+
+                if resolved_wavelength_index is None:
+                    resolved_wavelength_index = 1
+                    logger.warning(
+                        f"RmsField: No primary wavelength flagged; defaulting to wavelength #{resolved_wavelength_index}",
+                    )
+
+            if resolved_wavelength_index > num_wavelengths:
+                return {
+                    "success": False,
+                    "error": f"Wavelength index {resolved_wavelength_index} out of range (max: {num_wavelengths})",
+                }
+
+            wavelength_um = _extract_value(
+                wavelengths.GetWavelength(resolved_wavelength_index).Wavelength, 0.5876,
+            )
 
             # Determine field unit from system
             fields = self.oss.SystemData.Fields
@@ -493,7 +517,9 @@ class AberrationsMixin:
                     _set_setting('ReferTo', refer_value)
 
                 # Wavelength
-                self._configure_analysis_settings(settings, wavelength_index=wavelength_index)
+                self._configure_analysis_settings(
+                    settings, wavelength_index=resolved_wavelength_index,
+                )
 
                 # ShowDiffractionLimit
                 _set_setting('ShowDiffractionLimit', True)

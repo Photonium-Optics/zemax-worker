@@ -8,7 +8,11 @@ class RmsVsFieldRequest(BaseModel):
     ray_density: int = Field(default=20, ge=5, le=40, description="Ray density (5-40)")
     num_field_points: int = Field(default=20, ge=3, le=256, description="Number of field points (snapped to nearest FieldDensity enum)")
     reference: str = Field(default="centroid", description="Reference point: 'centroid' or 'chief_ray'")
-    wavelength_index: int = Field(default=1, ge=1, description="Wavelength index (1-indexed)")
+    wavelength_index: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Wavelength index (1-indexed). None = use OpticStudio primary wavelength.",
+    )
 
 
 class RmsVsFieldDataPoint(BaseModel):
