@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 class SpotDiagramRequest(BaseModel):
     """Spot diagram analysis request."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
-    ray_density: int = Field(default=20, ge=5, le=40, description="Ray density for pupil sampling")
+    ray_density: int = Field(default=20, ge=5, le=200, description="Ray density for pupil sampling")
     reference: str = Field(default="centroid", description="Reference point: 'chief_ray' or 'centroid'")
     field_index: Optional[int] = Field(default=None, ge=1, description="Field index (1-indexed). None = all fields.")
     wavelength_index: Optional[int] = Field(default=None, ge=1, description="Wavelength index (1-indexed). None = all wavelengths.")
