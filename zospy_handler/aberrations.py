@@ -97,9 +97,9 @@ def _parse_zernike_full_text(text: str) -> dict:
                 pass
             continue
 
-        # Match Strehl Ratio
+        # Match Strehl Ratio — OpticStudio may output "Strehl Ratio (Est)" with tab separators
         m = re.match(
-            r'Strehl\s+Ratio\s*:\s*([\d.eE+-]+)',
+            r'Strehl\s+Ratio[^:]*:\s*([\d.eE+-]+)',
             line_stripped, re.IGNORECASE,
         )
         if m:
