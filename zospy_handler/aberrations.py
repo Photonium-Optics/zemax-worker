@@ -84,8 +84,9 @@ def _parse_zernike_full_text(text: str) -> dict:
             continue
 
         # Match P-V lines (dash may be ASCII hyphen, en-dash, or Unicode minus)
+        # OpticStudio may insert "(Est)" or other text before the colon
         m = re.match(
-            r'P[-\u2010\u2013\u2014\u2212]V\s*\(to\s+(chief|centroid)\)\s*:\s*([-\d.eE+]+)',
+            r'P[-\u2010\u2013\u2014\u2212]V\s*\(to\s+(chief|centroid)\)[^:]*:\s*([-\d.eE+]+)',
             line_stripped, re.IGNORECASE,
         )
         if m:
@@ -110,7 +111,7 @@ def _parse_zernike_full_text(text: str) -> dict:
                 pass
 
         # Log unmatched lines that look like they SHOULD be metrics (helps debug regex mismatches)
-        elif any(kw in line_stripped.lower() for kw in ['p-v', 'p–v', 'p−v', 'p‐v', 'peak-to', 'strehl']):
+        elif any(kw in line_stripped.lower() for kw in ['p-v', 'p–v', 'p−v', 'p‐v', 'peak', 'valley', 'strehl', 'p.v', 'pv ']):
             logger.warning(f"_parse_zernike_full_text: UNMATCHED metric-like line: {line_stripped!r} (bytes: {line_stripped.encode('utf-8')!r})")
 
     logger.debug(
@@ -303,11 +304,12 @@ class AberrationsMixin:
                         text = self._read_opticstudio_text_file(zernike_temp_path)
                         if text:
                             logger.debug(f"ZernikeStandardCoefficients: text file read OK, {len(text)} chars, {len(text.splitlines())} lines")
-                            # Log the metric-containing lines for debugging
+                            # Log ALL non-empty, non-coefficient lines so we can see
+                            # the actual text format OpticStudio produces
                             for dbg_line in text.splitlines():
                                 ls = dbg_line.strip()
-                                if any(kw in ls.lower() for kw in ['rms', 'p-v', 'p–v', 'p−v', 'peak', 'strehl', 'variance', 'max']):
-                                    logger.debug(f"ZernikeText metric line: {ls!r}")
+                                if ls and not ls.startswith('Z '):
+                                    logger.info(f"ZernikeText line: {ls!r}")
                             metrics = _parse_zernike_full_text(text)
                             rms_waves = metrics["rms_to_chief"]
                             pv_waves = metrics["pv_to_chief"]
