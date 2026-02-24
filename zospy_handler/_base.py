@@ -486,21 +486,32 @@ class ZosPyHandlerBase:
         # Get system info after loading
         num_surfaces = self.oss.LDE.NumberOfSurfaces - 1  # Exclude object surface
 
-        # Log which wavelength OpticStudio considers primary after loading
+        # Log all wavelengths OpticStudio loaded from the ZMX file
+        try:
+            zmx_size = os.path.getsize(file_path)
+            logger.info(f"load_zmx_file: ZMX file size = {zmx_size} bytes")
+        except Exception:
+            pass
+
         try:
             wls = self.oss.SystemData.Wavelengths
             n_wl = int(wls.NumberOfWavelengths)
+            logger.info(f"load_zmx_file: NumberOfWavelengths = {n_wl}")
             primary_idx = None
             for i in range(1, n_wl + 1):
                 wl = wls.GetWavelength(i)
-                if wl.IsPrimary:
+                wl_um = _extract_value(wl.Wavelength, 0)
+                wl_wt = _extract_value(wl.Weight, 0)
+                is_primary = getattr(wl, 'IsPrimary', False)
+                logger.info(f"load_zmx_file: Wavelength #{i}: {wl_um:.6f} µm, weight={wl_wt}, is_primary={is_primary}")
+                if is_primary:
                     primary_idx = i
-                    logger.info(f"load_zmx_file: OpticStudio primary wavelength after load = #{i} ({_extract_value(wl.Wavelength, 0):.6f} µm) out of {n_wl} wavelengths")
-                    break
             if primary_idx is None:
                 logger.warning(f"load_zmx_file: No primary wavelength found among {n_wl} wavelengths")
+            else:
+                logger.info(f"load_zmx_file: Primary wavelength = #{primary_idx} out of {n_wl}")
         except Exception as e:
-            logger.debug(f"load_zmx_file: Could not read primary wavelength: {e}")
+            logger.error(f"load_zmx_file: Could not read wavelengths after load: {e}", exc_info=True)
 
         return {
             "num_surfaces": num_surfaces,

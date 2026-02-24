@@ -322,11 +322,22 @@ def _load_system_from_request(request: BaseModel) -> dict[str, Any]:
     if not zmx_content:
         raise ValueError("Request must include 'zmx_content'")
 
-    logger.info("Loading system from ZMX content")
+    logger.info(f"Loading system from ZMX content (base64 length={len(zmx_content)})")
     try:
         zmx_bytes = base64.b64decode(zmx_content)
     except Exception as e:
         raise ValueError(f"Invalid base64 zmx_content: {e}") from e
+
+    logger.info(f"Decoded ZMX: {len(zmx_bytes)} bytes")
+
+    # Count WAVM lines in the raw ZMX to verify wavelengths survived conversion
+    try:
+        zmx_text = zmx_bytes.decode('utf-16-le', errors='replace')
+        wavm_count = zmx_text.count('WAVM ')
+        pwav_lines = [l.strip() for l in zmx_text.split('\r\n') if l.strip().startswith('PWAV')]
+        logger.info(f"ZMX content check: WAVM lines={wavm_count}, PWAV={pwav_lines}")
+    except Exception as e:
+        logger.debug(f"Could not inspect ZMX text: {e}")
 
     with tempfile.NamedTemporaryFile(mode='wb', suffix='.zmx', delete=False) as f:
         f.write(zmx_bytes)
