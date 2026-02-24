@@ -5,8 +5,8 @@ from pydantic import BaseModel, Field
 class RmsVsFieldRequest(BaseModel):
     """RMS vs Field analysis request."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
-    ray_density: int = Field(default=20, ge=5, le=40, description="Ray density (5-40)")
-    num_field_points: int = Field(default=20, ge=3, le=256, description="Number of field points (snapped to nearest FieldDensity enum)")
+    ray_density: int = Field(default=5, ge=1, le=20, description="Ray density (RayDens_1 to RayDens_20)")
+    num_field_points: int = Field(default=20, ge=5, le=100, description="Number of field points (FieldDens_5 to FieldDens_100, step 5)")
     reference: str = Field(default="centroid", description="Reference point: 'centroid' or 'chief_ray'")
     wavelength_index: Optional[int] = Field(
         default=None,

@@ -109,11 +109,8 @@ class RayAnalysisMixin:
         try:
             batch_trace = self.oss.Tools.OpenBatchRayTrace()
             if batch_trace is None:
-                logger.error("Could not open BatchRayTrace tool")
-                return self._ray_analysis_error_result(
-                    paraxial, num_surfaces, num_fields, num_wavelengths,
-                    wavelength_info, surface_semi_diameters,
-                )
+                logger.error("Could not open BatchRayTrace tool — OpticStudio connection may be degraded")
+                raise RuntimeError("OpenBatchRayTrace returned None — OpticStudio tool API unavailable")
 
             total_rays = len(field_indices) * len(wl_indices) * len(pupil_coords)
             norm_unpol = batch_trace.CreateNormUnpol(
@@ -123,10 +120,7 @@ class RayAnalysisMixin:
             )
             if norm_unpol is None:
                 logger.error("Could not create NormUnpol ray trace")
-                return self._ray_analysis_error_result(
-                    paraxial, num_surfaces, num_fields, num_wavelengths,
-                    wavelength_info, surface_semi_diameters,
-                )
+                raise RuntimeError("CreateNormUnpol returned None — ray trace initialization failed")
 
             opd_none = self._zp.constants.Tools.RayTrace.OPDMode.None_
 
@@ -208,12 +202,8 @@ class RayAnalysisMixin:
             logger.error(
                 f"BatchRayTrace FAILED: {type(e).__name__}: {e}", exc_info=True
             )
-            # Discard partial results — they may be incomplete/misleading
-            raw_rays = []
-            return self._ray_analysis_error_result(
-                paraxial, num_surfaces, num_fields, num_wavelengths,
-                wavelength_info, surface_semi_diameters,
-            )
+            # Re-raise to let _run_endpoint handle it (returns success=False + triggers reconnect)
+            raise
         finally:
             if batch_trace is not None:
                 try:
@@ -240,27 +230,3 @@ class RayAnalysisMixin:
         _log_raw_output("/ray-analysis", result)
         return result
 
-    @staticmethod
-    def _ray_analysis_error_result(
-        paraxial: dict,
-        num_surfaces: int,
-        num_fields: int,
-        num_wavelengths: int,
-        wavelength_info: list,
-        surface_semi_diameters: list,
-    ) -> dict[str, Any]:
-        """Return a safe error result dict when batch trace fails to initialize."""
-        return {
-            "paraxial": {
-                "efl": paraxial.get("efl"),
-                "bfl": paraxial.get("bfl"),
-                "fno": paraxial.get("fno"),
-                "total_track": paraxial.get("total_track"),
-            },
-            "num_surfaces": num_surfaces,
-            "num_fields": num_fields,
-            "num_wavelengths": num_wavelengths,
-            "wavelength_info": wavelength_info,
-            "raw_rays": [],
-            "surface_semi_diameters": surface_semi_diameters,
-        }

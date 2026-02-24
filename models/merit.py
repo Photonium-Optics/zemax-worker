@@ -14,7 +14,7 @@ class MeritFunctionOperandRow(BaseModel):
 class MeritFunctionRequest(BaseModel):
     """Request to evaluate a merit function."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
-    operand_rows: list[MeritFunctionOperandRow] = Field(max_length=200, description="Merit function operand rows")
+    operand_rows: list[MeritFunctionOperandRow] = Field(max_length=1000, description="Merit function operand rows")
 
 
 class EvaluatedOperandRow(BaseModel):

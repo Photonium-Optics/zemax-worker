@@ -180,7 +180,8 @@ class GeometryMixin:
 
         except Exception as e:
             logger.warning(f"CrossSection image export failed: {e}")
-            image_error = f"Image export failed: {e}"
+            # ZosPy raises a generic error; try to get the real message from OpticStudio.
+            image_error = self._get_cross_section_error(str(e))
         finally:
             if os.path.exists(temp_path):
                 try:
@@ -203,6 +204,33 @@ class GeometryMixin:
             result["error"] = image_error
         _log_raw_output("/cross-section", result)
         return result
+
+    def _get_cross_section_error(self, fallback: str) -> str:
+        """
+        Try to extract the actual OpticStudio error message after a cross-section failure.
+
+        Opens the cross-section export tool briefly to read ErrorMessage,
+        which contains actionable messages like "Cannot determine object
+        coordinates for field 3".
+        """
+        tool = None
+        try:
+            tool = self.oss.Tools.OpenCrossSectionExport()
+            tool.RunAndWaitForCompletion()
+            error_msg = getattr(tool, 'ErrorMessage', None)
+            if error_msg:
+                error_msg = str(error_msg).strip()
+                logger.info(f"[CROSS] OpticStudio error detail: {error_msg}")
+                return error_msg
+        except Exception as e2:
+            logger.debug(f"[CROSS] Could not extract OpticStudio error: {e2}")
+        finally:
+            if tool is not None:
+                try:
+                    tool.Close()
+                except Exception:
+                    pass
+        return fallback
 
     def _get_paraxial_from_lde(self) -> dict[str, Any]:
         """

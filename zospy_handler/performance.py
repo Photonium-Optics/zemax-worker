@@ -258,7 +258,7 @@ class PerformanceMixin:
                 "error": f"{label}: no field data collected. Field iteration may have failed.",
             }
 
-        if frequency is None or len(frequency) == 0:
+        if not frequency:
             return {
                 "success": False,
                 "error": f"{label}: no frequency data extracted from analysis results. "
@@ -296,7 +296,7 @@ class PerformanceMixin:
 
         Args:
             ray_density: Controls number of rays: (ray_density+1)^2 per field/wavelength.
-                         Default 20 → 441 rays. Range 5-40.
+                         Default 20 → 441 rays. Range 5-200.
             reference: Reference point: 'chief_ray' or 'centroid'
             field_index: Field index (1-indexed). None = all fields.
             wavelength_index: Wavelength index (1-indexed). None = all wavelengths.
@@ -431,7 +431,7 @@ class PerformanceMixin:
 
         Args:
             settings: OpticStudio analysis settings object
-            ray_density: Rays per axis (1-20)
+            ray_density: Rays per axis (controls ray count: (ray_density+1)^2 per field/wl)
             reference_value: Spot.Reference enum value (ChiefRay or Centroid)
             field_index: Field index (1-indexed). None = all fields.
             wavelength_index: Wavelength index (1-indexed). None = all wavelengths.
@@ -531,8 +531,8 @@ class PerformanceMixin:
             # Use batch ray trace for efficiency
             ray_trace = self.oss.Tools.OpenBatchRayTrace()
             if ray_trace is None:
-                logger.warning("Could not open BatchRayTrace tool")
-                return spot_rays
+                logger.error("[SPOT] Could not open BatchRayTrace tool — OpticStudio connection may be degraded")
+                raise RuntimeError("OpenBatchRayTrace returned None — OpticStudio tool API unavailable")
 
             # Get the normalized unpolarized ray trace interface
             max_rays = len(field_indices) * len(wl_indices) * len(pupil_coords)
@@ -544,8 +544,8 @@ class PerformanceMixin:
             )
 
             if norm_unpol is None:
-                logger.warning("Could not create NormUnpol ray trace")
-                return spot_rays
+                logger.error("[SPOT] Could not create NormUnpol ray trace")
+                raise RuntimeError("CreateNormUnpol returned None — ray trace initialization failed")
 
             # AddRay signature: (WaveNumber, Hx, Hy, Px, Py, OPDMode)
             opd_none = self._zp.constants.Tools.RayTrace.OPDMode.None_
@@ -784,11 +784,12 @@ class PerformanceMixin:
             fi_1 = field_index + 1
             wi = wavelength_index if wavelength_index else 1
 
-            # Log matrix dimensions for debugging
-            if hasattr(spot_data, 'NumberOfFields') and hasattr(spot_data, 'NumberOfWavelengths'):
-                logger.info(f"[SPOT] SpotData matrix: NumberOfFields={spot_data.NumberOfFields}, NumberOfWavelengths={spot_data.NumberOfWavelengths}, querying fi_1={fi_1}, wi={wi}")
-            else:
-                logger.info(f"[SPOT] SpotData matrix dimensions unknown, querying fi_1={fi_1}, wi={wi}")
+            # Log matrix dimensions for debugging (only for first field to avoid noise)
+            if field_index == 0:
+                if hasattr(spot_data, 'NumberOfFields') and hasattr(spot_data, 'NumberOfWavelengths'):
+                    logger.debug(f"[SPOT] SpotData matrix: NumberOfFields={spot_data.NumberOfFields}, NumberOfWavelengths={spot_data.NumberOfWavelengths}")
+                else:
+                    logger.debug("[SPOT] SpotData matrix dimensions unknown")
 
             # StandardSpot SpotData methods return values in µm (not lens units).
             # The ZOSAPI example (PythonStandalone_22) prints these raw with no conversion.
@@ -1713,11 +1714,11 @@ class PerformanceMixin:
                 fx = float(gdf["FieldX"].iloc[0]) if "FieldX" in gdf.columns else 0.0
                 fy = float(gdf["FieldY"].iloc[0]) if "FieldY" in gdf.columns else 0.0
 
-                wi = 0
+                wi_0based = 0  # default to first wavelength (0-based)
                 if wval > 0:
                     for k in range(1, num_wl + 1):
                         if abs(_extract_value(sys_wl.GetWavelength(k).Wavelength, 0.0) - wval) < 1e-6:
-                            wi = k
+                            wi_0based = k - 1
                             break
 
                 hd = "Direction" in gdf.columns
@@ -1740,7 +1741,7 @@ class PerformanceMixin:
                 all_fans.append({
                     "field_index": fnum - 1,
                     "field_x": fx, "field_y": fy,
-                    "wavelength_um": wval, "wavelength_index": wi,
+                    "wavelength_um": wval, "wavelength_index": wi_0based,
                     "tangential_py": tpy, "tangential_ey": tey,
                     "sagittal_px": spx, "sagittal_ex": sex,
                 })

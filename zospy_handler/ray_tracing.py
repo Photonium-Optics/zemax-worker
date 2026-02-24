@@ -85,8 +85,8 @@ class RayTracingMixin:
         try:
             batch_trace = self.oss.Tools.OpenBatchRayTrace()
             if batch_trace is None:
-                logger.error("Could not open BatchRayTrace tool")
-                return {"paraxial": {}, "num_surfaces": num_surfaces, "num_fields": num_fields, "raw_rays": [], "surface_semi_diameters": surface_semi_diameters}
+                logger.error("Could not open BatchRayTrace tool — OpticStudio connection may be degraded")
+                raise RuntimeError("OpenBatchRayTrace returned None — OpticStudio tool API unavailable")
 
             total_rays = num_fields * len(pupil_coords)
             norm_unpol = batch_trace.CreateNormUnpol(
@@ -96,7 +96,7 @@ class RayTracingMixin:
             )
             if norm_unpol is None:
                 logger.error("Could not create NormUnpol ray trace")
-                return {"paraxial": {}, "num_surfaces": num_surfaces, "num_fields": num_fields, "raw_rays": [], "surface_semi_diameters": surface_semi_diameters}
+                raise RuntimeError("CreateNormUnpol returned None — ray trace initialization failed")
 
             opd_none = self._zp.constants.Tools.RayTrace.OPDMode.None_
 
