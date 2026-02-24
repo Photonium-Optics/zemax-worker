@@ -571,53 +571,48 @@ class ZosPyHandlerBase:
             pwav_idx: 1-based index of the primary wavelength
         """
         wls = self.oss.SystemData.Wavelengths
-        n_existing = int(wls.NumberOfWavelengths)
-
-        # Sort by index to ensure correct order
         wavm_list = sorted(wavm_list, key=lambda x: x[0])
 
-        # Remove extra wavelengths first (must keep ≥2, so remove down to 2 max)
+        # Remove extra wavelengths (must keep >= 2 until new ones are added)
         while int(wls.NumberOfWavelengths) > max(len(wavm_list), 2):
-            wls.RemoveWavelength(int(wls.NumberOfWavelengths))
+            if not wls.RemoveWavelength(int(wls.NumberOfWavelengths)):
+                logger.warning("_set_wavelengths: RemoveWavelength refused (API constraint)")
+                break
 
-        # Set wavelength 1 directly (slot always exists after load)
+        # Set wavelength #1 directly (slot always exists after load)
         if wavm_list:
-            idx, wl_um, weight = wavm_list[0]
+            _, wl_um, weight = wavm_list[0]
             wl = wls.GetWavelength(1)
             wl.Wavelength = wl_um
             wl.Weight = weight
-            logger.info(f"_set_wavelengths: Set wavelength #1: {wl_um:.6f} µm, weight={weight}")
+            logger.info(f"_set_wavelengths: #1 = {wl_um:.6f} µm, weight={weight}")
 
-        # Add remaining wavelengths with correct values directly
-        primary_wl = None
-        for i, (idx, wl_um, weight) in enumerate(wavm_list[1:], start=2):
+        # Set or add remaining wavelengths
+        for i, (_, wl_um, weight) in enumerate(wavm_list[1:], start=2):
             if i <= int(wls.NumberOfWavelengths):
-                # Slot already exists, overwrite it
                 wl = wls.GetWavelength(i)
                 wl.Wavelength = wl_um
                 wl.Weight = weight
-                logger.info(f"_set_wavelengths: Set wavelength #{i}: {wl_um:.6f} µm, weight={weight}")
             else:
-                # Add new slot with correct values
                 wl = wls.AddWavelength(wl_um, weight)
                 if wl is None:
-                    logger.error(f"_set_wavelengths: AddWavelength returned null for #{i} "
-                                 f"({wl_um:.6f} µm) — may have hit API limit of 12")
+                    logger.error(
+                        f"_set_wavelengths: AddWavelength returned null for #{i} "
+                        f"({wl_um:.6f} µm) — may have hit API limit of 12"
+                    )
                     break
-                logger.info(f"_set_wavelengths: Added wavelength #{i}: {wl_um:.6f} µm, weight={weight}")
-            if i == pwav_idx:
-                primary_wl = wl
+            logger.info(f"_set_wavelengths: #{i} = {wl_um:.6f} µm, weight={weight}")
 
-        # Now safe to remove slot 2 if we only need 1 wavelength (≥2 constraint no longer applies
-        # since we added others first). In practice we always have ≥3 so this is defensive.
+        # Remove trailing slots if we have more than needed
         while int(wls.NumberOfWavelengths) > len(wavm_list):
-            wls.RemoveWavelength(int(wls.NumberOfWavelengths))
+            if not wls.RemoveWavelength(int(wls.NumberOfWavelengths)):
+                logger.warning("_set_wavelengths: RemoveWavelength refused (API constraint)")
+                break
 
         # Set primary wavelength
         if 1 <= pwav_idx <= int(wls.NumberOfWavelengths):
-            wl = wls.GetWavelength(pwav_idx)
-            wl.MakePrimary()
-            logger.info(f"_set_wavelengths: Set primary to #{pwav_idx} via MakePrimary()")
+            wls.GetWavelength(pwav_idx).MakePrimary()
+            logger.info(f"_set_wavelengths: Primary = #{pwav_idx}")
 
     def _get_efl(self) -> Optional[float]:
         """
