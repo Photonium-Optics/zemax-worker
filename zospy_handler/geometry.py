@@ -376,7 +376,7 @@ class GeometryMixin:
             num_surfaces = self.oss.LDE.NumberOfSurfaces
             surfaces = []
 
-            for surf_idx in range(num_surfaces):
+            for surf_idx in range(1, num_surfaces):
                 entry: dict[str, Any] = {
                     "surface_number": surf_idx,
                     "surface_type": "Standard",
@@ -419,7 +419,7 @@ class GeometryMixin:
                         sd_result = sd_analysis.run(self.oss)
                     finally:
                         sd_elapsed = (time.perf_counter() - sd_start) * 1000
-                        if surf_idx == 0:
+                        if surf_idx == 1:
                             log_timing(logger, f"SurfaceData.run(surf={surf_idx})", sd_elapsed)
 
                     if sd_result and hasattr(sd_result, 'data') and sd_result.data is not None:

@@ -1447,18 +1447,10 @@ class PerformanceMixin:
                         if hasattr(results, 'HeaderData'):
                             hd = results.HeaderData
                             if hd is not None and hasattr(hd, 'Lines'):
-                                fft_header_lines = hd.Lines
-                                # Log what we actually got back
-                                if fft_header_lines is None:
-                                    logger.debug("FFT PSF: HeaderData.Lines returned None")
-                                else:
-                                    try:
-                                        line_count = len(list(fft_header_lines)) if hasattr(fft_header_lines, '__iter__') else 'non-iterable'
-                                        logger.debug(f"FFT PSF: HeaderData.Lines returned {line_count} lines, type={type(fft_header_lines).__name__}")
-                                        for i, hl in enumerate(fft_header_lines):
-                                            logger.debug(f"FFT PSF: header[{i}]: {str(hl)!r}")
-                                    except Exception as e:
-                                        logger.debug(f"FFT PSF: HeaderData.Lines iteration failed: {e}")
+                                fft_header_lines = list(hd.Lines)  # materialize .NET IEnumerable once
+                                logger.debug(f"FFT PSF: HeaderData.Lines returned {len(fft_header_lines)} lines")
+                                for i, hl in enumerate(fft_header_lines):
+                                    logger.debug(f"FFT PSF: header[{i}]: {str(hl)!r}")
                             else:
                                 logger.debug(f"FFT PSF: HeaderData is None or has no Lines (HeaderData={hd})")
                         else:
