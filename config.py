@@ -40,14 +40,6 @@ _RECONNECT_COM_RELEASE_DELAY = 2.0  # seconds to wait after close() for COM clea
 # Analysis settings
 DEFAULT_NUM_CROSS_SECTION_RAYS = 11
 
-# Fallback integer values for SampleSizes enum when runtime resolution fails.
-# Enum names follow the pattern "S_{size}" (e.g., S_64x64).
-SAMPLING_INT_FALLBACK = {
-    "32x32": 1, "64x64": 2, "128x128": 3,
-    "256x256": 4, "512x512": 5, "1024x1024": 6,
-    "2048x2048": 7,
-}
-
 # ZOSAPI FieldType enum name -> (internal field_type, unit)
 FIELD_TYPE_MAP = {
     "Angle": ("object_angle", "deg"),

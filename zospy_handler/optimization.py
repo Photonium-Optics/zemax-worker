@@ -103,12 +103,7 @@ class OptimizationMixin:
                         pass
 
                 # Set parameter cells — use cell DataType to pick the right setter
-                param_columns = [
-                    mfe_cols.Param1, mfe_cols.Param2,
-                    mfe_cols.Param3, mfe_cols.Param4,
-                    mfe_cols.Param5, mfe_cols.Param6,
-                    mfe_cols.Param7, mfe_cols.Param8,
-                ]
+                param_columns = self._get_param_columns(mfe_cols)
                 for i, col in enumerate(param_columns):
                     if i < len(params) and params[i] is not None:
                         cell = op.GetOperandCell(col)
@@ -411,12 +406,7 @@ class OptimizationMixin:
         # Read all generated rows from MFE
         try:
             mfe_cols = zp.constants.Editors.MFE.MeritColumn
-            param_columns = [
-                mfe_cols.Param1, mfe_cols.Param2,
-                mfe_cols.Param3, mfe_cols.Param4,
-                mfe_cols.Param5, mfe_cols.Param6,
-                mfe_cols.Param7, mfe_cols.Param8,
-            ]
+            param_columns = self._get_param_columns(mfe_cols)
             logger.info(f"Wizard generated {mfe.NumberOfOperands} operand rows")
             generated_rows = self._read_mfe_rows(mfe, mfe_cols, param_columns, "wizard")
         except Exception as e:
@@ -583,6 +573,11 @@ class OptimizationMixin:
     # ── MFE row reading helper ─────────────────────────────────────────
 
     @staticmethod
+    def _get_param_columns(mfe_cols) -> list:
+        """Return the list of Param1..Param8 MeritColumn enum values."""
+        return [getattr(mfe_cols, f"Param{i}") for i in range(1, 9)]
+
+    @staticmethod
     def _read_mfe_param_cells(op, param_columns) -> list:
         params = []
         for col in param_columns:
@@ -634,46 +629,51 @@ class OptimizationMixin:
         return rows
 
     # ── Optimization enum helpers ──────────────────────────────────────
+    # Enum member names are per ZOS-API docs (AZOS 25 R2.04).
 
-    @staticmethod
-    def _resolve_enum(enum_obj, attr_name: str, fallback_name: str, label: str):
-        """Resolve an enum member by name, falling back to a default with a warning."""
-        resolved = getattr(enum_obj, attr_name, None)
-        if resolved is not None:
-            return resolved
-        logger.warning(
-            f"{label} '{attr_name}' not found in enum, falling back to {fallback_name}"
-        )
-        return getattr(enum_obj, fallback_name, None)
+    # OptimizationAlgorithm: DampedLeastSquares=0, OrthogonalDescent=1
+    _ALGORITHM_MAP = {
+        "DLS": "DampedLeastSquares",
+        "DampedLeastSquares": "DampedLeastSquares",
+        "OrthogonalDescent": "OrthogonalDescent",
+    }
+
+    # OptimizationCycles: Automatic=0, Fixed_1_Cycle=1, Fixed_5_Cycles=2,
+    # Fixed_10_Cycles=3, Fixed_50_Cycles=4, Infinite=5
+    _CYCLES_MAP = {
+        None: "Automatic",
+        1: "Fixed_1_Cycle",
+        5: "Fixed_5_Cycles",
+        10: "Fixed_10_Cycles",
+        50: "Fixed_50_Cycles",
+    }
 
     @staticmethod
     def _resolve_algorithm(zp_module, algorithm: str):
         """Map algorithm string to OptimizationAlgorithm enum value."""
         alg_enum = zp_module.constants.Tools.Optimization.OptimizationAlgorithm
-        aliases = {"DLS": "DampedLeastSquares"}
-        attr_name = aliases.get(algorithm, algorithm)
-        fallback = "DampedLeastSquares"
-        return OptimizationMixin._resolve_enum(alg_enum, attr_name, fallback, "Algorithm")
+        attr_name = OptimizationMixin._ALGORITHM_MAP.get(algorithm)
+        if attr_name is None:
+            raise ValueError(
+                f"Unknown optimization algorithm '{algorithm}'. "
+                f"Valid values: {list(OptimizationMixin._ALGORITHM_MAP.keys())}"
+            )
+        return getattr(alg_enum, attr_name)
 
     @staticmethod
     def _resolve_cycles(zp_module, cycles: int | None):
         """Map cycle count to OptimizationCycles enum value.
 
-        The API only supports specific fixed counts (1, 5, 10, 50).
-        Unrecognized values fall back to Automatic.
+        Valid cycle counts: None (Automatic), 1, 5, 10, 50.
         """
         cycles_enum = zp_module.constants.Tools.Optimization.OptimizationCycles
-        fallback = "Automatic"
-        if cycles is None:
-            return getattr(cycles_enum, fallback, None)
-        mapping = {
-            1: "Fixed_1_Cycle",
-            5: "Fixed_5_Cycles",
-            10: "Fixed_10_Cycles",
-            50: "Fixed_50_Cycles",
-        }
-        attr_name = mapping.get(cycles, fallback)
-        return OptimizationMixin._resolve_enum(cycles_enum, attr_name, fallback, "Cycles")
+        attr_name = OptimizationMixin._CYCLES_MAP.get(cycles)
+        if attr_name is None:
+            raise ValueError(
+                f"Unsupported cycle count {cycles}. "
+                f"Valid values: None (Automatic), 1, 5, 10, 50"
+            )
+        return getattr(cycles_enum, attr_name)
 
     @staticmethod
     def _round_to_save_count(num_to_save: int | None) -> int:
@@ -684,45 +684,44 @@ class OptimizationMixin:
 
     @staticmethod
     def _resolve_save_count(zp_module, num_to_save: int | None):
-        """Map save count to OptimizationSaveCount enum value."""
+        """Map save count to OptimizationSaveCount enum value.
+
+        OptimizationSaveCount: Save_10=0 through Save_100=9.
+        """
         save_enum = zp_module.constants.Tools.Optimization.OptimizationSaveCount
         rounded = OptimizationMixin._round_to_save_count(num_to_save)
-        attr_name = f"Save_{rounded}"
-        return OptimizationMixin._resolve_enum(save_enum, attr_name, "Save_10", "SaveCount")
+        result = getattr(save_enum, f"Save_{rounded}", None)
+        if result is None:
+            raise ValueError(f"Unknown OptimizationSaveCount: Save_{rounded}")
+        return result
 
     @staticmethod
-    def _read_systems_evaluated(opt_tool) -> int | None:
-        """Read systems evaluated count from an optimization tool, or None on failure."""
-        try:
-            return int(opt_tool.Systems) if hasattr(opt_tool, 'Systems') else None
-        except Exception as e:
-            logger.debug(f"Could not read systems_evaluated: {e}")
-            return None
+    def _read_systems_evaluated(opt_tool) -> int:
+        """Read systems evaluated count from a global optimization tool.
 
-    def _read_best_solutions(self, opt_tool, mfe, num_to_save: int = 10) -> list[float]:
+        IGlobalOptimization.Systems is a documented long property.
+        """
+        return int(opt_tool.Systems)
+
+    def _read_best_solutions(self, opt_tool, num_to_save: int = 10) -> list[float]:
         """Read the best N merit values from a global optimizer.
 
-        CurrentMeritFunction(j) is 1-indexed and returns the j-th best solution's merit.
-        Must be called before opt_tool.Close() -- solutions are lost after that.
+        IGlobalOptimization.CurrentMeritFunction(int N) is a 1-indexed method
+        returning double. Slots beyond what was saved raise an exception.
+        Must be called before opt_tool.Close().
         """
         count = self._round_to_save_count(num_to_save)
         solutions: list[float] = []
         for j in range(1, count + 1):
             try:
-                mf_val = _extract_value(opt_tool.CurrentMeritFunction(j))
-            except Exception as e:
-                logger.debug(f"CurrentMeritFunction({j}) unavailable, stopping at {len(solutions)} solutions")
+                raw = opt_tool.CurrentMeritFunction(j)
+            except Exception:
+                # Out-of-range slot index — no more saved solutions
                 break
-            if mf_val is None or mf_val < 0:
+            mf_val = _extract_value(raw, default=-1.0)
+            if mf_val < 0:
                 break
             solutions.append(mf_val)
-        if not solutions:
-            try:
-                mf_val = _extract_value(mfe.CalculateMeritFunction())
-                if mf_val is not None:
-                    solutions.append(mf_val)
-            except Exception as e:
-                logger.warning(f"MFE fallback for best solutions also failed: {e}")
         return solutions
 
     # ── Main optimization entry point ───────────────────────────────
@@ -787,9 +786,7 @@ class OptimizationMixin:
                 # Global and Hammer both use timeout-based execution
                 if method == "global":
                     opt_tool = tools.OpenGlobalOptimization()
-                    save_count = self._resolve_save_count(zp, num_to_save)
-                    if save_count is not None:
-                        opt_tool.NumberToSave = save_count
+                    opt_tool.NumberToSave = self._resolve_save_count(zp, num_to_save)
                 else:
                     opt_tool = tools.OpenHammerOptimization()
 
@@ -803,55 +800,54 @@ class OptimizationMixin:
                     opt_tool.WaitForCompletion()
                 finally:
                     # Note: Succeeded is always False after deliberate Cancel() — don't warn
-                    if method == "global":
-                        best_solutions = self._read_best_solutions(opt_tool, mfe, num_to_save or 10)
-                    systems_evaluated = self._read_systems_evaluated(opt_tool)
-                    opt_tool.Close()
+                    try:
+                        if method == "global":
+                            best_solutions = self._read_best_solutions(opt_tool, num_to_save or 10)
+                        systems_evaluated = self._read_systems_evaluated(opt_tool)
+                    finally:
+                        opt_tool.Close()
 
             else:  # local (default)
                 opt_tool = tools.OpenLocalOptimization()
                 opt_tool.Algorithm = resolved_alg
                 opt_tool.NumberOfCores = 8
 
-                resolved_cycles = self._resolve_cycles(zp, cycles)
-                if resolved_cycles is not None and hasattr(opt_tool, 'Cycles'):
-                    opt_tool.Cycles = resolved_cycles
+                # ILocalOptimization.Cycles is OptimizationCycles enum (get/set)
+                opt_tool.Cycles = self._resolve_cycles(zp, cycles)
 
                 try:
                     opt_tool.RunAndWaitForCompletion()
                 finally:
-                    if hasattr(opt_tool, 'Succeeded') and not opt_tool.Succeeded:
-                        err_msg = getattr(opt_tool, 'ErrorMessage', 'unknown error')
-                        logger.warning(f"Local optimization did not succeed: {err_msg}")
-                    # Use CurrentMeritFunction from the tool (avoids redundant MFE call)
                     try:
-                        merit_after = _extract_value(opt_tool.CurrentMeritFunction)
-                    except Exception:
-                        pass
-                    opt_tool.Close()
+                        # Succeeded and ErrorMessage are ISystemTool properties (always present)
+                        if not opt_tool.Succeeded:
+                            logger.warning(f"Local optimization did not succeed: {opt_tool.ErrorMessage}")
+                        # ILocalOptimization.CurrentMeritFunction is a double property (get-only)
+                        # Use default=None so we can detect extraction failure vs merit=0.0
+                        merit_after = _extract_value(opt_tool.CurrentMeritFunction, default=None)
+                    finally:
+                        opt_tool.Close()
 
         except Exception as e:
             logger.error(f"Optimization run failed: {e}")
             return {"success": False, "error": f"Optimization failed: {e}"}
 
-        # Step 4: Read final merit (use tool's CurrentMeritFunction if available, else MFE)
+        # IMeritFunctionEditor.CalculateMeritFunction() returns double
+        # For global/hammer methods, merit_after stays None (not read from opt_tool),
+        # so this fallback always fires for those methods.
+        merit_unknown = False
         if merit_after is None:
-            try:
-                merit_after = _extract_value(mfe.CalculateMeritFunction())
-            except Exception as e:
+            merit_after = _extract_value(mfe.CalculateMeritFunction(), default=None)
+            if merit_after is None:
+                logger.error("Post-optimization merit calculation returned None")
                 merit_after = merit_before
-                logger.warning(f"Post-optimization merit calculation failed: {e}")
+                merit_unknown = True
 
         # Step 5: Read operand results from MFE
         operand_results = []
         try:
             mfe_cols = zp.constants.Editors.MFE.MeritColumn
-            param_columns = [
-                mfe_cols.Param1, mfe_cols.Param2,
-                mfe_cols.Param3, mfe_cols.Param4,
-                mfe_cols.Param5, mfe_cols.Param6,
-                mfe_cols.Param7, mfe_cols.Param8,
-            ]
+            param_columns = self._get_param_columns(mfe_cols)
             operand_results = self._read_mfe_rows(mfe, mfe_cols, param_columns, "post-opt")
         except Exception as e:
             logger.warning(f"Error reading post-optimization MFE: {e}")
@@ -868,6 +864,7 @@ class OptimizationMixin:
             "algorithm": algorithm,
             "merit_before": merit_before,
             "merit_after": merit_after,
+            "merit_unknown": merit_unknown,
             "cycles_requested": cycles if method == "local" else None,
             "operand_results": operand_results,
             "variable_states": variable_states,
@@ -908,8 +905,7 @@ class OptimizationMixin:
             return variable_states
 
         # Start at surface 1 (skip object surface 0).
-        # Return surf_idx as-is (Zemax LDE index) -- the analysis
-        # service's surface_patcher uses the same indexing.
+        # Return surf_idx as-is (Zemax LDE index).
         for surf_idx in range(1, num_surfaces):
             try:
                 surf = lde.GetSurfaceAt(surf_idx)
@@ -1003,24 +999,11 @@ class OptimizationMixin:
         surf_before = lde.GetSurfaceAt(focus_surf_idx)
         thickness_before = _extract_value(surf_before.Thickness, 0.0, allow_inf=True)
 
-        # Resolve the criterion enum (varies by OpticStudio version)
-        criterion_enum = None
-        for enum_path in (
-            "Tools.General.QuickFocusCriterion",
-            "Tools.General.QuickAdjustCriterion",
-        ):
-            try:
-                parts = enum_path.split(".")
-                obj = zp.constants
-                for part in parts:
-                    obj = getattr(obj, part)
-                criterion_enum = obj
-                break
-            except AttributeError:
-                continue
-
-        if criterion_enum is None:
-            return {"success": False, "error": "QuickFocus criterion enum not found in this OpticStudio version"}
+        # Resolve the criterion enum (ZOSAPI.Tools.General.QuickFocusCriterion)
+        try:
+            criterion_enum = zp.constants.Tools.General.QuickFocusCriterion
+        except Exception as e:
+            return {"success": False, "error": f"QuickFocusCriterion enum not found: {type(e).__name__}: {e}"}
 
         resolved_criterion = getattr(criterion_enum, criterion, None)
         if resolved_criterion is None:
@@ -1060,10 +1043,14 @@ class OptimizationMixin:
 
     # ── Scale Lens (native) ─────────────────────────────────────────
 
-    # Unit name → ZOSAPI index mappings
-    _UNIT_INDEX = {"mm": 0, "cm": 1, "inches": 2, "meters": 3}
-    _UNIT_NAMES = {0: "mm", 1: "cm", 2: "inches", 3: "meters"}
-    _ENUM_NAME_TO_INDEX = {"Millimeters": 0, "Centimeters": 1, "Inches": 2, "Meters": 3}
+    # Unit mappings for Scale Lens tool
+    # Short name -> ScaleToUnits enum member name
+    _UNIT_TO_ENUM = {
+        "mm": "Millimeters", "cm": "Centimeters",
+        "inches": "Inches", "meters": "Meters",
+    }
+    # LensUnit enum member name -> short name (for reading current unit)
+    _ENUM_TO_UNIT = {v: k for k, v in _UNIT_TO_ENUM.items()}
 
     def run_scale_lens(
         self,
@@ -1089,7 +1076,7 @@ class OptimizationMixin:
             return {"success": False, "error": "scale_factor is required for mode='factor'"}
         if mode == "units" and target_unit is None:
             return {"success": False, "error": "target_unit is required for mode='units'"}
-        if mode == "units" and target_unit not in self._UNIT_INDEX:
+        if mode == "units" and target_unit not in self._UNIT_TO_ENUM:
             return {"success": False, "error": f"Invalid target_unit: {target_unit}. Must be one of: mm, cm, inches, meters"}
 
         # Read pre-scale paraxial data
@@ -1097,22 +1084,15 @@ class OptimizationMixin:
         paraxial_before = self._get_paraxial_from_lde()
         total_track_before = paraxial_before.get("total_track")
 
-        # Read original unit for reporting
-        original_unit = None
-        try:
-            unit_type = self.oss.SystemData.Units.LensUnits
-            if isinstance(unit_type, int):
-                unit_index = unit_type
-            else:
-                enum_name = str(unit_type).split(".")[-1]
-                unit_index = self._ENUM_NAME_TO_INDEX.get(enum_name)
-            original_unit = self._UNIT_NAMES.get(unit_index) if unit_index is not None else None
-        except Exception as e:
-            logger.warning(f"Could not read original unit: {e}")
+        # Read original unit for reporting.
+        # LensUnits is a LensUnit enum; str() gives e.g. "LensUnit.Millimeters"
+        enum_name = str(self.oss.SystemData.Units.LensUnits).split(".")[-1]
+        original_unit = self._ENUM_TO_UNIT.get(enum_name)
 
         # Run Scale Lens tool
         # IScale interface: ScaleByFactor/ScaleByUnits are mutually exclusive toggles.
         # ScaleToUnit takes ZOSAPI.Tools.General.ScaleToUnits enum.
+        scale_tool = None
         try:
             scale_tool = self.oss.Tools.OpenScale()
             if scale_tool is None:
@@ -1123,29 +1103,20 @@ class OptimizationMixin:
                 scale_tool.ScaleFactor = float(scale_factor)
             else:  # mode == "units"
                 scale_tool.ScaleByUnits = True
-                # Resolve ScaleToUnits enum (ZOSAPI.Tools.General.ScaleToUnits)
-                unit_idx = self._UNIT_INDEX[target_unit]
-                unit_enum_names = {
-                    0: "Millimeters", 1: "Centimeters",
-                    2: "Inches", 3: "Meters",
-                }
-                try:
-                    scale_units_enum = self._zp.constants.Tools.General.ScaleToUnits
-                    enum_val = getattr(scale_units_enum, unit_enum_names[unit_idx], None)
-                    if enum_val is not None:
-                        scale_tool.ScaleToUnit = enum_val
-                    else:
-                        scale_tool.ScaleToUnit = unit_idx
-                except Exception:
-                    # Fallback: integer index works per example script 11
-                    scale_tool.ScaleToUnit = unit_idx
+                scale_units_enum = self._zp.constants.Tools.General.ScaleToUnits
+                scale_tool.ScaleToUnit = getattr(scale_units_enum, self._UNIT_TO_ENUM[target_unit])
 
             scale_tool.RunAndWaitForCompletion()
-            scale_tool.Close()
 
         except Exception as e:
             logger.error(f"Scale Lens tool failed: {e}")
             return {"success": False, "error": f"Scale Lens failed: {e}"}
+        finally:
+            if scale_tool is not None:
+                try:
+                    scale_tool.Close()
+                except Exception:
+                    pass
 
         # Read post-scale paraxial data
         efl_after = self._get_efl()

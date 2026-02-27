@@ -217,7 +217,7 @@ class GeometryMixin:
         try:
             tool = self.oss.Tools.OpenCrossSectionExport()
             tool.RunAndWaitForCompletion()
-            error_msg = getattr(tool, 'ErrorMessage', None)
+            error_msg = tool.ErrorMessage  # ISystemTool.ErrorMessage (string property)
             if error_msg:
                 error_msg = str(error_msg).strip()
                 logger.info(f"[CROSS] OpticStudio error detail: {error_msg}")
@@ -258,12 +258,9 @@ class GeometryMixin:
                     max_field = max(max_field, abs(_extract_value(f.Y)), abs(_extract_value(f.X)))
             paraxial["max_field"] = max_field
 
-            # Read actual field type from system (ZOSAPI FieldType enum)
-            try:
-                ft = fields.GetFieldType()
-                field_type_str = getattr(ft, 'name', str(ft).split(".")[-1])
-            except Exception:
-                field_type_str = "Angle"
+            # IFields.GetFieldType() returns FieldType enum (always present)
+            ft = fields.GetFieldType()
+            field_type_str = str(ft).split(".")[-1]
 
             ft_type, ft_unit = FIELD_TYPE_MAP.get(
                 field_type_str, (field_type_str.lower(), "mm")
@@ -394,20 +391,13 @@ class GeometryMixin:
                     entry["radius"] = _extract_value(lde_surf.Radius, 0.0)
                     entry["thickness"] = _extract_value(lde_surf.Thickness, 0.0)
 
-                    # Get surface type name
-                    try:
-                        type_name = str(lde_surf.TypeName) if hasattr(lde_surf, 'TypeName') else "Standard"
-                        entry["surface_type"] = type_name
-                    except Exception:
-                        pass
+                    # ILDERow.TypeName is a string property (always present)
+                    entry["surface_type"] = str(lde_surf.TypeName)
 
-                    # Get material name from LDE
-                    try:
-                        mat_cell = lde_surf.MaterialCell
-                        if hasattr(mat_cell, 'Value') and mat_cell.Value:
-                            entry["material"] = str(mat_cell.Value)
-                    except Exception:
-                        pass
+                    # ILDERow.MaterialCell returns IEditorCell; .Value is string property
+                    mat_value = lde_surf.MaterialCell.Value
+                    if mat_value:
+                        entry["material"] = str(mat_value)
                 except Exception as e:
                     logger.debug(f"Surface {surf_idx} LDE read error: {e}")
 
@@ -422,76 +412,51 @@ class GeometryMixin:
                         if surf_idx == 1:
                             log_timing(logger, f"SurfaceData.run(surf={surf_idx})", sd_elapsed)
 
-                    if sd_result and hasattr(sd_result, 'data') and sd_result.data is not None:
+                    if sd_result and sd_result.data is not None:
                         data = sd_result.data
 
-                        # Edge thickness
-                        if hasattr(data, 'edge_thickness') and data.edge_thickness is not None:
-                            et = data.edge_thickness
-                            # EdgeThickness has .y and .x — use .y (tangential plane)
-                            if hasattr(et, 'y'):
-                                entry["edge_thickness"] = _extract_value(et.y, 0.0)
-                            elif hasattr(et, 'x'):
-                                entry["edge_thickness"] = _extract_value(et.x, 0.0)
+                        # SurfaceDataResult fields are always present per ZOSPy dataclass:
+                        # edge_thickness: EdgeThickness (.y, .x)
+                        # thickness: float
+                        # material: MaterialData (.glass: str|ModelGlass|None, .indices: list[RefractiveIndex])
+                        # surface_powers: SurfacePowers (.in_air, .as_situated — each SurfacePower)
 
-                        # Thickness override from analysis if available
-                        if hasattr(data, 'thickness') and data.thickness is not None:
-                            entry["thickness"] = _extract_value(data.thickness, entry["thickness"])
+                        # Edge thickness — .y = tangential (Y Edge Thick)
+                        entry["edge_thickness"] = _extract_value(data.edge_thickness.y, 0.0)
+
+                        # Thickness from analysis
+                        entry["thickness"] = _extract_value(data.thickness, entry["thickness"])
 
                         # Material and refractive index
-                        if hasattr(data, 'material') and data.material is not None:
-                            mat_data = data.material
+                        mat_data = data.material
+                        # glass is str | ModelGlass | None
+                        glass = mat_data.glass
+                        if glass is not None and not entry["material"]:
+                            if isinstance(glass, str):
+                                entry["material"] = glass
+                            else:
+                                # ModelGlass has .nd, .abbe, .dpgf — not a name, so stringify
+                                entry["material"] = str(glass)
 
-                            # Glass name
-                            if hasattr(mat_data, 'glass') and mat_data.glass is not None:
-                                glass = mat_data.glass
-                                if isinstance(glass, str):
-                                    if glass and not entry["material"]:
-                                        entry["material"] = glass
-                                elif hasattr(glass, 'name'):
-                                    entry["material"] = str(glass.name)
-                                else:
-                                    glass_str = str(glass)
-                                    if glass_str and not entry["material"]:
-                                        entry["material"] = glass_str
+                        # Refractive index — take first wavelength's index
+                        # indices: list[RefractiveIndex], each has .index (float)
+                        if mat_data.indices:
+                            entry["refractive_index"] = _extract_value(mat_data.indices[0].index, 0.0)
 
-                            # Refractive index — take first wavelength's index
-                            if hasattr(mat_data, 'indices') and mat_data.indices:
-                                try:
-                                    first_idx = mat_data.indices[0]
-                                    if hasattr(first_idx, 'index'):
-                                        entry["refractive_index"] = _extract_value(first_idx.index, 0.0)
-                                    elif hasattr(first_idx, 'value'):
-                                        entry["refractive_index"] = _extract_value(first_idx.value, 0.0)
-                                except (IndexError, TypeError):
-                                    pass
-
-                        # Surface power (in air)
-                        if hasattr(data, 'surface_powers') and data.surface_powers is not None:
-                            sp = data.surface_powers
-                            # Prefer "in_air" power
-                            power_src = getattr(sp, 'in_air', None) or getattr(sp, 'as_situated', None)
-                            if power_src is not None:
-                                if hasattr(power_src, 'power') and power_src.power is not None:
-                                    power_val = power_src.power
-                                    if isinstance(power_val, dict):
-                                        for v in power_val.values():
-                                            entry["surface_power"] = _extract_value(v, 0.0)
-                                            break
-                                    else:
-                                        entry["surface_power"] = _extract_value(power_val, 0.0)
-                                elif hasattr(power_src, 'efl') and power_src.efl is not None:
-                                    efl_val = power_src.efl
-                                    if isinstance(efl_val, dict):
-                                        for v in efl_val.values():
-                                            efl_num = _extract_value(v, 0.0)
-                                            if efl_num != 0.0:
-                                                entry["surface_power"] = 1.0 / efl_num
-                                            break
-                                    else:
-                                        efl_num = _extract_value(efl_val, 0.0)
-                                        if efl_num != 0.0:
-                                            entry["surface_power"] = 1.0 / efl_num
+                        # Surface power (in air preferred)
+                        # SurfacePowers always has .in_air and .as_situated
+                        # SurfacePower.power is dict[TupleKey, float] | None
+                        power_src = data.surface_powers.in_air
+                        if power_src.power is not None:
+                            for v in power_src.power.values():
+                                entry["surface_power"] = _extract_value(v, 0.0)
+                                break
+                        elif power_src.efl is not None:
+                            for v in power_src.efl.values():
+                                efl_num = _extract_value(v, 0.0)
+                                if efl_num != 0.0:
+                                    entry["surface_power"] = 1.0 / efl_num
+                                break
 
                 except Exception as e:
                     logger.debug(f"SurfaceData analysis for surface {surf_idx} failed: {e}")
@@ -585,23 +550,20 @@ class GeometryMixin:
             max_curvature = None
             mean_curvature = None
 
-            if hasattr(curvature_result, 'data') and curvature_result.data is not None:
+            # Curvature.run() returns AnalysisResult where .data is
+            # list[CurvatureResult] or CurvatureResult.
+            # CurvatureResult.data is ValidatedDataFrame (pandas-like, has .values).
+            if curvature_result.data is not None:
                 curv_data = curvature_result.data
-                # Curvature.run() returns AnalysisResult where .data is CurvatureResult
-                # (or list[CurvatureResult]). The actual grid is in CurvatureResult.data.
-                if hasattr(curv_data, 'data') and curv_data.data is not None:
-                    curv_data = curv_data.data
-                elif isinstance(curv_data, list) and len(curv_data) > 0:
-                    curv_data = curv_data[0].data if hasattr(curv_data[0], 'data') else curv_data[0]
-                if hasattr(curv_data, 'values'):
-                    arr = np.array(curv_data.values, dtype=np.float64)
-                else:
-                    arr = np.array(curv_data, dtype=np.float64)
+                if isinstance(curv_data, list):
+                    curv_data = curv_data[0].data  # CurvatureResult.data → DataFrame
+                elif hasattr(curv_data, 'data'):
+                    curv_data = curv_data.data  # Single CurvatureResult → DataFrame
+                arr = np.array(curv_data.values, dtype=np.float64)
 
                 if arr.ndim >= 2:
                     # Compute statistics on valid (non-NaN) values
-                    valid_mask = ~np.isnan(arr)
-                    if np.any(valid_mask):
+                    if not np.all(np.isnan(arr)):
                         min_curvature = float(np.nanmin(arr))
                         max_curvature = float(np.nanmax(arr))
                         mean_curvature = float(np.nanmean(arr))

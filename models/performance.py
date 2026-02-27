@@ -130,6 +130,38 @@ class RayFanResponse(BaseModel):
     error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 
+class OPDFanRequest(BaseModel):
+    """OPD Fan (Optical Path Difference Fan) analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    field_index: int = Field(default=0, ge=0, description="Field index (0 = all fields, 1+ = specific field, 1-indexed)")
+    wavelength_index: int = Field(default=0, ge=0, description="Wavelength index (0 = all wavelengths, 1+ = specific, 1-indexed)")
+    plot_scale: float = Field(default=0.0, ge=0, description="Maximum vertical scale for plots; 0 = auto")
+    number_of_rays: int = Field(default=20, ge=5, le=100, description="Number of rays traced on each side of origin")
+
+
+class OPDFanFieldData(BaseModel):
+    """OPD fan data for a single field/wavelength combination."""
+    field_index: int = Field(description="0-indexed field number")
+    field_x: float = Field(description="Field X coordinate")
+    field_y: float = Field(description="Field Y coordinate")
+    wavelength_um: float = Field(default=0.0, description="Wavelength in micrometers")
+    wavelength_index: int = Field(default=0, description="Wavelength index")
+    tangential_py: list[float] = Field(default_factory=list, description="Tangential pupil Y coordinates")
+    tangential_ey: list[float] = Field(default_factory=list, description="Tangential OPD values in waves")
+    sagittal_px: list[float] = Field(default_factory=list, description="Sagittal pupil X coordinates")
+    sagittal_ex: list[float] = Field(default_factory=list, description="Sagittal OPD values in waves")
+
+
+class OPDFanResponse(BaseModel):
+    """OPD Fan analysis response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    fans: Optional[list[OPDFanFieldData]] = Field(default=None, description="Per-field/wavelength OPD fan data")
+    max_aberration: Optional[float] = Field(default=None, description="Maximum OPD value in waves")
+    num_fields: int = Field(default=0, description="Number of fields in the system")
+    num_wavelengths: int = Field(default=0, description="Number of wavelengths")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
 class PSFRequest(BaseModel):
     """PSF analysis request."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
@@ -174,6 +206,51 @@ class ThroughFocusMTFRequest(BaseModel):
     delta_focus: float = Field(default=0.1, gt=0, description="Focus step size in mm")
     frequency: float = Field(default=0.0, ge=0, description="Spatial frequency (cycles/mm). 0 = default.")
     number_of_steps: int = Field(default=5, ge=1, le=50, description="Number of steps in each direction from focus")
+
+
+class ThroughFocusSpotRequest(BaseModel):
+    """Through Focus Spot Diagram analysis request."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    field_index: int = Field(default=0, ge=0, description="Field index (0 = all fields, 1+ = specific field, 1-indexed)")
+    wavelength_index: int = Field(default=0, ge=0, description="Wavelength index (0 = all wavelengths, 1+ = specific, 1-indexed)")
+    delta_focus: float = Field(default=0.1, gt=0, description="Focus step size in mm")
+    number_of_steps: int = Field(default=5, ge=1, le=50, description="Number of steps in each direction from focus")
+    ray_density: int = Field(default=15, ge=5, le=200, description="Ray density for pupil sampling")
+
+
+class ThroughFocusSpotFocusEntry(BaseModel):
+    """Spot data at a single focus position."""
+    focus_position: float = Field(description="Focus offset in mm")
+    rms_radius_um: float = Field(description="RMS spot radius in µm")
+    geo_radius_um: float = Field(description="GEO (max) spot radius in µm")
+    centroid_x: float = Field(description="Centroid X in µm")
+    centroid_y: float = Field(description="Centroid Y in µm")
+    rays: list[list[float]] = Field(default_factory=list, description="Ray positions [[x,y], ...] in µm")
+
+
+class ThroughFocusSpotFieldData(BaseModel):
+    """Through Focus Spot data for a single field point."""
+    field_index: int = Field(description="0-indexed field number")
+    field_x: float = Field(description="Field X coordinate")
+    field_y: float = Field(description="Field Y coordinate")
+    focus_spots: list[ThroughFocusSpotFocusEntry] = Field(default_factory=list, description="Spot data at each focus position")
+
+
+class ThroughFocusSpotBestFocus(BaseModel):
+    """Best focus position data for through-focus spot."""
+    position: float = Field(description="Best focus position (mm)")
+    rms_radius_um: float = Field(description="RMS spot radius at best focus (µm)")
+
+
+class ThroughFocusSpotResponse(BaseModel):
+    """Through Focus Spot Diagram analysis response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    focus_positions: Optional[list[float]] = Field(default=None, description="Defocus positions (mm)")
+    fields: Optional[list[ThroughFocusSpotFieldData]] = Field(default=None, description="Per-field spot data at each focus position")
+    best_focus: Optional[ThroughFocusSpotBestFocus] = Field(default=None, description="Best focus position")
+    airy_radius_um: Optional[float] = Field(default=None, description="Airy disk radius in µm")
+    wavelength_um: Optional[float] = Field(default=None, description="Primary wavelength in µm")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 
 class ThroughFocusMTFFieldData(BaseModel):

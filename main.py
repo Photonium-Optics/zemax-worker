@@ -159,6 +159,11 @@ async def _reconnect_zospy() -> Optional[ZosPyHandler]:
 
     if zospy_handler:
         record_disconnect(reason="reconnect_replacing_existing")
+        record_reconnect_triggered(
+            reason="reconnect_replacing_existing",
+            reconnect_failures=_reconnect_failures,
+            backoff_s=_backoff_delay() if _reconnect_failures > 0 else 0,
+        )
         try:
             zospy_handler.close()
         except Exception as e:

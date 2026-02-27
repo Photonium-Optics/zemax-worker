@@ -38,8 +38,6 @@ def _parse_zernike_full_text(text: str) -> dict:
         dict with keys: coefficients, rms_to_chief, rms_to_centroid,
         strehl_ratio
     """
-    logger = logging.getLogger(__name__)
-
     result = {
         "coefficients": [],
         "rms_to_chief": None,
@@ -93,7 +91,7 @@ def _parse_zernike_full_text(text: str) -> dict:
                 pass
 
         # Log unmatched lines that look like they SHOULD be metrics (helps debug regex mismatches)
-        elif any(kw in line_stripped.lower() for kw in ['strehl']):
+        elif 'strehl' in line_stripped.lower():
             logger.warning(f"_parse_zernike_full_text: UNMATCHED metric-like line: {line_stripped!r} (bytes: {line_stripped.encode('utf-8')!r})")
 
     logger.debug(
@@ -102,6 +100,18 @@ def _parse_zernike_full_text(text: str) -> dict:
         f"strehl={result['strehl_ratio']}, coeffs={len(result['coefficients'])}"
     )
     return result
+
+
+_ANGULAR_FIELD_TYPES = {"Angle", "TheodoliteAngle"}
+
+
+def _get_field_unit(fields) -> str:
+    """Determine the field coordinate unit from the system's field type.
+
+    Returns 'deg' for angular field types, 'mm' for spatial field types.
+    """
+    field_type_name = str(fields.GetFieldType()).split(".")[-1]
+    return "deg" if field_type_name in _ANGULAR_FIELD_TYPES else "mm"
 
 
 class AberrationsMixin:
@@ -248,11 +258,11 @@ class AberrationsMixin:
                 settings = zernike_analysis.Settings
                 self._configure_analysis_settings(settings, field_index, wavelength_index, sampling)
 
-                # Zernike-specific settings (hasattr guard pattern from get_rms_vs_field)
-                if hasattr(settings, 'MaximumNumberOfTerms'):
+                # Zernike-specific settings (ZOSAPI: IAS_ZernikeStandardCoefficients.MaximumNumberOfTerms)
+                try:
                     settings.MaximumNumberOfTerms = 37
-                elif hasattr(settings, 'MaximumTerm'):
-                    settings.MaximumTerm = 37
+                except Exception as e:
+                    logger.warning(f"ZernikeStandardCoefficients: MaximumNumberOfTerms not settable ({type(e).__name__}: {e}). Continuing with default.")
 
                 if hasattr(settings, 'Surface'):
                     try:
@@ -413,21 +423,18 @@ class AberrationsMixin:
             wavelengths = self.oss.SystemData.Wavelengths
             num_wavelengths = int(wavelengths.NumberOfWavelengths)
 
+            # IWavelength.IsPrimary is a reliable bool property per ZOS-API docs.
             resolved_wavelength_index = wavelength_index
             if resolved_wavelength_index is None:
                 for wi in range(1, num_wavelengths + 1):
-                    try:
-                        if wavelengths.GetWavelength(wi).IsPrimary:
-                            resolved_wavelength_index = wi
-                            break
-                    except Exception:
-                        continue
+                    wl = wavelengths.GetWavelength(wi)
+                    if wl is not None and wl.IsPrimary:
+                        resolved_wavelength_index = wi
+                        break
 
                 if resolved_wavelength_index is None:
                     resolved_wavelength_index = 1
-                    logger.warning(
-                        f"RmsField: No primary wavelength flagged; defaulting to wavelength #{resolved_wavelength_index}",
-                    )
+                    logger.warning("RmsField: No primary wavelength found; defaulting to wavelength #1")
 
             if resolved_wavelength_index > num_wavelengths:
                 return {
@@ -439,14 +446,8 @@ class AberrationsMixin:
                 wavelengths.GetWavelength(resolved_wavelength_index).Wavelength, 0.5876,
             )
 
-            # Determine field unit from system
             fields = self.oss.SystemData.Fields
-            try:
-                ft = fields.GetFieldType()
-                field_type_str = getattr(ft, 'name', str(ft).split(".")[-1])
-            except Exception:
-                field_type_str = ""
-            field_unit = "deg" if "angle" in field_type_str.lower() else "mm"
+            field_unit = _get_field_unit(fields)
 
             # Snap num_field_points to nearest FieldDensity enum value (multiples of 5, 5-100)
             snapped = max(5, min(100, round(num_field_points / 5) * 5))
@@ -468,53 +469,40 @@ class AberrationsMixin:
                 def _set_setting(attr: str, value: Any, label: str = "") -> None:
                     """Set a setting attribute, logging warnings on failure."""
                     if not hasattr(settings, attr):
-                        logger.info(f"RmsField: settings has no attribute '{attr}'")
+                        logger.debug(f"RmsField: settings has no attribute '{attr}'")
                         return
                     try:
                         setattr(settings, attr, value)
-                        # Verify the setting took effect by reading it back
                         readback = getattr(settings, attr, "?")
-                        logger.info(f"RmsField: Set {label or attr} = {value}, readback = {readback}")
+                        logger.debug(f"RmsField: Set {label or attr} = {value}, readback = {readback}")
                     except Exception as e:
                         logger.warning(f"RmsField: Could not set {label or attr}: {e}")
 
-                # Log all available settings attributes for diagnostics
-                settings_attrs = [a for a in dir(settings) if not a.startswith('_')]
-                logger.info(f"RmsField: Available settings: {settings_attrs}")
+                logger.debug(f"RmsField: Available settings: {[a for a in dir(settings) if not a.startswith('_')]}")
 
-                def _get_enum_value(enum_cls: Any, name: str) -> Any:
-                    """Get an enum value by name, returning None if not found."""
-                    value = getattr(enum_cls, name, None)
-                    if value is None:
-                        available = [a for a in dir(enum_cls) if not a.startswith('_')]
-                        logger.warning(f"RmsField: Enum value '{name}' not found on {enum_cls}. Available: {available}")
-                    return value
+                # Set RMS analysis settings — enum names verified against ZOS-API docs
+                # FieldDensities: FieldDens_5 through FieldDens_100 (multiples of 5)
+                # RayDensities: RayDens_1 through RayDens_20
+                # ReferTo: ChiefRay, Centroid
+                _set_setting('Data', rms_consts.RMSField.DataType.SpotRadius, 'Data type')
 
-                # Data = SpotRadius (RMS spot radius)
-                # DataType lives under RMSField sub-namespace, not directly under RMS
-                data_type = _get_enum_value(rms_consts.RMSField.DataType, 'SpotRadius')
-                if data_type is not None:
-                    _set_setting('Data', data_type, 'Data type')
+                field_dens_name = f"FieldDens_{snapped}"
+                field_dens_val = getattr(rms_consts.FieldDensities, field_dens_name, None)
+                if field_dens_val is None:
+                    raise ValueError(f"Unknown FieldDensity enum: {field_dens_name}")
+                _set_setting('FieldDensity', field_dens_val)
 
-                # FieldDensity
-                fd_value = _get_enum_value(rms_consts.FieldDensities, f"FieldDens_{snapped}")
-                if fd_value is not None:
-                    _set_setting('FieldDensity', fd_value)
-                else:
-                    logger.warning(f"RmsField: FieldDensity not set — analysis will use default (likely 5 points)")
+                ray_dens_name = f"RayDens_{ray_density}"
+                ray_dens_val = getattr(rms_consts.RayDensities, ray_dens_name, None)
+                if ray_dens_val is None:
+                    raise ValueError(f"Unknown RayDensity enum: {ray_dens_name}")
+                _set_setting('RayDensity', ray_dens_val)
 
-                # RayDensity
-                rd_value = _get_enum_value(rms_consts.RayDensities, f"RayDens_{ray_density}")
-                if rd_value is not None:
-                    _set_setting('RayDensity', rd_value)
-                else:
-                    logger.warning(f"RmsField: RayDensity not set — analysis will use default")
-
-                # ReferTo
                 refer_name = "ChiefRay" if reference == "chief_ray" else "Centroid"
-                refer_value = _get_enum_value(rms_consts.ReferTo, refer_name)
-                if refer_value is not None:
-                    _set_setting('ReferTo', refer_value)
+                refer_val = getattr(rms_consts.ReferTo, refer_name, None)
+                if refer_val is None:
+                    raise ValueError(f"Unknown ReferTo enum: {refer_name}")
+                _set_setting('ReferTo', refer_val)
 
                 # Wavelength
                 self._configure_analysis_settings(
@@ -598,15 +586,8 @@ class AberrationsMixin:
                                 curve_points = []
                                 for pi in range(num_points):
                                     x_val = float(x_values[pi])
-                                    # YData is 2D: [point_index, curve_index]
-                                    try:
-                                        y_val = float(y_raw[pi, ci])
-                                    except (TypeError, IndexError):
-                                        # Might be 1D if only one curve
-                                        try:
-                                            y_val = float(y_raw[pi])
-                                        except Exception:
-                                            continue
+                                    # IMatrixData.Data is always 2D: [row, col]
+                                    y_val = float(y_raw[pi, ci])
                                     curve_points.append({
                                         "field_value": x_val,
                                         "rms_radius_um": y_val * 1000,  # mm → µm
@@ -622,26 +603,8 @@ class AberrationsMixin:
                     except Exception as e:
                         logger.warning(f"RmsField: Could not extract data series: {e}", exc_info=True)
 
-                # Fallback: parse text output
                 if not data_points:
-                    logger.warning("RmsField: No data extracted from DataSeries, attempting text fallback")
-                    tmp = tempfile.NamedTemporaryFile(suffix='.txt', delete=False)
-                    tmp_path = tmp.name
-                    tmp.close()
-                    try:
-                        results.GetTextFile(tmp_path)
-                        with open(tmp_path, 'r') as f:
-                            text_content = f.read()
-                        if text_content:
-                            logger.info(f"RmsField text output (first 500 chars): {text_content[:500]}")
-                    except Exception as e:
-                        logger.warning(f"RmsField: Text fallback also failed: {e}")
-                    finally:
-                        try:
-                            os.unlink(tmp_path)
-                        except OSError:
-                            pass
-                    return {"success": False, "error": "RmsField analysis returned no extractable data"}
+                    return {"success": False, "error": "RmsField analysis returned no extractable data from DataSeries. Check that the analysis ran successfully and the system has valid fields/wavelengths."}
 
                 logger.info(f"RmsField: Returning {len(data_points)} data points, {len(diffraction_limit)} diffraction limit points (requested FieldDens_{snapped})")
                 result = {
@@ -800,14 +763,8 @@ class AberrationsMixin:
                 return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
             wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
 
-            # Determine field unit from system
             fields = self.oss.SystemData.Fields
-            try:
-                ft = fields.GetFieldType()
-                field_type_str = getattr(ft, 'name', str(ft).split(".")[-1])
-            except Exception:
-                field_type_str = ""
-            field_unit = "deg" if "angle" in field_type_str.lower() else "mm"
+            field_unit = _get_field_unit(fields)
 
             # Run ZernikeCoefficientsVsField using raw ZOS-API (no ZosPy temp files)
             df = self._run_zernike_vs_field(
@@ -927,11 +884,12 @@ class AberrationsMixin:
             settings = analysis.Settings
             self._configure_analysis_settings(settings, field_index, wavelength_index, sampling)
 
-            # Zernike-specific settings
-            if hasattr(settings, 'MaximumNumberOfTerms'):
+            # Zernike-specific settings (ZOSAPI: IAS_ZernikeStandardCoefficients.MaximumNumberOfTerms)
+            try:
                 settings.MaximumNumberOfTerms = maximum_term
-            elif hasattr(settings, 'MaximumTerm'):
-                settings.MaximumTerm = maximum_term
+            except Exception as e:
+                logger.error(f"ZernikeStandardCoefficients: Failed to set MaximumNumberOfTerms={maximum_term}: {type(e).__name__}: {e}")
+                return {"success": False, "error": f"Cannot set Zernike MaximumNumberOfTerms={maximum_term}: {e}"}
 
             if hasattr(settings, 'Surface'):
                 try:
@@ -987,7 +945,7 @@ class AberrationsMixin:
             return result
 
         except Exception as e:
-            logger.error(f"get_zernike_standard_coefficients failed: {e}")
+            logger.error(f"get_zernike_standard_coefficients failed: {e}", exc_info=True)
             return {"success": False, "error": str(e)}
         finally:
             self._cleanup_analysis(analysis, temp_path)

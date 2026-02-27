@@ -10,9 +10,12 @@ from models import (
     MTFRequest, MTFResponse,
     HuygensMTFRequest,
     ThroughFocusMTFRequest, ThroughFocusMTFResponse,
+    ThroughFocusSpotRequest, ThroughFocusSpotResponse,
+    ThroughFocusSpotFieldData, ThroughFocusSpotFocusEntry, ThroughFocusSpotBestFocus,
     PSFRequest, PSFResponse,
     HuygensPSFRequest,
     RayFanRequest, RayFanResponse,
+    OPDFanRequest, OPDFanResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -223,4 +226,84 @@ async def get_ray_fan(
             plot_scale=request.plot_scale,
             number_of_rays=request.number_of_rays,
         ),
+    )
+
+
+@router.post("/optical-path-fan", response_model=OPDFanResponse)
+async def get_optical_path_fan(
+    request: OPDFanRequest,
+    _: None = Depends(main.verify_api_key),
+) -> OPDFanResponse:
+    """
+    Get OPD Fan (Optical Path Difference Fan) data.
+
+    Returns OPD in waves for tangential and sagittal fans.
+    """
+    return await main._run_endpoint(
+        "/optical-path-fan", OPDFanResponse, request,
+        lambda: main.zospy_handler.get_optical_path_fan(
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
+            plot_scale=request.plot_scale,
+            number_of_rays=request.number_of_rays,
+        ),
+    )
+
+
+@router.post("/through-focus-spot", response_model=ThroughFocusSpotResponse)
+async def get_through_focus_spot(
+    request: ThroughFocusSpotRequest,
+    _: None = Depends(main.verify_api_key),
+) -> ThroughFocusSpotResponse:
+    """
+    Get Through Focus Spot Diagram data.
+
+    Traces spot rays at multiple defocus positions to show how the spot
+    evolves across focus. Returns raw ray data for Mac-side rendering.
+    """
+    def _build_response(result: dict) -> ThroughFocusSpotResponse:
+        if not result.get("success", False):
+            return ThroughFocusSpotResponse(
+                success=False,
+                error=result.get("error", "Through Focus Spot analysis failed"),
+            )
+
+        fields_out = None
+        if result.get("fields"):
+            fields_out = [
+                ThroughFocusSpotFieldData(
+                    field_index=f["field_index"],
+                    field_x=f["field_x"],
+                    field_y=f["field_y"],
+                    focus_spots=[
+                        ThroughFocusSpotFocusEntry(**spot)
+                        for spot in f.get("focus_spots", [])
+                    ],
+                )
+                for f in result["fields"]
+            ]
+
+        best_focus = None
+        if result.get("best_focus"):
+            best_focus = ThroughFocusSpotBestFocus(**result["best_focus"])
+
+        return ThroughFocusSpotResponse(
+            success=True,
+            focus_positions=result.get("focus_positions"),
+            fields=fields_out,
+            best_focus=best_focus,
+            airy_radius_um=result.get("airy_radius_um"),
+            wavelength_um=result.get("wavelength_um"),
+        )
+
+    return await main._run_endpoint(
+        "/through-focus-spot", ThroughFocusSpotResponse, request,
+        lambda: main.zospy_handler.get_through_focus_spot(
+            delta_focus=request.delta_focus,
+            number_of_steps=request.number_of_steps,
+            ray_density=request.ray_density,
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
+        ),
+        build_response=_build_response,
     )

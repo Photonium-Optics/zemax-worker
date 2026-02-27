@@ -13,6 +13,7 @@ Multiple workers are supported — the constraint is license seats, not threadin
 import base64
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -26,7 +27,7 @@ from utils.timing import log_timing
 from config import (
     _RAW_LOG_MAX_CHARS, _ARRAY_SUMMARY_FIELDS, _ARRAY_SUMMARY_MAX,
     _BINARY_FIELDS, _TEXT_TRUNCATE_FIELDS,
-    DEFAULT_NUM_CROSS_SECTION_RAYS, SAMPLING_INT_FALLBACK, FIELD_TYPE_MAP,
+    DEFAULT_NUM_CROSS_SECTION_RAYS,
     CROSS_SECTION_IMAGE_SIZE, CROSS_SECTION_TEMP_FILENAME, SEIDEL_TEMP_FILENAME,
     MIN_IMAGE_EXPORT_VERSION, FNO_APERTURE_TYPES,
 )
@@ -207,7 +208,7 @@ def is_zospy_available() -> bool:
 # Constants imported from config.py
 
 
-def _extract_value(obj: Any, default: float = 0.0, allow_inf: bool = False) -> float:
+def _extract_value(obj: Any, default: float | None = 0.0, allow_inf: bool = False) -> float | None:
     """
     Extract a numeric value from various ZosPy types.
 
@@ -216,11 +217,11 @@ def _extract_value(obj: Any, default: float = 0.0, allow_inf: bool = False) -> f
 
     Args:
         obj: Value to extract (UnitField, float, int, etc.)
-        default: Default value if extraction fails
+        default: Default value if extraction fails (None allowed for "no value" semantics)
         allow_inf: If True, allow Infinity through (e.g. flat surface radius)
 
     Returns:
-        Float value extracted from the object
+        Float value extracted from the object, or default if extraction fails
     """
     if obj is None:
         return default
@@ -249,12 +250,10 @@ def _compute_field_normalization(fields, num_fields: int) -> tuple:
     Returns (is_radial, max_field_x, max_field_y, max_field_r) where callers should
     use max_field_r for Radial and max_field_x/max_field_y for Rectangular.
     """
-    is_radial = True
-    try:
-        norm_type = str(fields.Normalization)
-        is_radial = "Rectangular" not in norm_type
-    except Exception:
-        pass
+    # IFields.Normalization is a FieldNormalizationType enum:
+    # Radial=0, Rectangular=1. Always present per ZOS-API docs.
+    norm_type = str(fields.Normalization)
+    is_radial = "Rectangular" not in norm_type
 
     max_field_x = 0.0
     max_field_y = 0.0
@@ -265,7 +264,7 @@ def _compute_field_normalization(fields, num_fields: int) -> tuple:
         fy = abs(_extract_value(field.Y))
         max_field_x = max(max_field_x, fx)
         max_field_y = max(max_field_y, fy)
-        max_field_r = max(max_field_r, (fx**2 + fy**2) ** 0.5)
+        max_field_r = max(max_field_r, math.hypot(fx, fy))
 
     return is_radial, max_field_x, max_field_y, max_field_r
 
@@ -281,40 +280,6 @@ def _normalize_field(fx: float, fy: float, is_radial: bool,
         hx = float(fx / max_field_x) if max_field_x > 1e-10 else 0.0
         hy = float(fy / max_field_y) if max_field_y > 1e-10 else 0.0
         return hx, hy
-
-
-def _extract_dataframe(result: Any, label: str = "Analysis") -> Optional["pd.DataFrame"]:
-    """
-    Extract a pandas DataFrame from a ZOSPy AnalysisResult or typed result object.
-
-    ZOSPy run() returns an AnalysisResult wrapper whose .data holds a typed result
-    (e.g. RayFanResult) with to_dataframe(), or sometimes a raw DataFrame directly.
-    This helper walks the wrapper chain: result.data.to_dataframe() > result.data
-    (if DataFrame) > result.data.data > result.to_dataframe().
-
-    Returns None if no DataFrame can be extracted.
-    """
-    import pandas as pd
-
-    # Unwrap AnalysisResult.data if present
-    data = getattr(result, 'data', None)
-    if data is not None:
-        if hasattr(data, 'to_dataframe'):
-            return data.to_dataframe()
-        if isinstance(data, pd.DataFrame):
-            return data
-        # Some typed results nest the DataFrame one level deeper
-        nested = getattr(data, 'data', None)
-        if isinstance(nested, pd.DataFrame):
-            return nested
-        logger.debug(f"{label}: .data is {type(data).__name__}, not extractable")
-        return None
-
-    # Direct to_dataframe() on the result itself
-    if hasattr(result, 'to_dataframe'):
-        return result.to_dataframe()
-
-    return None
 
 
 def _parse_zernike_term_number(col: Any) -> Optional[int]:
@@ -341,8 +306,8 @@ def _read_comment_cell(op: Any, comment_column: Any) -> Optional[str]:
         raw = op.GetOperandCell(comment_column).Value
         if raw and str(raw).strip():
             return str(raw).strip()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Failed to read MFE comment cell: {type(e).__name__}: {e}")
     return None
 
 
@@ -863,13 +828,26 @@ class ZosPyHandlerBase:
         return meta
 
     def _resolve_sample_size(self, sampling: str):
-        """Resolve a sampling string like '64x64' to the ZOSAPI SampleSizes enum value."""
+        """Resolve a sampling string like '64x64' to the ZOSAPI SampleSizes enum value.
+
+        Raises ValueError if the sampling string cannot be resolved.
+        """
         try:
             sample_sizes = self._zp.constants.Analysis.SampleSizes
-            return getattr(sample_sizes, f"S_{sampling}")
-        except Exception:
-            logger.warning(f"_resolve_sample_size: Could not resolve '{sampling}' via ZOSAPI enum, using integer fallback")
-            return SAMPLING_INT_FALLBACK.get(sampling, 2)
+        except Exception as e:
+            raise ValueError(
+                f"Could not access ZOSAPI SampleSizes enum for sampling '{sampling}': "
+                f"{type(e).__name__}: {e}"
+            ) from e
+
+        enum_val = getattr(sample_sizes, f"S_{sampling}", None)
+        if enum_val is not None:
+            return enum_val
+
+        valid = sorted(a.replace("S_", "") for a in dir(sample_sizes) if a.startswith("S_"))
+        valid_str = ", ".join(valid[:15])
+        suffix = f" (and {len(valid) - 15} more)" if len(valid) > 15 else ""
+        raise ValueError(f"Unknown sampling '{sampling}'. Valid SampleSizes: {valid_str}{suffix}")
 
     def _configure_analysis_settings(
         self,
@@ -894,7 +872,11 @@ class ZosPyHandlerBase:
             except Exception as e:
                 logger.warning(f"Failed to set Wavelength={wavelength_index}: {e}")
         if sampling is not None:
-            sample_value = self._resolve_sample_size(sampling)
+            try:
+                sample_value = self._resolve_sample_size(sampling)
+            except ValueError as e:
+                logger.warning(f"Invalid sampling '{sampling}': {e}")
+                return
             # SampleSize is the standard attribute; WavefrontMap uses Sampling;
             # Huygens analyses use PupilSampleSize/ImageSampleSize instead.
             for attr in ('SampleSize', 'Sampling', 'PupilSampleSize', 'ImageSampleSize'):
