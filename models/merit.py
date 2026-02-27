@@ -47,7 +47,7 @@ class OptimizationWizardRequest(BaseModel):
     rings: int = Field(default=3, ge=1, le=20, description="Number of pupil rings")
     arms: Literal[6, 8, 10, 12] = Field(default=6, description="Number of pupil arms (PupilArmsCount)")
     # Pupil sampling mode
-    use_gaussian_quadrature: bool = Field(default=False, description="Use Gaussian quadrature sampling")
+    use_gaussian_quadrature: bool = Field(default=True, description="Use Gaussian quadrature sampling (more accurate)")
     use_rectangular_array: bool = Field(default=False, description="Use rectangular NxN grid instead of ring/arm sampling")
     grid_size_nxn: int = Field(default=32, ge=4, le=204, description="Grid size NxN when use_rectangular_array is true (must be even, 4-204)")
 
