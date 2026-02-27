@@ -1016,8 +1016,7 @@ class OptimizationMixin:
             if qf is None:
                 return {"success": False, "error": "Could not open QuickFocus tool (another tool may be active)"}
             qf.Criterion = resolved_criterion
-            if hasattr(qf, 'UseCentroid'):
-                qf.UseCentroid = use_centroid
+            qf.UseCentroid = use_centroid
             qf.RunAndWaitForCompletion()
             qf.Close()
         except Exception as e:

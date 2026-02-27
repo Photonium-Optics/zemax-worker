@@ -10,7 +10,7 @@ class RunOptimizationRequest(BaseModel):
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
     method: Literal["local", "global", "hammer"] = Field(default="local", description="Optimization method: local (gradient descent), global (full search), hammer (perturb+refine)")
     algorithm: Literal["DLS", "OrthogonalDescent"] = Field(default="DLS", description="Optimization algorithm: DLS (damped least squares) or OrthogonalDescent")
-    cycles: Optional[Literal[1, 5, 10, 50]] = Field(default=5, description="Cycles for local optimization: 1, 5, 10, or 50. Omit for automatic.")
+    cycles: Optional[Literal[1, 5, 10, 50]] = Field(default=None, description="Cycles for local optimization: 1, 5, 10, or 50. None = Automatic.")
     timeout_seconds: Optional[float] = Field(default=60, ge=5, le=600, description="Time limit in seconds for global/hammer optimization")
     num_to_save: Optional[int] = Field(default=10, ge=10, le=100, description="Number of best solutions to retain (global only, rounds to nearest 10)")
     operand_rows: Optional[list[MeritFunctionOperandRow]] = Field(default=None, description="Explicit MFE operand rows to populate the merit function")
