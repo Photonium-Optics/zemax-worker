@@ -110,7 +110,7 @@ def _get_field_unit(fields) -> str:
 
     Returns 'deg' for angular field types, 'mm' for spatial field types.
     """
-    field_type_name = str(fields.GetFieldType()).split(".")[-1]
+    field_type_name = fields.GetFieldType().name
     return "deg" if field_type_name in _ANGULAR_FIELD_TYPES else "mm"
 
 
@@ -566,15 +566,14 @@ class AberrationsMixin:
                             logger.info(f"RmsField series {si}: {num_points} points, {num_curves} curves, labels={labels}")
 
                             for ci in range(num_curves):
-                                label = labels[ci] if ci < len(labels) else None
-                                label_str = str(label) if label is not None else ""
+                                label = labels[ci] if ci < len(labels) else ""
+                                label_str = str(label)
                                 label_lower = label_str.lower()
-                                # Diffraction limit curve: label is None (unlabeled second curve)
-                                # or contains "diffrac"/"limit"
+                                # Identify diffraction limit curve via SeriesLabels
+                                # (IAR_DataSeries.SeriesLabels is guaranteed String[])
                                 is_diffraction = (
                                     "diffrac" in label_lower
                                     or "limit" in label_lower
-                                    or (ci > 0 and label is None)
                                 )
 
                                 curve_points = []

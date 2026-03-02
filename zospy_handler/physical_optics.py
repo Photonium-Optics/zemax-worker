@@ -97,20 +97,14 @@ class PhysicalOpticsMixin:
 
             if result is not None:
                 try:
-                    # run() returns AnalysisResult where .data is a DataFrame.
-                    # Extract the DataFrame from the AnalysisResult wrapper.
-                    actual_data = result.data if hasattr(result, 'data') else result
+                    # run() returns AnalysisResult where .data is a DataFrame
+                    # with .values (numpy array). ZosPy wrapper always returns this shape.
+                    actual_data = result.data
 
                     if actual_data is None:
                         return {"success": False, "error": "Geometric Image Analysis returned no data"}
 
-                    if hasattr(actual_data, 'values'):
-                        arr = np.array(actual_data.values, dtype=np.float64)
-                    elif isinstance(actual_data, np.ndarray):
-                        arr = actual_data.astype(np.float64)
-                    else:
-                        logger.warning(f"[GEO_IMAGE] Unexpected result type: {type(actual_data)}")
-                        return {"success": False, "error": f"Unexpected result type: {type(actual_data)}"}
+                    arr = np.array(actual_data.values, dtype=np.float64)
 
                     if arr.size == 0:
                         return {"success": False, "error": "Geometric Image Analysis returned empty data"}
