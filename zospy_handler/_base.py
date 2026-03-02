@@ -35,9 +35,6 @@ from config import (
 # Configure module logger
 logger = logging.getLogger(__name__)
 
-# He-d line (587.6 nm) — standard optical reference wavelength used as fallback
-DEFAULT_WAVELENGTH_UM = 0.5876
-
 # Dedicated logger for raw Zemax analysis output (filterable in dashboard)
 logger_raw = logging.getLogger("zemax.raw")
 

@@ -1586,36 +1586,36 @@ class PerformanceMixin:
             analysis = self._zp.analyses.new_analysis(
                 self.oss, analysis_idm, settings_first=True
             )
-            settings = analysis.Settings
-
-            if field_index == 0:
-                settings.Field.UseAllFields()
-            else:
-                settings.Field.SetFieldNumber(field_index)
-
-            if wavelength_index == 0:
-                settings.Wavelength.UseAllWavelengths()
-            else:
-                settings.Wavelength.SetWavelengthNumber(wavelength_index)
-
-            settings.NumberOfRays = number_of_rays
-            if plot_scale > 0:
-                settings.PlotScale = plot_scale
-
-            t0 = time.perf_counter()
             try:
-                analysis.ApplyAndWaitForCompletion()
-            finally:
-                log_timing(logger, f"{label}.ApplyAndWaitForCompletion", (time.perf_counter() - t0) * 1000)
+                settings = analysis.Settings
 
-            results = analysis.Results
-            actual_fields = num_fields if field_index == 0 else 1
-            actual_wl = num_wl if wavelength_index == 0 else 1
+                if field_index == 0:
+                    settings.Field.UseAllFields()
+                else:
+                    settings.Field.SetFieldNumber(field_index)
 
-            all_fans = []
-            max_ab = 0.0
+                if wavelength_index == 0:
+                    settings.Wavelength.UseAllWavelengths()
+                else:
+                    settings.Wavelength.SetWavelengthNumber(wavelength_index)
 
-            try:
+                settings.NumberOfRays = number_of_rays
+                if plot_scale > 0:
+                    settings.PlotScale = plot_scale
+
+                t0 = time.perf_counter()
+                try:
+                    analysis.ApplyAndWaitForCompletion()
+                finally:
+                    log_timing(logger, f"{label}.ApplyAndWaitForCompletion", (time.perf_counter() - t0) * 1000)
+
+                results = analysis.Results
+                actual_fields = num_fields if field_index == 0 else 1
+                actual_wl = num_wl if wavelength_index == 0 else 1
+
+                all_fans = []
+                max_ab = 0.0
+
                 for fi in range(actual_fields):
                     field_num = fi + 1 if field_index == 0 else field_index
                     field_obj = sys_fields.GetField(field_num)
@@ -1944,7 +1944,7 @@ class PerformanceMixin:
                 "fields": fields_list,
                 "best_focus": {
                     "position": float(best_focus_pos),
-                    "rms_radius_um": float(best_focus_rms) if best_focus_rms != float('inf') else 0.0,
+                    "rms_radius_um": float(best_focus_rms) if math.isfinite(best_focus_rms) else 0.0,
                 },
                 "airy_radius_um": float(airy_radius_um) if airy_radius_um else None,
                 "wavelength_um": float(primary_wl_um),
