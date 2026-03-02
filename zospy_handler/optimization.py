@@ -107,7 +107,7 @@ class OptimizationMixin:
                 for i, col in enumerate(param_columns):
                     if i < len(params) and params[i] is not None:
                         cell = op.GetOperandCell(col)
-                        dt = str(cell.DataType).split('.')[-1]
+                        dt = cell.DataType.name
                         if dt == 'Integer':
                             cell.IntegerValue = int(float(params[i]))
                         elif dt == 'String':
@@ -307,20 +307,20 @@ class OptimizationMixin:
                 wizard.Arms = getattr(wizard_enums.PupilArmsCount, "Arms_6")
 
             # Pupil sampling mode
-            wizard.UseGaussianQuadrature = bool(use_gaussian_quadrature)
-            _set_wizard_prop("UseRectangularArray", bool(use_rectangular_array))
+            wizard.UseGaussianQuadrature = use_gaussian_quadrature
+            _set_wizard_prop("UseRectangularArray", use_rectangular_array)
             if use_rectangular_array:
                 _set_wizard_prop("GridSizeNxN", int(grid_size_nxn))
 
             # Glass boundary values
-            wizard.UseGlassBoundaryValues = bool(use_glass_boundary_values)
+            wizard.UseGlassBoundaryValues = use_glass_boundary_values
             if use_glass_boundary_values:
                 wizard.GlassMin = float(glass_min)
                 wizard.GlassMax = float(glass_max)
                 _set_wizard_prop("GlassEdgeThickness", float(glass_edge_thickness))
 
             # Air boundary values
-            wizard.UseAirBoundaryValues = bool(use_air_boundary_values)
+            wizard.UseAirBoundaryValues = use_air_boundary_values
             if use_air_boundary_values:
                 wizard.AirMin = float(air_min)
                 wizard.AirMax = float(air_max)
@@ -337,10 +337,10 @@ class OptimizationMixin:
             _set_wizard_prop("SpatialFrequency", float(spatial_frequency))
             _set_wizard_prop("XSWeight", float(xs_weight))
             _set_wizard_prop("YTWeight", float(yt_weight))
-            _set_wizard_prop("UseMaximumDistortion", bool(use_maximum_distortion))
+            _set_wizard_prop("UseMaximumDistortion", use_maximum_distortion)
             if use_maximum_distortion:
                 _set_wizard_prop("MaxDistortionPct", float(max_distortion_pct))
-            _set_wizard_prop("IgnoreLateralColor", bool(ignore_lateral_color))
+            _set_wizard_prop("IgnoreLateralColor", ignore_lateral_color)
 
             # Pupil Integration
             _set_wizard_prop("Obscuration", float(obscuration))
@@ -369,15 +369,15 @@ class OptimizationMixin:
 
             # Bottom bar params
             _set_wizard_prop("StartAt", int(start_at))
-            _set_wizard_prop("UseAllConfigurations", bool(use_all_configurations))
+            _set_wizard_prop("UseAllConfigurations", use_all_configurations)
             if not use_all_configurations:
                 _set_wizard_prop("ConfigurationNumber", int(configuration_number))
-            _set_wizard_prop("UseAllFields", bool(use_all_fields))
+            _set_wizard_prop("UseAllFields", use_all_fields)
             if not use_all_fields:
                 _set_wizard_prop("FieldNumber", int(field_number))
-            _set_wizard_prop("AssumeAxialSymmetry", bool(assume_axial_symmetry))
-            _set_wizard_prop("AddFavoriteOperands", bool(add_favorite_operands))
-            _set_wizard_prop("DeleteVignetted", bool(delete_vignetted))
+            _set_wizard_prop("AssumeAxialSymmetry", assume_axial_symmetry)
+            _set_wizard_prop("AddFavoriteOperands", add_favorite_operands)
+            _set_wizard_prop("DeleteVignetted", delete_vignetted)
 
             logger.info(
                 f"Applying optimization wizard: criterion={criterion}, type={type}, "
@@ -541,7 +541,7 @@ class OptimizationMixin:
         """
         try:
             cell = op.GetOperandCell(col_enum)
-            data_type = str(cell.DataType).split('.')[-1]
+            data_type = cell.DataType.name
 
             default_value = self._read_cell_default(cell, data_type)
 
@@ -549,8 +549,8 @@ class OptimizationMixin:
                 "column": col_name,
                 "header": str(cell.Header),
                 "data_type": data_type,
-                "is_active": bool(cell.IsActive),
-                "is_read_only": bool(cell.IsReadOnly),
+                "is_active": cell.IsActive,
+                "is_read_only": cell.IsReadOnly,
                 "default_value": default_value,
             }
         except Exception as e:
@@ -578,7 +578,7 @@ class OptimizationMixin:
         for col in param_columns:
             try:
                 cell = op.GetOperandCell(col)
-                dt = str(cell.DataType).split('.')[-1]
+                dt = cell.DataType.name
                 if dt == 'String':
                     params.append(None)
                 else:
@@ -594,11 +594,7 @@ class OptimizationMixin:
         for i in range(1, num_operands + 1):
             try:
                 op = mfe.GetOperandAt(i)
-                try:
-                    op_code = str(op.Type).split('.')[-1]
-                except Exception as e:
-                    logger.warning(f"Failed to read operand type at row {i}: {e}")
-                    op_code = f"UNK_{i}"
+                op_code = op.Type.name
 
                 rows.append({
                     "row_index": i - 1,
@@ -811,18 +807,31 @@ class OptimizationMixin:
                 # ILocalOptimization.Cycles is OptimizationCycles enum (get/set)
                 opt_tool.Cycles = self._resolve_cycles(zp, cycles)
 
+                local_opt_error = None
                 try:
                     opt_tool.RunAndWaitForCompletion()
                 finally:
                     try:
                         # Succeeded and ErrorMessage are ISystemTool properties (always present)
                         if not opt_tool.Succeeded:
-                            logger.warning(f"Local optimization did not succeed: {opt_tool.ErrorMessage}")
-                        # ILocalOptimization.CurrentMeritFunction is a double property (get-only)
-                        # Use default=None so we can detect extraction failure vs merit=0.0
-                        merit_after = _extract_value(opt_tool.CurrentMeritFunction, default=None)
+                            error_msg = str(opt_tool.ErrorMessage or "Unknown error")
+                            logger.error(f"Local optimization failed: {error_msg}")
+                            local_opt_error = error_msg
+                        else:
+                            # Only read merit from tool if optimization actually succeeded
+                            # ILocalOptimization.CurrentMeritFunction is a double property (get-only)
+                            merit_after = _extract_value(opt_tool.CurrentMeritFunction, default=None)
                     finally:
                         opt_tool.Close()
+
+                if local_opt_error is not None:
+                    return {
+                        "success": False,
+                        "error": f"Local optimization failed: {local_opt_error}",
+                        "method": method,
+                        "algorithm": algorithm,
+                        "merit_before": merit_before,
+                    }
 
         except Exception as e:
             logger.error(f"Optimization run failed: {e}")
@@ -913,10 +922,8 @@ class OptimizationMixin:
             for param_name, (cell_attr, value_attr) in self._VARIABLE_PARAMS.items():
                 try:
                     cell = getattr(surf, cell_attr)
-                    if not hasattr(cell, 'GetSolveData'):
-                        continue
                     solve = cell.GetSolveData()
-                    solve_type = str(solve.Type).split('.')[-1] if solve else ""
+                    solve_type = solve.Type.name if solve else ""
                     if solve_type == "Variable":
                         # Radius and thickness can be Infinity in OpticStudio
                         # (flat surfaces, afocal systems / infinite conjugates)
@@ -945,10 +952,10 @@ class OptimizationMixin:
                     break
                 try:
                     cell = surf.GetSurfaceCell(getattr(surf_col, par_attr))
-                    if cell is None or not hasattr(cell, 'GetSolveData'):
+                    if cell is None:
                         continue
                     solve = cell.GetSolveData()
-                    solve_type = str(solve.Type).split('.')[-1] if solve else ""
+                    solve_type = solve.Type.name if solve else ""
                     if solve_type == "Variable":
                         variable_states.append({
                             "surface_index": surf_idx,
@@ -1081,7 +1088,7 @@ class OptimizationMixin:
 
         # Read original unit for reporting.
         # LensUnits is a LensUnit enum; str() gives e.g. "LensUnit.Millimeters"
-        enum_name = str(self.oss.SystemData.Units.LensUnits).split(".")[-1]
+        enum_name = self.oss.SystemData.Units.LensUnits.name
         original_unit = self._ENUM_TO_UNIT.get(enum_name)
 
         # Run Scale Lens tool
