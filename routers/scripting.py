@@ -63,6 +63,12 @@ async def run_script(
                         error=f"Failed to load system: {e}",
                     )
 
+            if request.working_directory and not os.path.isdir(request.working_directory):
+                return RunScriptResponse(
+                    success=False,
+                    error=f"working_directory does not exist on the worker: {request.working_directory!r}",
+                )
+
             handler = main.zospy_handler
 
             namespace = {
