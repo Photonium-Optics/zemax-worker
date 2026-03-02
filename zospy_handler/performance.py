@@ -135,6 +135,73 @@ class PerformanceMixin:
             return "sagittal"
         return None
 
+    def _extract_tf_mtf_field_data(
+        self,
+        results,
+        fi: int,
+    ) -> tuple[list[float], list[float], list[float], list[str]]:
+        """Extract tangential, sagittal, and focus data from Through Focus MTF results.
+
+        Through Focus MTF series use single-column YData accessed via GetValueAt,
+        unlike standard MTF which uses 2D bulk extraction. Each series has a
+        description classifiable as tangential or sagittal.
+
+        Returns (tangential, sagittal, focus_data, unclassified_descriptions).
+        """
+        tangential: list[float] = []
+        sagittal: list[float] = []
+        focus_data: list[float] = []
+
+        try:
+            num_series = results.NumberOfDataSeries
+            logger.debug(f"TF-MTF field {fi}: {num_series} data series")
+            unclassified: list[tuple[list[float], list[float]]] = []
+            for si in range(num_series):
+                series = results.GetDataSeries(si)
+                if series is None:
+                    continue
+
+                desc = str(series.Description)
+                desc_lower = desc.lower()
+                x_raw = series.XData.Data
+                series_x = [float(v) for v in x_raw]
+                n_points = len(series_x)
+                logger.debug(f"TF-MTF field {fi} series {si}: desc='{desc}', points={n_points}")
+
+                if series.NumSeries <= 0:
+                    logger.warning(f"TF-MTF field {fi} series {si}: NumSeries=0, skipping")
+                    continue
+
+                series_y = [float(series.YData.GetValueAt(row, 0)) for row in range(n_points)]
+
+                category = self._classify_mtf_series(desc_lower)
+                if category == "tangential" and not tangential:
+                    tangential = series_y
+                    if not focus_data:
+                        focus_data = series_x
+                elif category == "sagittal" and not sagittal:
+                    sagittal = series_y
+                    if not focus_data:
+                        focus_data = series_x
+                else:
+                    unclassified.append((series_x, series_y))
+
+            # Fallback: assign unclassified series to missing slots
+            if unclassified and (not tangential or not sagittal):
+                logger.info(f"TF-MTF field {fi}: using positional fallback for {len(unclassified)} unclassified series")
+                idx = 0
+                if not tangential and idx < len(unclassified):
+                    x, tangential = unclassified[idx]
+                    if not focus_data:
+                        focus_data = x
+                    idx += 1
+                if not sagittal and idx < len(unclassified):
+                    _, sagittal = unclassified[idx]
+        except Exception as e:
+            logger.warning(f"TF-MTF: Could not extract data series for field {fi}: {e}")
+
+        return tangential, sagittal, focus_data, []
+
     def _extract_mtf_field_data(
         self,
         results,
@@ -763,6 +830,139 @@ class PerformanceMixin:
         except Exception as e:
             logger.warning(f"[SPOT] Could not get spot data for field {field_index}: {type(e).__name__}: {e}", exc_info=True)
 
+    def _run_mtf_analysis(
+        self,
+        analysis_idm,
+        label: str,
+        endpoint: str,
+        field_index: int,
+        wavelength_index: int,
+        sampling: str,
+        maximum_frequency: float,
+    ) -> dict[str, Any]:
+        """Run an MTF analysis (FFT or Huygens) and return frequency/modulation data.
+
+        Shared implementation for get_mtf() and get_huygens_mtf(). Both use the
+        same pattern: iterate fields, configure analysis settings, extract T/S data
+        series per field, and validate results.
+
+        Args:
+            analysis_idm: The AnalysisIDM enum value (FftMtf or HuygensMtf)
+            label: Human-readable name for logging (e.g., "FFT MTF", "Huygens MTF")
+            endpoint: API endpoint for _log_raw_output (e.g., "/mtf")
+            field_index: Field index (0 = all fields, 1+ = specific field, 1-indexed)
+            wavelength_index: Wavelength index (1-indexed)
+            sampling: Pupil sampling grid (e.g., '64x64', '128x128')
+            maximum_frequency: Maximum spatial frequency (cycles/mm). 0 = auto.
+        """
+        try:
+            fields = self.oss.SystemData.Fields
+            num_fields = fields.NumberOfFields
+            wavelengths = self.oss.SystemData.Wavelengths
+
+            if wavelength_index > wavelengths.NumberOfWavelengths:
+                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
+
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, DEFAULT_WAVELENGTH_UM)
+
+            if field_index == 0:
+                field_indices = list(range(1, num_fields + 1))
+            else:
+                if field_index > num_fields:
+                    return {"success": False, "error": f"Field index {field_index} out of range (max: {num_fields})"}
+                field_indices = [field_index]
+
+            fno = self._get_fno()
+            if fno is None or fno <= 0:
+                logger.warning(f"{label}: Could not determine F/# (got {fno}), diffraction limit and cutoff will be omitted")
+
+            cutoff_frequency = _cutoff_frequency(wavelength_um, fno)
+
+            all_fields_data = []
+            frequency = None
+            diffraction_limit_from_api: list[float] = []
+
+            for fi in field_indices:
+                field = fields.GetField(fi)
+                field_x = _extract_value(field.X)
+                field_y = _extract_value(field.Y)
+
+                analysis = None
+                try:
+                    analysis = self._zp.analyses.new_analysis(
+                        self.oss, analysis_idm, settings_first=True,
+                    )
+
+                    settings = analysis.Settings
+                    self._configure_analysis_settings(
+                        settings,
+                        field_index=fi,
+                        wavelength_index=wavelength_index,
+                        sampling=sampling,
+                    )
+                    if maximum_frequency > 0:
+                        settings.MaximumFrequency = maximum_frequency
+                    # IAS_FftMtf always has ShowDiffractionLimit; IAS_HuygensMtf may not
+                    if hasattr(settings, 'ShowDiffractionLimit'):
+                        settings.ShowDiffractionLimit = True
+
+                    mtf_start = time.perf_counter()
+                    try:
+                        analysis.ApplyAndWaitForCompletion()
+                    finally:
+                        mtf_elapsed_ms = (time.perf_counter() - mtf_start) * 1000
+                        log_timing(logger, f"{label}.run (field={fi})", mtf_elapsed_ms)
+
+                    tangential, sagittal, freq_data, diffraction_limit_from_api = \
+                        self._extract_mtf_field_data(
+                            analysis.Results, fi, label, diffraction_limit_from_api,
+                        )
+
+                    if frequency is None and freq_data:
+                        frequency = freq_data
+
+                    all_fields_data.append({
+                        "field_index": fi - 1,
+                        "field_x": field_x,
+                        "field_y": field_y,
+                        "tangential": tangential,
+                        "sagittal": sagittal,
+                    })
+
+                except Exception as e:
+                    logger.warning(f"{label} analysis failed for field {fi}: {e}")
+                    all_fields_data.append({
+                        "field_index": fi - 1,
+                        "field_x": field_x,
+                        "field_y": field_y,
+                        "tangential": [],
+                        "sagittal": [],
+                    })
+                finally:
+                    if analysis is not None:
+                        try:
+                            analysis.Close()
+                        except Exception:
+                            pass
+
+            validation_error = self._validate_mtf_results(label, frequency, all_fields_data)
+            if validation_error:
+                return validation_error
+
+            result = {
+                "success": True,
+                "frequency": np.array(frequency).tolist(),
+                "fields": all_fields_data,
+                "diffraction_limit": diffraction_limit_from_api,
+                "cutoff_frequency": float(cutoff_frequency) if cutoff_frequency else None,
+                "wavelength_um": float(wavelength_um),
+            }
+            _log_raw_output(endpoint, result)
+            return result
+
+        except Exception as e:
+            return {"success": False, "error": f"{label} analysis failed: {e}"}
+
     def get_mtf(
         self,
         field_index: int = 0,
@@ -794,121 +994,16 @@ class PerformanceMixin:
             }
             On error: {"success": False, "error": "..."}
         """
-        try:
-            fields = self.oss.SystemData.Fields
-            num_fields = fields.NumberOfFields
-            wavelengths = self.oss.SystemData.Wavelengths
-
-            if wavelength_index > wavelengths.NumberOfWavelengths:
-                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
-
-            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, DEFAULT_WAVELENGTH_UM)
-
-            # Determine which fields to analyze
-            if field_index == 0:
-                field_indices = list(range(1, num_fields + 1))
-            else:
-                if field_index > num_fields:
-                    return {"success": False, "error": f"Field index {field_index} out of range (max: {num_fields})"}
-                field_indices = [field_index]
-
-            # Get F/# for diffraction limit calculation
-            fno = self._get_fno()
-            if fno is None or fno <= 0:
-                logger.warning(f"MTF: Could not determine F/# (got {fno}), diffraction limit and cutoff will be omitted")
-
-            cutoff_frequency = _cutoff_frequency(wavelength_um, fno)
-
-            all_fields_data = []
-            frequency = None
-            diffraction_limit_from_api: list[float] = []
-
-            for fi in field_indices:
-                field = fields.GetField(fi)
-                field_x = _extract_value(field.X)
-                field_y = _extract_value(field.Y)
-
-                analysis = None
-                try:
-                    # Use new_analysis with FFTMtf
-                    idm = self._zp.constants.Analysis.AnalysisIDM
-                    analysis = self._zp.analyses.new_analysis(
-                        self.oss,
-                        idm.FftMtf,
-                        settings_first=True,
-                    )
-
-                    # Configure settings
-                    settings = analysis.Settings
-                    self._configure_analysis_settings(
-                        settings,
-                        field_index=fi,
-                        wavelength_index=wavelength_index,
-                        sampling=sampling,
-                    )
-                    if maximum_frequency > 0:
-                        settings.MaximumFrequency = maximum_frequency
-                    # Ask ZOS-API to include diffraction limit as a data series
-                    settings.ShowDiffractionLimit = True
-
-                    mtf_start = time.perf_counter()
-                    try:
-                        analysis.ApplyAndWaitForCompletion()
-                    finally:
-                        mtf_elapsed_ms = (time.perf_counter() - mtf_start) * 1000
-                        log_timing(logger, f"FFTMtf.run (field={fi})", mtf_elapsed_ms)
-
-                    tangential, sagittal, freq_data, diffraction_limit_from_api = \
-                        self._extract_mtf_field_data(
-                            analysis.Results, fi, "MTF", diffraction_limit_from_api,
-                        )
-
-                    if frequency is None and freq_data:
-                        frequency = freq_data
-
-                    all_fields_data.append({
-                        "field_index": fi - 1,  # Convert to 0-indexed
-                        "field_x": field_x,
-                        "field_y": field_y,
-                        "tangential": tangential,
-                        "sagittal": sagittal,
-                    })
-
-                except Exception as e:
-                    logger.warning(f"MTF analysis failed for field {fi}: {e}")
-                    all_fields_data.append({
-                        "field_index": fi - 1,
-                        "field_x": field_x,
-                        "field_y": field_y,
-                        "tangential": [],
-                        "sagittal": [],
-                    })
-                finally:
-                    if analysis is not None:
-                        try:
-                            analysis.Close()
-                        except Exception:
-                            pass
-
-            validation_error = self._validate_mtf_results("FFT MTF", frequency, all_fields_data)
-            if validation_error:
-                return validation_error
-
-            freq_arr = np.array(frequency)
-
-            result = {
-                "success": True,
-                "frequency": freq_arr.tolist(),
-                "fields": all_fields_data,
-                "diffraction_limit": diffraction_limit_from_api,
-                "cutoff_frequency": float(cutoff_frequency) if cutoff_frequency else None,
-                "wavelength_um": float(wavelength_um),
-            }
-            _log_raw_output("/mtf", result)
-            return result
-
-        except Exception as e:
-            return {"success": False, "error": f"MTF analysis failed: {e}"}
+        idm = self._zp.constants.Analysis.AnalysisIDM
+        return self._run_mtf_analysis(
+            analysis_idm=idm.FftMtf,
+            label="FFT MTF",
+            endpoint="/mtf",
+            field_index=field_index,
+            wavelength_index=wavelength_index,
+            sampling=sampling,
+            maximum_frequency=maximum_frequency,
+        )
 
     def get_huygens_mtf(
         self,
@@ -944,123 +1039,16 @@ class PerformanceMixin:
             }
             On error: {"success": False, "error": "..."}
         """
-        try:
-            fields = self.oss.SystemData.Fields
-            num_fields = fields.NumberOfFields
-            wavelengths = self.oss.SystemData.Wavelengths
-
-            if wavelength_index > wavelengths.NumberOfWavelengths:
-                return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
-
-            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, DEFAULT_WAVELENGTH_UM)
-
-            # Determine which fields to analyze
-            if field_index == 0:
-                field_indices = list(range(1, num_fields + 1))
-            else:
-                if field_index > num_fields:
-                    return {"success": False, "error": f"Field index {field_index} out of range (max: {num_fields})"}
-                field_indices = [field_index]
-
-            # Get F/# for diffraction limit calculation
-            fno = self._get_fno()
-            if fno is None or fno <= 0:
-                logger.warning(f"Huygens MTF: Could not determine F/# (got {fno}), diffraction limit and cutoff will be omitted")
-
-            cutoff_frequency = _cutoff_frequency(wavelength_um, fno)
-
-            all_fields_data = []
-            frequency = None
-            diffraction_limit_from_api: list[float] = []
-
-            for fi in field_indices:
-                field = fields.GetField(fi)
-                field_x = _extract_value(field.X)
-                field_y = _extract_value(field.Y)
-
-                analysis = None
-                try:
-                    # Use new_analysis with HuygensMtf
-                    idm = self._zp.constants.Analysis.AnalysisIDM
-                    analysis = self._zp.analyses.new_analysis(
-                        self.oss,
-                        idm.HuygensMtf,
-                        settings_first=True,
-                    )
-
-                    # Configure settings
-                    settings = analysis.Settings
-                    self._configure_analysis_settings(
-                        settings,
-                        field_index=fi,
-                        wavelength_index=wavelength_index,
-                        sampling=sampling,
-                    )
-                    # Set maximum frequency if specified
-                    if maximum_frequency > 0:
-                        settings.MaximumFrequency = maximum_frequency
-                    # IAS_HuygensMtf does NOT have ShowDiffractionLimit per official docs
-                    if hasattr(settings, 'ShowDiffractionLimit'):
-                        settings.ShowDiffractionLimit = True
-
-                    mtf_start = time.perf_counter()
-                    try:
-                        analysis.ApplyAndWaitForCompletion()
-                    finally:
-                        mtf_elapsed_ms = (time.perf_counter() - mtf_start) * 1000
-                        log_timing(logger, f"HuygensMtf.run (field={fi})", mtf_elapsed_ms)
-
-                    tangential, sagittal, freq_data, diffraction_limit_from_api = \
-                        self._extract_mtf_field_data(
-                            analysis.Results, fi, "Huygens MTF", diffraction_limit_from_api,
-                        )
-
-                    if frequency is None and freq_data:
-                        frequency = freq_data
-
-                    all_fields_data.append({
-                        "field_index": fi - 1,
-                        "field_x": field_x,
-                        "field_y": field_y,
-                        "tangential": tangential,
-                        "sagittal": sagittal,
-                    })
-
-                except Exception as e:
-                    logger.warning(f"Huygens MTF analysis failed for field {fi}: {e}")
-                    all_fields_data.append({
-                        "field_index": fi - 1,
-                        "field_x": field_x,
-                        "field_y": field_y,
-                        "tangential": [],
-                        "sagittal": [],
-                    })
-                finally:
-                    if analysis is not None:
-                        try:
-                            analysis.Close()
-                        except Exception:
-                            pass
-
-            validation_error = self._validate_mtf_results("Huygens MTF", frequency, all_fields_data)
-            if validation_error:
-                return validation_error
-
-            freq_arr = np.array(frequency)
-
-            result = {
-                "success": True,
-                "frequency": freq_arr.tolist(),
-                "fields": all_fields_data,
-                "diffraction_limit": diffraction_limit_from_api,
-                "cutoff_frequency": float(cutoff_frequency) if cutoff_frequency else None,
-                "wavelength_um": float(wavelength_um),
-            }
-            _log_raw_output("/huygens-mtf", result)
-            return result
-
-        except Exception as e:
-            return {"success": False, "error": f"Huygens MTF analysis failed: {e}"}
+        idm = self._zp.constants.Analysis.AnalysisIDM
+        return self._run_mtf_analysis(
+            analysis_idm=idm.HuygensMtf,
+            label="Huygens MTF",
+            endpoint="/huygens-mtf",
+            field_index=field_index,
+            wavelength_index=wavelength_index,
+            sampling=sampling,
+            maximum_frequency=maximum_frequency,
+        )
 
     def get_through_focus_mtf(
         self,
@@ -1165,54 +1153,8 @@ class PerformanceMixin:
                     focus_data = []
 
                     if results is not None:
-                        try:
-                            num_series = results.NumberOfDataSeries
-                            logger.debug(f"TF-MTF field {fi}: {num_series} data series")
-                            unclassified = []
-                            for si in range(num_series):
-                                series = results.GetDataSeries(si)
-                                if series is None:
-                                    continue
-
-                                desc = str(series.Description)
-                                desc_lower = desc.lower()
-                                # XData is IVectorData (1D), YData is IMatrixData (2D: rows=points, cols=series)
-                                x_raw = series.XData.Data
-                                series_x = [float(v) for v in x_raw]
-                                n_points = len(series_x)
-                                logger.debug(f"TF-MTF field {fi} series {si}: desc='{desc}', points={n_points}")
-
-                                if series.NumSeries > 0:
-                                    series_y = [float(series.YData.GetValueAt(row, 0)) for row in range(n_points)]
-                                else:
-                                    logger.warning(f"TF-MTF field {fi} series {si}: NumSeries=0, skipping")
-                                    continue
-
-                                category = self._classify_mtf_series(desc_lower)
-                                if category == "tangential" and not tangential:
-                                    tangential = series_y
-                                    if not focus_data:
-                                        focus_data = series_x
-                                elif category == "sagittal" and not sagittal:
-                                    sagittal = series_y
-                                    if not focus_data:
-                                        focus_data = series_x
-                                else:
-                                    unclassified.append((series_x, series_y))
-
-                            # Fallback: assign unclassified series to missing slots
-                            if unclassified and (not tangential or not sagittal):
-                                logger.info(f"TF-MTF field {fi}: using positional fallback for {len(unclassified)} unclassified series")
-                                idx = 0
-                                if not tangential and idx < len(unclassified):
-                                    x, tangential = unclassified[idx]
-                                    if not focus_data:
-                                        focus_data = x
-                                    idx += 1
-                                if not sagittal and idx < len(unclassified):
-                                    _, sagittal = unclassified[idx]
-                        except Exception as e:
-                            logger.warning(f"TF-MTF: Could not extract data series for field {fi}: {e}")
+                        tangential, sagittal, focus_data, _ = \
+                            self._extract_tf_mtf_field_data(results, fi)
 
                     if focus_positions is None and focus_data:
                         focus_positions = focus_data
@@ -1373,17 +1315,13 @@ class PerformanceMixin:
                     # Grab header text BEFORE closing the analysis (COM object
                     # becomes invalid after Close).
                     try:
-                        if hasattr(results, 'HeaderData'):
-                            hd = results.HeaderData
-                            if hd is not None and hasattr(hd, 'Lines'):
-                                fft_header_lines = list(hd.Lines)  # materialize .NET IEnumerable once
-                                logger.debug(f"FFT PSF: HeaderData.Lines returned {len(fft_header_lines)} lines")
-                                for i, hl in enumerate(fft_header_lines):
-                                    logger.debug(f"FFT PSF: header[{i}]: {str(hl)!r}")
-                            else:
-                                logger.debug(f"FFT PSF: HeaderData is None or has no Lines (HeaderData={hd})")
+                        header_data = results.HeaderData
+                        if header_data is not None and header_data.Lines:
+                            fft_header_lines = list(header_data.Lines)
+                            for i, hl in enumerate(fft_header_lines):
+                                logger.debug(f"FFT PSF: header[{i}]: {str(hl)!r}")
                         else:
-                            logger.debug("FFT PSF: results has no HeaderData attribute")
+                            logger.debug("FFT PSF: HeaderData or Lines is empty")
                     except Exception as e:
                         logger.warning(f"FFT PSF: HeaderData extraction failed: {e}")
             finally:

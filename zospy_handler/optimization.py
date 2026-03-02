@@ -594,7 +594,7 @@ class OptimizationMixin:
         for i in range(1, num_operands + 1):
             try:
                 op = mfe.GetOperandAt(i)
-                op_code = op.Type.name
+                op_code = op.Type.name if op.Type is not None else ""
 
                 rows.append({
                     "row_index": i - 1,

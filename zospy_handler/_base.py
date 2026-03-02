@@ -721,47 +721,36 @@ class ZosPyHandlerBase:
     def _extract_data_grid(grid) -> Optional[np.ndarray]:
         """Extract a 2D data grid from an OpticStudio analysis result.
 
-        Uses tiered bulk .Values extraction (single COM call),
-        falling back to per-pixel grid.Z(xi, yi) if needed.
-
-        Tiers for .Values path:
-          1. np.asarray — instant if pythonnet supports buffer protocol
-          2. List comprehension — builds array in one numpy call
+        IAR_DataGrid.Values is the documented primary access method (double[,]).
+        Two tiers:
+          1. np.asarray — zero-copy if pythonnet supports buffer protocol
+          2. List comprehension from Values — handles pythonnet compat issues
         """
         try:
             raw_values = grid.Values
             ny = raw_values.GetLength(0)
             nx = raw_values.GetLength(1)
-            if nx > 0 and ny > 0:
-                # Tier 1: direct numpy conversion (zero-copy if supported)
-                try:
-                    arr = np.asarray(raw_values, dtype=np.float64)
-                    if arr.shape == (ny, nx):
-                        logger.debug("_extract_data_grid: Tier 1 (np.asarray) succeeded")
-                        return arr
-                except Exception as e:
-                    logger.debug(f"_extract_data_grid: Tier 1 (np.asarray) failed: {e}")
+            if nx <= 0 or ny <= 0:
+                logger.warning(f"_extract_data_grid: empty grid ({nx}x{ny})")
+                return None
 
-                # Tier 2: list comprehension → single numpy call
-                arr = np.array(
-                    [[raw_values[yi, xi] for xi in range(nx)] for yi in range(ny)],
-                    dtype=np.float64,
-                )
-                logger.debug("_extract_data_grid: Tier 2 (list comprehension) succeeded")
-                return arr
-        except Exception:
-            pass  # Fall through to per-pixel extraction
+            # Tier 1: direct numpy conversion (zero-copy if supported)
+            try:
+                arr = np.asarray(raw_values, dtype=np.float64)
+                if arr.shape == (ny, nx):
+                    return arr
+            except Exception as e:
+                logger.debug(f"_extract_data_grid: np.asarray failed, using list comprehension: {e}")
 
-        # Fallback: per-pixel extraction via grid.Z()
-        nx = grid.Nx
-        ny = grid.Ny
-        if nx <= 0 or ny <= 0:
+            # Tier 2: list comprehension → single numpy call
+            arr = np.array(
+                [[raw_values[yi, xi] for xi in range(nx)] for yi in range(ny)],
+                dtype=np.float64,
+            )
+            return arr
+        except Exception as e:
+            logger.error(f"_extract_data_grid: failed to extract grid.Values: {e}")
             return None
-        arr = np.zeros((ny, nx), dtype=np.float64)
-        for yi in range(ny):
-            for xi in range(nx):
-                arr[yi, xi] = _extract_value(grid.Z(xi, yi))
-        return arr
 
     def _extract_grid_with_metadata(self, grid) -> Optional[GridWithMetadata]:
         """Extract data grid with spatial metadata from a ZOS-API IGrid object.
@@ -852,7 +841,7 @@ class ZosPyHandlerBase:
 
         Uses the WFNO merit function operand (paraxial working F/#) as the
         primary method — this is reliable regardless of aperture type.
-        Falls back to aperture settings or EFL/EPD if the operand fails.
+        Falls back to aperture settings or EFL/EPD calculation.
 
         Returns:
             F-number, or None if it cannot be determined.
