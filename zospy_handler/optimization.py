@@ -107,7 +107,7 @@ class OptimizationMixin:
                 for i, col in enumerate(param_columns):
                     if i < len(params) and params[i] is not None:
                         cell = op.GetOperandCell(col)
-                        dt = cell.DataType.name
+                        dt = str(cell.DataType)
                         if dt == 'Integer':
                             cell.IntegerValue = int(float(params[i]))
                         elif dt == 'String':
@@ -541,7 +541,7 @@ class OptimizationMixin:
         """
         try:
             cell = op.GetOperandCell(col_enum)
-            data_type = cell.DataType.name
+            data_type = str(cell.DataType)
 
             default_value = self._read_cell_default(cell, data_type)
 
@@ -578,7 +578,7 @@ class OptimizationMixin:
         for col in param_columns:
             try:
                 cell = op.GetOperandCell(col)
-                dt = cell.DataType.name
+                dt = str(cell.DataType)
                 if dt == 'String':
                     params.append(None)
                 else:
@@ -594,7 +594,7 @@ class OptimizationMixin:
         for i in range(1, num_operands + 1):
             try:
                 op = mfe.GetOperandAt(i)
-                op_code = op.Type.name if op.Type is not None else ""
+                op_code = str(op.TypeName) if op.TypeName else ""
 
                 rows.append({
                     "row_index": i - 1,
@@ -923,7 +923,7 @@ class OptimizationMixin:
                 try:
                     cell = getattr(surf, cell_attr)
                     solve = cell.GetSolveData()
-                    solve_type = solve.Type.name if solve and solve.Type is not None else ""
+                    solve_type = str(solve.Type) if solve and solve.Type is not None else ""
                     if solve_type == "Variable":
                         # Radius and thickness can be Infinity in OpticStudio
                         # (flat surfaces, afocal systems / infinite conjugates)
@@ -955,7 +955,7 @@ class OptimizationMixin:
                     if cell is None:
                         continue
                     solve = cell.GetSolveData()
-                    solve_type = solve.Type.name if solve and solve.Type is not None else ""
+                    solve_type = str(solve.Type) if solve and solve.Type is not None else ""
                     if solve_type == "Variable":
                         variable_states.append({
                             "surface_index": surf_idx,

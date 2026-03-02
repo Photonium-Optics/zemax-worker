@@ -139,14 +139,14 @@ class PerformanceMixin:
         self,
         results,
         fi: int,
-    ) -> tuple[list[float], list[float], list[float], list[str]]:
+    ) -> tuple[list[float], list[float], list[float]]:
         """Extract tangential, sagittal, and focus data from Through Focus MTF results.
 
         Through Focus MTF series use single-column YData accessed via GetValueAt,
         unlike standard MTF which uses 2D bulk extraction. Each series has a
         description classifiable as tangential or sagittal.
 
-        Returns (tangential, sagittal, focus_data, unclassified_descriptions).
+        Returns (tangential, sagittal, focus_data).
         """
         tangential: list[float] = []
         sagittal: list[float] = []
@@ -200,7 +200,7 @@ class PerformanceMixin:
         except Exception as e:
             logger.warning(f"TF-MTF: Could not extract data series for field {fi}: {e}")
 
-        return tangential, sagittal, focus_data, []
+        return tangential, sagittal, focus_data
 
     def _extract_mtf_field_data(
         self,
@@ -1096,7 +1096,6 @@ class PerformanceMixin:
 
             wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, DEFAULT_WAVELENGTH_UM)
 
-            # Determine which fields to analyze
             if field_index == 0:
                 field_indices = list(range(1, num_fields + 1))
             else:
@@ -1148,13 +1147,11 @@ class PerformanceMixin:
 
                     # Extract data from results
                     results = analysis.Results
-                    tangential = []
-                    sagittal = []
-                    focus_data = []
-
                     if results is not None:
-                        tangential, sagittal, focus_data, _ = \
+                        tangential, sagittal, focus_data = \
                             self._extract_tf_mtf_field_data(results, fi)
+                    else:
+                        tangential, sagittal, focus_data = [], [], []
 
                     if focus_positions is None and focus_data:
                         focus_positions = focus_data
