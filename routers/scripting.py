@@ -19,6 +19,25 @@ from diagnostics.connection_diagnostics import (
 router = APIRouter()
 
 
+def _make_result_serializable(obj: object) -> object:
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if obj is None or isinstance(obj, (bool, int, str)):
+        return obj
+    if isinstance(obj, (float, np.floating)):
+        v = float(obj)
+        return None if math.isnan(v) or math.isinf(v) else v
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, dict):
+        return {str(k): _make_result_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_make_result_serializable(v) for v in obj]
+    return str(obj)
+
+
 @router.post("/run-script", response_model=RunScriptResponse)
 async def run_script(
     request: RunScriptRequest,
@@ -79,6 +98,7 @@ async def run_script(
                 raw_result = namespace.get("result", {})
                 if not isinstance(raw_result, dict):
                     raw_result = {"value": raw_result}
+                raw_result = _make_result_serializable(raw_result)
 
                 modified_zmx = None
                 if request.may_modify_system and namespace.get("system_modified"):
