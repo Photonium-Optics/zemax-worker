@@ -264,14 +264,12 @@ class AberrationsMixin:
                 except Exception as e:
                     logger.warning(f"ZernikeStandardCoefficients: MaximumNumberOfTerms not settable ({type(e).__name__}: {e}). Continuing with default.")
 
-                if hasattr(settings, 'Surface'):
-                    try:
-                        settings.Surface.SetSurfaceNumber(image_surf)
-                    except Exception as e:
-                        logger.warning(f"ZernikeStandardCoefficients: Could not set Surface: {e}")
+                try:
+                    settings.Surface.SetSurfaceNumber(image_surf)
+                except Exception as e:
+                    logger.warning(f"ZernikeStandardCoefficients: Could not set Surface: {e}")
 
-                if hasattr(settings, 'ReferenceOBDToVertex'):
-                    settings.ReferenceOBDToVertex = False
+                settings.ReferenceOBDToVertex = False
 
                 zernike_start = time.perf_counter()
                 try:
@@ -334,17 +332,13 @@ class AberrationsMixin:
                 self._configure_analysis_settings(settings, field_index, wavelength_index, sampling)
 
                 # WavefrontMap-specific settings
-                if hasattr(settings, 'Surface'):
-                    try:
-                        settings.Surface.SetSurfaceNumber(image_surf)
-                    except Exception as e:
-                        logger.warning(f"WavefrontMap: Could not set Surface: {e}")
+                try:
+                    settings.Surface.SetSurfaceNumber(image_surf)
+                except Exception as e:
+                    logger.warning(f"WavefrontMap: Could not set Surface: {e}")
 
-                if hasattr(settings, 'RemoveTilt'):
-                    settings.RemoveTilt = remove_tilt
-
-                if hasattr(settings, 'UseExitPupil'):
-                    settings.UseExitPupil = True
+                settings.RemoveTilt = remove_tilt
+                settings.UseExitPupil = True
 
                 wfm_start = time.perf_counter()
                 try:
@@ -354,7 +348,7 @@ class AberrationsMixin:
                     log_timing(logger, "WavefrontMap.ApplyAndWaitForCompletion", elapsed)
 
                 results = wfm_analysis.Results
-                if results and hasattr(results, 'NumberOfDataGrids') and results.NumberOfDataGrids > 0:
+                if results and results.NumberOfDataGrids > 0:
                     grid = results.GetDataGrid(0)
                     arr = self._extract_data_grid(grid)
                     if arr is not None and arr.ndim >= 2:
@@ -538,7 +532,7 @@ class AberrationsMixin:
                             if series is None:
                                 continue
 
-                            desc = str(series.Description) if hasattr(series, 'Description') else ""
+                            desc = str(series.Description)
                             logger.info(f"RmsField series {si}: desc='{desc}'")
 
                             # Get X data (field values) from IVectorData
@@ -562,11 +556,11 @@ class AberrationsMixin:
                                 continue
 
                             y_raw = y_data.Data
-                            num_curves = series.NumSeries if hasattr(series, 'NumSeries') else 1
+                            num_curves = series.NumSeries
 
                             # Get labels to identify diffraction limit curve
                             labels = []
-                            if hasattr(series, 'SeriesLabels') and series.SeriesLabels is not None:
+                            if series.SeriesLabels is not None:
                                 labels = list(series.SeriesLabels)
 
                             logger.info(f"RmsField series {si}: {num_points} points, {num_curves} curves, labels={labels}")
@@ -649,11 +643,9 @@ class AberrationsMixin:
             settings = analysis.Settings
             # IAS_ZernikeCoefficientsVsField uses Coefficients (comma-separated string),
             # not MaximumNumberOfTerms (which only exists on IAS_ZernikeStandardCoefficients)
-            if hasattr(settings, 'Coefficients'):
-                settings.Coefficients = ",".join(str(i) for i in range(1, maximum_term + 1))
+            settings.Coefficients = ",".join(str(i) for i in range(1, maximum_term + 1))
             self._configure_analysis_settings(settings, wavelength_index=wavelength_index, sampling=sampling)
-            if hasattr(settings, 'FieldDensity'):
-                settings.FieldDensity = field_density
+            settings.FieldDensity = field_density
 
             zernike_start = time.perf_counter()
             try:
@@ -682,14 +674,14 @@ class AberrationsMixin:
 
         # Try data series extraction via XData.Data/YData.Data (correct IAR_DataSeries API)
         rows: list[dict] = []
-        if hasattr(results, 'NumberOfDataSeries'):
-            num_series = results.NumberOfDataSeries
+        num_series = results.NumberOfDataSeries
+        if num_series > 0:
             logger.info(f"ZernikeVsField: {num_series} data series")
             for si in range(num_series):
                 series = results.GetDataSeries(si)
                 if series is None:
                     continue
-                desc = str(series.Description) if hasattr(series, 'Description') else f"Z{si+1}"
+                desc = str(series.Description) or f"Z{si+1}"
                 try:
                     x_raw = series.XData.Data
                     y_raw = series.YData.Data
@@ -891,14 +883,12 @@ class AberrationsMixin:
                 logger.error(f"ZernikeStandardCoefficients: Failed to set MaximumNumberOfTerms={maximum_term}: {type(e).__name__}: {e}")
                 return {"success": False, "error": f"Cannot set Zernike MaximumNumberOfTerms={maximum_term}: {e}"}
 
-            if hasattr(settings, 'Surface'):
-                try:
-                    settings.Surface.SetSurfaceNumber(surf_num)
-                except Exception as e:
-                    logger.warning(f"ZernikeStandardCoefficients: Could not set Surface: {e}")
+            try:
+                settings.Surface.SetSurfaceNumber(surf_num)
+            except Exception as e:
+                logger.warning(f"ZernikeStandardCoefficients: Could not set Surface: {e}")
 
-            if hasattr(settings, 'ReferenceOBDToVertex'):
-                settings.ReferenceOBDToVertex = False
+            settings.ReferenceOBDToVertex = False
 
             zernike_start = time.perf_counter()
             try:

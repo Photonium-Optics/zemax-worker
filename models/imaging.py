@@ -1,5 +1,5 @@
-from typing import Any, Literal, Optional
-from pydantic import BaseModel, Field
+from typing import Any, Optional
+from pydantic import BaseModel, Field, field_validator
 
 
 class GeometricImageRequest(BaseModel):
@@ -10,7 +10,19 @@ class GeometricImageRequest(BaseModel):
     rays_x_1000: int = Field(default=10, ge=1, le=100, description="Approximate ray count in thousands")
     number_of_pixels: int = Field(default=100, ge=10, le=1000, description="Pixels across image width")
     field: int = Field(default=1, ge=1, description="Field number (1-indexed)")
-    wavelength: str = Field(default="All", description="Wavelength: 'All' or wavelength number")
+    wavelength: str | int = Field(default="All", description="Wavelength: 'All' or wavelength number")
+
+    @field_validator('wavelength', mode='before')
+    @classmethod
+    def coerce_wavelength(cls, v):
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str):
+            try:
+                return int(v)
+            except ValueError:
+                return v  # "All" or other string sentinel
+        return v
 
 
 class GeometricImageResponse(BaseModel):

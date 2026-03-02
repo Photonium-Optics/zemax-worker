@@ -22,13 +22,6 @@ async def get_geometric_image_analysis(
 
     Returns raw 2D intensity grid as numpy array. Image rendering happens on Mac side.
     """
-    # Parse wavelength: could be "All" or a number string
-    wavelength: str | int = request.wavelength
-    try:
-        wavelength = int(request.wavelength)
-    except (ValueError, TypeError):
-        pass
-
     return await main._run_endpoint(
         "/geometric-image-analysis", GeometricImageResponse, request,
         lambda: main.zospy_handler.get_geometric_image_analysis(
@@ -37,7 +30,7 @@ async def get_geometric_image_analysis(
             rays_x_1000=request.rays_x_1000,
             number_of_pixels=request.number_of_pixels,
             field=request.field,
-            wavelength=wavelength,
+            wavelength=request.wavelength,
         ),
     )
 
@@ -52,13 +45,6 @@ async def get_physical_optics_propagation(
 
     Returns raw 2D beam profile as numpy array. Image rendering happens on Mac side.
     """
-    # Parse end_surface: if numeric string, convert to int for the handler
-    end_surface = request.end_surface
-    try:
-        end_surface_val = int(end_surface)
-    except (ValueError, TypeError):
-        end_surface_val = end_surface
-
     return await main._run_endpoint(
         "/physical-optics-propagation", PhysicalOpticsPropagationResponse, request,
         lambda: main.zospy_handler.get_physical_optics_propagation(
@@ -72,7 +58,7 @@ async def get_physical_optics_propagation(
             x_width=request.x_width,
             y_width=request.y_width,
             start_surface=request.start_surface,
-            end_surface=end_surface_val,
+            end_surface=request.end_surface,
             use_polarization=request.use_polarization,
             data_type=request.data_type,
         ),

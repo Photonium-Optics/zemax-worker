@@ -35,6 +35,9 @@ from config import (
 # Configure module logger
 logger = logging.getLogger(__name__)
 
+# He-d line (587.6 nm) — standard optical reference wavelength used as fallback
+DEFAULT_WAVELENGTH_UM = 0.5876
+
 # Dedicated logger for raw Zemax analysis output (filterable in dashboard)
 logger_raw = logging.getLogger("zemax.raw")
 
@@ -527,7 +530,7 @@ class ZosPyHandlerBase:
         primary_idx = None
         for i in range(1, n_wl + 1):
             wl = wls.GetWavelength(i)
-            is_primary = getattr(wl, 'IsPrimary', False)
+            is_primary = wl.IsPrimary
             logger.info(
                 f"  Wavelength #{i}: {_extract_value(wl.Wavelength, 0):.6f} um, "
                 f"weight={_extract_value(wl.Weight, 0)}, primary={is_primary}"
@@ -745,53 +748,40 @@ class ZosPyHandlerBase:
     def _extract_data_grid(grid) -> Optional[np.ndarray]:
         """Extract a 2D data grid from an OpticStudio analysis result.
 
-        Uses tiered bulk .Values extraction when available (single COM call),
+        Uses tiered bulk .Values extraction (single COM call),
         falling back to per-pixel grid.Z(xi, yi) if needed.
 
         Tiers for .Values path:
           1. np.asarray — instant if pythonnet supports buffer protocol
           2. List comprehension — builds array in one numpy call
-          3. Per-element loop — guaranteed fallback
         """
-        if hasattr(grid, 'Values'):
-            try:
-                raw_values = grid.Values
-                ny = raw_values.GetLength(0)
-                nx = raw_values.GetLength(1)
-                if nx > 0 and ny > 0:
-                    # Tier 1: direct numpy conversion (zero-copy if supported)
-                    try:
-                        arr = np.asarray(raw_values, dtype=np.float64)
-                        if arr.shape == (ny, nx):
-                            logger.debug("_extract_data_grid: Tier 1 (np.asarray) succeeded")
-                            return arr
-                    except Exception:
-                        pass
-
-                    # Tier 2: list comprehension → single numpy call
-                    try:
-                        arr = np.array(
-                            [[raw_values[yi, xi] for xi in range(nx)] for yi in range(ny)],
-                            dtype=np.float64,
-                        )
-                        logger.debug("_extract_data_grid: Tier 2 (list comprehension) succeeded")
+        try:
+            raw_values = grid.Values
+            ny = raw_values.GetLength(0)
+            nx = raw_values.GetLength(1)
+            if nx > 0 and ny > 0:
+                # Tier 1: direct numpy conversion (zero-copy if supported)
+                try:
+                    arr = np.asarray(raw_values, dtype=np.float64)
+                    if arr.shape == (ny, nx):
+                        logger.debug("_extract_data_grid: Tier 1 (np.asarray) succeeded")
                         return arr
-                    except Exception:
-                        pass
+                except Exception as e:
+                    logger.debug(f"_extract_data_grid: Tier 1 (np.asarray) failed: {e}")
 
-                    # Tier 3: per-element loop (original fallback)
-                    arr = np.zeros((ny, nx), dtype=np.float64)
-                    for yi in range(ny):
-                        for xi in range(nx):
-                            arr[yi, xi] = raw_values[yi, xi]
-                    logger.debug("_extract_data_grid: Tier 3 (per-element loop) succeeded")
-                    return arr
-            except Exception:
-                pass  # Fall through to per-pixel extraction
+                # Tier 2: list comprehension → single numpy call
+                arr = np.array(
+                    [[raw_values[yi, xi] for xi in range(nx)] for yi in range(ny)],
+                    dtype=np.float64,
+                )
+                logger.debug("_extract_data_grid: Tier 2 (list comprehension) succeeded")
+                return arr
+        except Exception:
+            pass  # Fall through to per-pixel extraction
 
         # Fallback: per-pixel extraction via grid.Z()
-        nx = grid.Nx if hasattr(grid, 'Nx') else 0
-        ny = grid.Ny if hasattr(grid, 'Ny') else 0
+        nx = grid.Nx
+        ny = grid.Ny
         if nx <= 0 or ny <= 0:
             return None
         arr = np.zeros((ny, nx), dtype=np.float64)
@@ -803,9 +793,8 @@ class ZosPyHandlerBase:
     def _extract_grid_with_metadata(self, grid) -> Optional["GridWithMetadata"]:
         """Extract data grid with spatial metadata from a ZOS-API IGrid object.
 
-        Probes the grid for MinX/MinY/Dx/Dy properties (IAR_DataGrid interface).
+        Reads MinX/MinY/Dx/Dy properties from the IAR_DataGrid interface.
         MaxX/MaxY are NOT on IAR_DataGrid, so we compute them from Min + (N-1)*D.
-        Safe if properties are absent.
         """
         data = self._extract_data_grid(grid)
         if data is None:
@@ -815,11 +804,10 @@ class ZosPyHandlerBase:
             ('MinX', 'min_x'), ('MinY', 'min_y'),
             ('Dx', 'dx'), ('Dy', 'dy'),
         ]:
-            if hasattr(grid, attr):
-                try:
-                    setattr(meta, field_name, float(getattr(grid, attr)))
-                except Exception:
-                    pass
+            try:
+                setattr(meta, field_name, float(getattr(grid, attr)))
+            except Exception as e:
+                logger.debug(f"_extract_grid_with_metadata: failed to read {attr}: {e}")
         # Compute MaxX/MaxY from MinX + (Nx-1)*Dx (IAR_DataGrid has no MaxX/MaxY)
         if meta.max_x is None and meta.min_x is not None and meta.dx is not None:
             meta.max_x = meta.min_x + (data.shape[1] - 1) * meta.dx

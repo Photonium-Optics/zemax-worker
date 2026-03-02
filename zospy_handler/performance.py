@@ -15,6 +15,9 @@ from utils.timing import log_timing
 
 logger = logging.getLogger(__name__)
 
+# He-d line — standard optical reference wavelength fallback
+DEFAULT_WAVELENGTH_UM = 0.5876
+
 _STREHL_RE = re.compile(
     r"strehl\s*(?:ratio)?\s*[:=]\s*([\d.]+(?:e[+-]?\d+)?)",
     re.IGNORECASE,
@@ -187,7 +190,7 @@ class PerformanceMixin:
                 if series is None:
                     continue
 
-                desc = str(series.Description) if hasattr(series, 'Description') else ""
+                desc = str(series.Description)
                 desc_lower = desc.lower()
 
                 if "diffrac" in desc_lower or "limit" in desc_lower:
@@ -326,7 +329,7 @@ class PerformanceMixin:
             wl = wavelengths_obj.GetWavelength(wi)
             wavelength_info.append({
                 "index": wi,
-                "um": _extract_value(wl.Wavelength, 0.0),
+                "um": _extract_value(wl.Wavelength, DEFAULT_WAVELENGTH_UM),
                 "weight": _extract_value(wl.Weight, 1.0),
             })
 
@@ -362,7 +365,7 @@ class PerformanceMixin:
             spot_data: list[dict[str, Any]] = []
             airy_radius: Optional[float] = None
             if analysis.Results is not None:
-                airy_radius = self._extract_airy_radius()
+                airy_radius = self._extract_airy_radius(wavelength_index=wavelength_index or 0)
                 spot_data = self._extract_spot_data_from_results(analysis.Results, fields, num_fields, field_index=field_index, wavelength_index=wavelength_index)
                 logger.info(f"[SPOT] StandardSpot results: airy_radius={airy_radius}, fields={len(spot_data)}")
             else:
@@ -550,7 +553,7 @@ class PerformanceMixin:
                 field_x, field_y = field_coords[fi]
 
                 for wi in wl_indices:
-                    wl_um = _extract_value(wavelengths.GetWavelength(wi).Wavelength, 0.0)
+                    wl_um = _extract_value(wavelengths.GetWavelength(wi).Wavelength, DEFAULT_WAVELENGTH_UM)
                     field_rays = {
                         "field_index": fi - 1,
                         "field_x": field_x,
@@ -593,25 +596,38 @@ class PerformanceMixin:
 
         return spot_rays
 
-    def _extract_airy_radius(self) -> Optional[float]:
+    def _extract_airy_radius(self, wavelength_index: int = 0) -> Optional[float]:
         """Compute Airy disk radius: r_airy = 1.22 * wavelength * f_number.
 
         Result is returned in micrometers (µm).
 
+        Args:
+            wavelength_index: 1-based wavelength index. 0 = use primary wavelength.
+
         Returns:
-            Airy radius in µm, or None if F/# or primary wavelength unavailable
+            Airy radius in µm, or None if F/# or wavelength unavailable
         """
         fno = self._get_fno()
         if not fno or fno <= 0:
             logger.warning(f"[SPOT] Cannot compute airy radius: fno={fno}")
             return None
 
-        primary_wl_um = self._get_primary_wavelength_um()
-        if primary_wl_um is None:
+        # Try specific wavelength first, then fall back to primary
+        wl_um = None
+        if wavelength_index is not None and wavelength_index > 0:
+            wl_obj = self.oss.SystemData.Wavelengths.GetWavelength(wavelength_index)
+            val = _extract_value(wl_obj.Wavelength, DEFAULT_WAVELENGTH_UM) if wl_obj else DEFAULT_WAVELENGTH_UM
+            if val > 0:
+                wl_um = val
+
+        if wl_um is None:
+            wl_um = self._get_primary_wavelength_um()
+
+        if wl_um is None:
             return None
 
-        airy_radius_um = 1.22 * primary_wl_um * fno
-        logger.info(f"[SPOT] Computed airy_radius: 1.22 * {primary_wl_um:.4f}µm * F/{fno:.2f} = {airy_radius_um:.3f} µm")
+        airy_radius_um = 1.22 * wl_um * fno
+        logger.info(f"[SPOT] Computed airy_radius: 1.22 * {wl_um:.4f}µm * F/{fno:.2f} = {airy_radius_um:.3f} µm")
         return airy_radius_um
 
     def _get_primary_wavelength_um(self) -> Optional[float]:
@@ -626,7 +642,7 @@ class PerformanceMixin:
             if wl is None:
                 continue
             if wl.IsPrimary:
-                val = _extract_value(wl.Wavelength, 0.0)
+                val = _extract_value(wl.Wavelength, DEFAULT_WAVELENGTH_UM)
                 if val > 0:
                     return val
                 logger.warning(f"[SPOT] Primary wavelength at index {wi} has unusable value ({val!r})")
@@ -730,15 +746,11 @@ class PerformanceMixin:
             wavelength_index: 1-indexed wavelength number. None = primary wavelength (1).
         """
         try:
-            if not hasattr(results, 'SpotData'):
-                if field_index == 0:
-                    logger.warning("[SPOT] results has no SpotData attribute")
-                return
-
             spot_data = results.SpotData
-            if field_index == 0:
-                spot_attrs = [a for a in dir(spot_data) if not a.startswith('_')]
-                logger.debug(f"[SPOT] SpotData type={type(spot_data).__name__}, attrs={spot_attrs}")
+            if spot_data is None:
+                if field_index == 0:
+                    logger.warning("[SPOT] results.SpotData is None")
+                return
 
             # ZOSAPI SpotData methods are 1-indexed for both field and wavelength.
             fi_1 = field_index + 1
@@ -746,24 +758,17 @@ class PerformanceMixin:
 
             # Log matrix dimensions for debugging (only for first field to avoid noise)
             if field_index == 0:
-                if hasattr(spot_data, 'NumberOfFields') and hasattr(spot_data, 'NumberOfWavelengths'):
-                    logger.debug(f"[SPOT] SpotData matrix: NumberOfFields={spot_data.NumberOfFields}, NumberOfWavelengths={spot_data.NumberOfWavelengths}")
-                else:
-                    logger.debug("[SPOT] SpotData matrix dimensions unknown")
+                logger.debug(f"[SPOT] SpotData matrix: NumberOfFields={spot_data.NumberOfFields}, NumberOfWavelengths={spot_data.NumberOfWavelengths}")
 
             # StandardSpot SpotData methods return values in µm (not lens units).
             # The ZOSAPI example (PythonStandalone_22) prints these raw with no conversion.
-            if hasattr(spot_data, 'GetRMSSpotSizeFor'):
-                field_data["rms_radius"] = _extract_value(spot_data.GetRMSSpotSizeFor(fi_1, wi))
-            if hasattr(spot_data, 'GetGeoSpotSizeFor'):
-                field_data["geo_radius"] = _extract_value(spot_data.GetGeoSpotSizeFor(fi_1, wi))
+            field_data["rms_radius"] = _extract_value(spot_data.GetRMSSpotSizeFor(fi_1, wi))
+            field_data["geo_radius"] = _extract_value(spot_data.GetGeoSpotSizeFor(fi_1, wi))
 
             # Centroid coordinates from SpotData are in lens units (mm);
             # convert to µm to match batch ray trace positions (* 1000 at line ~471).
-            if hasattr(spot_data, 'GetReferenceCoordinate_X_For'):
-                field_data["centroid_x"] = _extract_value(spot_data.GetReferenceCoordinate_X_For(fi_1, wi)) * 1000
-            if hasattr(spot_data, 'GetReferenceCoordinate_Y_For'):
-                field_data["centroid_y"] = _extract_value(spot_data.GetReferenceCoordinate_Y_For(fi_1, wi)) * 1000
+            field_data["centroid_x"] = _extract_value(spot_data.GetReferenceCoordinate_X_For(fi_1, wi)) * 1000
+            field_data["centroid_y"] = _extract_value(spot_data.GetReferenceCoordinate_Y_For(fi_1, wi)) * 1000
 
             logger.info(
                 f"[SPOT] field[{field_index}]: rms={field_data.get('rms_radius')} µm, "
@@ -813,7 +818,7 @@ class PerformanceMixin:
             if wavelength_index > wavelengths.NumberOfWavelengths:
                 return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
 
-            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, DEFAULT_WAVELENGTH_UM)
 
             # Determine which fields to analyze
             if field_index == 0:
@@ -857,14 +862,10 @@ class PerformanceMixin:
                         wavelength_index=wavelength_index,
                         sampling=sampling,
                     )
-                    if maximum_frequency > 0 and hasattr(settings, 'MaximumFrequency'):
-                        try:
-                            settings.MaximumFrequency = maximum_frequency
-                        except Exception:
-                            pass
+                    if maximum_frequency > 0:
+                        settings.MaximumFrequency = maximum_frequency
                     # Ask ZOS-API to include diffraction limit as a data series
-                    if hasattr(settings, 'ShowDiffractionLimit'):
-                        settings.ShowDiffractionLimit = True
+                    settings.ShowDiffractionLimit = True
 
                     mtf_start = time.perf_counter()
                     try:
@@ -967,7 +968,7 @@ class PerformanceMixin:
             if wavelength_index > wavelengths.NumberOfWavelengths:
                 return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
 
-            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, DEFAULT_WAVELENGTH_UM)
 
             # Determine which fields to analyze
             if field_index == 0:
@@ -1012,11 +1013,9 @@ class PerformanceMixin:
                         sampling=sampling,
                     )
                     # Set maximum frequency if specified
-                    if maximum_frequency > 0 and hasattr(settings, 'MaximumFrequency'):
-                        try:
-                            settings.MaximumFrequency = maximum_frequency
-                        except Exception:
-                            pass
+                    if maximum_frequency > 0:
+                        settings.MaximumFrequency = maximum_frequency
+                    # IAS_HuygensMtf does NOT have ShowDiffractionLimit per official docs
                     if hasattr(settings, 'ShowDiffractionLimit'):
                         settings.ShowDiffractionLimit = True
 
@@ -1123,7 +1122,7 @@ class PerformanceMixin:
             if wavelength_index > wavelengths.NumberOfWavelengths:
                 return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
 
-            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, DEFAULT_WAVELENGTH_UM)
 
             # Determine which fields to analyze
             if field_index == 0:
@@ -1163,23 +1162,10 @@ class PerformanceMixin:
                     )
 
                     # Set through-focus specific settings
-                    if hasattr(settings, 'DeltaFocus'):
-                        try:
-                            settings.DeltaFocus = delta_focus
-                        except Exception:
-                            pass
-
-                    if frequency > 0 and hasattr(settings, 'Frequency'):
-                        try:
-                            settings.Frequency = frequency
-                        except Exception:
-                            pass
-
-                    if hasattr(settings, 'NumberOfSteps'):
-                        try:
-                            settings.NumberOfSteps = number_of_steps
-                        except Exception:
-                            pass
+                    settings.DeltaFocus = delta_focus
+                    if frequency > 0:
+                        settings.Frequency = frequency
+                    settings.NumberOfSteps = number_of_steps
 
                     mtf_start = time.perf_counter()
                     try:
@@ -1204,9 +1190,9 @@ class PerformanceMixin:
                                 if series is None:
                                     continue
 
-                                desc = str(series.Description) if hasattr(series, 'Description') else ""
+                                desc = str(series.Description)
                                 desc_lower = desc.lower()
-                                n_points = series.NumberOfPoints if hasattr(series, 'NumberOfPoints') else 0
+                                n_points = series.NumberOfPoints
                                 logger.debug(f"TF-MTF field {fi} series {si}: desc='{desc}', points={n_points}")
 
                                 series_x = []
@@ -1356,7 +1342,7 @@ class PerformanceMixin:
             field = fields.GetField(field_index)
             field_x = _extract_value(field.X)
             field_y = _extract_value(field.Y)
-            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, DEFAULT_WAVELENGTH_UM)
 
             # Run FFT PSF analysis
             idm = self._zp.constants.Analysis.AnalysisIDM
@@ -1494,7 +1480,7 @@ class PerformanceMixin:
             field = fields.GetField(field_index)
             field_x = _extract_value(field.X)
             field_y = _extract_value(field.Y)
-            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
+            wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, DEFAULT_WAVELENGTH_UM)
 
             # Run Huygens PSF analysis
             idm = self._zp.constants.Analysis.AnalysisIDM
@@ -1661,7 +1647,7 @@ class PerformanceMixin:
 
                     for wi in range(actual_wl):
                         wl_num = wi + 1 if wavelength_index == 0 else wavelength_index
-                        wl_um = _extract_value(sys_wl.GetWavelength(wl_num).Wavelength, 0.0)
+                        wl_um = _extract_value(sys_wl.GetWavelength(wl_num).Wavelength, DEFAULT_WAVELENGTH_UM)
 
                         tey = _sanitize_fan_values(tan_y_2d[:, wi].tolist())
                         sex = _sanitize_fan_values(sag_y_2d[:, wi].tolist())
@@ -1800,8 +1786,8 @@ class PerformanceMixin:
             ))
 
             # Reuse shared primary wavelength + Airy radius helpers
-            primary_wl_um = self._get_primary_wavelength_um() or 0.5876
-            airy_radius_um = self._extract_airy_radius()
+            primary_wl_um = self._get_primary_wavelength_um() or DEFAULT_WAVELENGTH_UM
+            airy_radius_um = self._extract_airy_radius(wavelength_index=wavelength_index)
 
             # Get the image surface index and its current thickness
             lde = self.oss.LDE

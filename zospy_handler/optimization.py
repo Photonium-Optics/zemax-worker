@@ -107,7 +107,7 @@ class OptimizationMixin:
                 for i, col in enumerate(param_columns):
                     if i < len(params) and params[i] is not None:
                         cell = op.GetOperandCell(col)
-                        dt = str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else ''
+                        dt = str(cell.DataType).split('.')[-1]
                         if dt == 'Integer':
                             cell.IntegerValue = int(float(params[i]))
                         elif dt == 'String':
@@ -266,9 +266,7 @@ class OptimizationMixin:
             return _wizard_error(f"air_min ({air_min}) must be < air_max ({air_max})")
 
         # Check wizard availability (requires OpticStudio 18.5+)
-        wizard = getattr(mfe, 'SEQOptimizationWizard2', None)
-        if wizard is None:
-            return _wizard_error("SEQOptimizationWizard2 not available (requires OpticStudio 18.5+)")
+        wizard = mfe.SEQOptimizationWizard2
 
         def _set_wizard_prop(prop_name: str, value: Any) -> None:
             """Set a wizard property, logging a warning on failure."""
@@ -329,14 +327,11 @@ class OptimizationMixin:
                 _set_wizard_prop("AirEdgeThickness", float(air_edge_thickness))
 
             # Type — ZOSAPI.Wizards.OptimizationTypes: RMS=0, PTV=1
-            if hasattr(wizard_enums, "OptimizationTypes"):
-                opt_type = getattr(wizard_enums.OptimizationTypes, type, None)
-                if opt_type is not None:
-                    wizard.Type = opt_type
-                else:
-                    logger.warning(f"OptimizationTypes.{type} not found, skipping Type assignment")
+            opt_type = getattr(wizard_enums.OptimizationTypes, type, None)
+            if opt_type is not None:
+                wizard.Type = opt_type
             else:
-                logger.warning("OptimizationTypes enum not found in Wizards namespace")
+                logger.warning(f"OptimizationTypes.{type} not found, skipping Type assignment")
 
             # Optimization Function params
             _set_wizard_prop("SpatialFrequency", float(spatial_frequency))
@@ -478,7 +473,7 @@ class OptimizationMixin:
                 # Read the human-readable type name from OpticStudio
                 type_name = ""
                 try:
-                    type_name = str(op.TypeName) if hasattr(op, 'TypeName') else ""
+                    type_name = str(op.TypeName)
                 except Exception:
                     pass
 
@@ -520,15 +515,15 @@ class OptimizationMixin:
         Returns None if the value cannot be read or is inf/NaN.
         """
         try:
-            if data_type == "Integer" and hasattr(cell, 'IntegerValue'):
+            if data_type == "Integer":
                 raw = cell.IntegerValue
                 if raw is not None and not (isinstance(raw, float) and not math.isfinite(raw)):
                     return int(raw)
-            elif data_type == "Double" and hasattr(cell, 'DoubleValue'):
+            elif data_type == "Double":
                 raw = cell.DoubleValue
                 if raw is not None and math.isfinite(raw):
                     return float(raw)
-            elif data_type == "String" and hasattr(cell, 'Value'):
+            elif data_type == "String":
                 raw = cell.Value
                 if raw is not None:
                     return str(raw)
@@ -546,16 +541,16 @@ class OptimizationMixin:
         """
         try:
             cell = op.GetOperandCell(col_enum)
-            data_type = str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else "Unknown"
+            data_type = str(cell.DataType).split('.')[-1]
 
             default_value = self._read_cell_default(cell, data_type)
 
             return {
                 "column": col_name,
-                "header": str(cell.Header) if hasattr(cell, 'Header') else col_name,
+                "header": str(cell.Header),
                 "data_type": data_type,
-                "is_active": bool(cell.IsActive) if hasattr(cell, 'IsActive') else False,
-                "is_read_only": bool(cell.IsReadOnly) if hasattr(cell, 'IsReadOnly') else False,
+                "is_active": bool(cell.IsActive),
+                "is_read_only": bool(cell.IsReadOnly),
                 "default_value": default_value,
             }
         except Exception as e:
@@ -583,7 +578,7 @@ class OptimizationMixin:
         for col in param_columns:
             try:
                 cell = op.GetOperandCell(col)
-                dt = str(cell.DataType).split('.')[-1] if hasattr(cell, 'DataType') else ''
+                dt = str(cell.DataType).split('.')[-1]
                 if dt == 'String':
                     params.append(None)
                 else:
@@ -601,7 +596,8 @@ class OptimizationMixin:
                 op = mfe.GetOperandAt(i)
                 try:
                     op_code = str(op.Type).split('.')[-1]
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Failed to read operand type at row {i}: {e}")
                     op_code = f"UNK_{i}"
 
                 rows.append({

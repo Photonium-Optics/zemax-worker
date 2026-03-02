@@ -1,6 +1,6 @@
 """Models for the unified ray analysis endpoint."""
 
-from typing import Any, Literal, Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 

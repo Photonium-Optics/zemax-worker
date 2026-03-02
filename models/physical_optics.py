@@ -1,5 +1,5 @@
-from typing import Any, Literal, Optional
-from pydantic import BaseModel, Field
+from typing import Any, Optional
+from pydantic import BaseModel, Field, field_validator
 
 
 class PhysicalOpticsPropagationRequest(BaseModel):
@@ -15,9 +15,21 @@ class PhysicalOpticsPropagationRequest(BaseModel):
     x_width: float = Field(default=4.0, description="X display width (mm)")
     y_width: float = Field(default=4.0, description="Y display width (mm)")
     start_surface: int = Field(default=1, description="Start surface (1-indexed)")
-    end_surface: str = Field(default="Image", description="End surface ('Image' or surface index)")
+    end_surface: str | int = Field(default="Image", description="End surface ('Image' or surface index)")
     use_polarization: bool = Field(default=False, description="Use polarization")
     data_type: str = Field(default="Irradiance", description="Data type: Irradiance or Phase")
+
+    @field_validator('end_surface', mode='before')
+    @classmethod
+    def coerce_end_surface(cls, v):
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str):
+            try:
+                return int(v)
+            except ValueError:
+                return v  # "Image" or other string sentinel
+        return v
 
 
 class PhysicalOpticsPropagationResponse(BaseModel):
