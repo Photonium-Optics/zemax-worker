@@ -44,32 +44,20 @@ def _parse_strehl_from_header(header_lines) -> Optional[float]:
       "Strehl = 8.532e-01"
     """
     if not header_lines:
-        logger.debug(f"_parse_strehl_from_header: input is falsy ({type(header_lines).__name__}: {header_lines!r})")
         return None
-    # Handle a single multi-line string (some ZOS-API versions)
+    # IAR_HeaderData.Lines returns String[] (always iterable).
+    # Handle a single multi-line string defensively for callers that pre-join.
     if isinstance(header_lines, str):
         lines_iter = header_lines.splitlines()
-        logger.debug(f"_parse_strehl_from_header: str input, {len(lines_iter)} lines")
-    elif hasattr(header_lines, '__iter__'):
-        lines_iter = list(header_lines)  # materialize .NET IList once
-        logger.debug(f"_parse_strehl_from_header: iterable input ({type(header_lines).__name__}), {len(lines_iter)} items")
     else:
-        logger.debug(f"_parse_strehl_from_header: non-iterable input ({type(header_lines).__name__}), returning None")
-        return None
+        lines_iter = list(header_lines)  # materialize .NET IList once
     for line in lines_iter:
-        line_str = str(line)
-        m = _STREHL_RE.search(line_str)
+        m = _STREHL_RE.search(str(line))
         if m:
             try:
-                val = float(m.group(1))
-                logger.debug(f"_parse_strehl_from_header: matched Strehl={val} in line: {line_str!r}")
-                return val
-            except ValueError:
-                pass
-        # Log lines that contain "strehl" but didn't match the regex
-        elif 'strehl' in line_str.lower():
-            logger.warning(f"_parse_strehl_from_header: UNMATCHED Strehl-like line: {line_str!r}")
-    logger.debug(f"_parse_strehl_from_header: no Strehl found in {len(lines_iter)} lines")
+                return float(m.group(1))
+            except ValueError as e:
+                logger.warning(f"Failed to parse Strehl value from '{line}': {e}")
     return None
 
 
@@ -1192,18 +1180,17 @@ class PerformanceMixin:
 
                                 desc = str(series.Description)
                                 desc_lower = desc.lower()
-                                n_points = series.NumberOfPoints
+                                n_points = series.XData.Length
                                 logger.debug(f"TF-MTF field {fi} series {si}: desc='{desc}', points={n_points}")
 
-                                series_x = []
-                                series_y = []
-                                for pi in range(n_points):
-                                    pt = series.GetDataPoint(pi)
-                                    if pt is not None:
-                                        x_val = _extract_value(pt.X if hasattr(pt, 'X') else pt[0])
-                                        y_val = _extract_value(pt.Y if hasattr(pt, 'Y') else pt[1])
-                                        series_x.append(x_val)
-                                        series_y.append(y_val)
+                                # XData is IVectorData (1D), YData is IMatrixData (2D: rows=points, cols=series)
+                                x_raw = series.XData.Data
+                                series_x = [float(v) for v in x_raw]
+                                # For single-series DataSeries, YData has 1 column
+                                if series.NumSeries > 0:
+                                    series_y = [float(series.YData.GetValueAt(row, 0)) for row in range(n_points)]
+                                else:
+                                    series_y = []
 
                                 # Classify by description: TS=tangential, SS=sagittal
                                 if desc_lower.startswith(("ts ", "ts,", "tangential")):

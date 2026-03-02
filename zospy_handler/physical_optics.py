@@ -253,92 +253,63 @@ class PhysicalOpticsMixin:
                 f"sampling={x_sampling}x{y_sampling}, width={x_width}x{y_width}"
             )
 
-            # Try the high-level ZosPy wrapper first
             image_b64 = None
             array_shape = None
             array_dtype = None
 
+            # Use raw ZOSAPI DataGrid approach (reliable)
             try:
-                pop_analysis = self._zp.analyses.physicaloptics.physical_optics_propagation.PhysicalOpticsPropagation(
-                    **pop_kwargs,
+                idm = self._zp.constants.Analysis.AnalysisIDM
+                analysis = self._zp.analyses.new_analysis(
+                    self.oss,
+                    idm.PhysicalOpticsPropagation,
+                    settings_first=True,
                 )
 
-                pop_start = time.perf_counter()
                 try:
-                    pop_result = pop_analysis.run(self.oss)
-                finally:
-                    pop_elapsed_ms = (time.perf_counter() - pop_start) * 1000
-                    log_timing(logger, "PhysicalOpticsPropagation.run", pop_elapsed_ms)
-
-                if pop_result is not None and hasattr(pop_result, 'data') and pop_result.data is not None and pop_result.data.size > 0:
-                    # ZosPy wrapper returns AnalysisResult; .data is the DataFrame
-                    arr = pop_result.data.values.astype(np.float64)
-                    image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
-                    array_shape = list(arr.shape)
-                    array_dtype = str(arr.dtype)
-                    logger.info(f"POP: Extracted data array shape={arr.shape}")
-
-            except Exception as e:
-                logger.warning(f"POP high-level wrapper failed: {e}, trying raw API")
-
-            # Fallback: use raw ZOSAPI DataGrid approach
-            if image_b64 is None:
-                try:
-                    idm = self._zp.constants.Analysis.AnalysisIDM
-                    analysis = self._zp.analyses.new_analysis(
-                        self.oss,
-                        idm.PhysicalOpticsPropagation,
-                        settings_first=True,
+                    settings = analysis.Settings
+                    self._configure_analysis_settings(
+                        settings,
+                        field_index=field_index,
+                        wavelength_index=wavelength_index,
                     )
+                    # POP uses XSampling/YSampling instead of the generic SampleSize
+                    settings.XSampling = x_sampling
+                    settings.YSampling = y_sampling
 
+                    pop_start = time.perf_counter()
                     try:
-                        settings = analysis.Settings
-                        self._configure_analysis_settings(
-                            settings,
-                            field_index=field_index,
-                            wavelength_index=wavelength_index,
-                        )
-                        # POP uses XSampling/YSampling instead of the generic SampleSize
-                        for attr, val in (('XSampling', x_sampling), ('YSampling', y_sampling)):
-                            if hasattr(settings, attr):
-                                try:
-                                    setattr(settings, attr, val)
-                                except Exception:
-                                    pass
-
-                        pop_start2 = time.perf_counter()
-                        try:
-                            analysis.ApplyAndWaitForCompletion()
-                        finally:
-                            pop_elapsed2_ms = (time.perf_counter() - pop_start2) * 1000
-                            log_timing(logger, "POP.raw_api.run", pop_elapsed2_ms)
-
-                        results = analysis.Results
-                        if results is not None:
-                            num_grids = results.NumberOfDataGrids
-                            if num_grids > 0:
-                                grid = results.GetDataGrid(0)
-                                if grid is not None:
-                                    nx = grid.Nx if hasattr(grid, 'Nx') else 0
-                                    ny = grid.Ny if hasattr(grid, 'Ny') else 0
-                                    if nx > 0 and ny > 0:
-                                        arr = np.zeros((ny, nx), dtype=np.float64)
-                                        for yi in range(ny):
-                                            for xi in range(nx):
-                                                val = _extract_value(grid.Z(xi, yi))
-                                                arr[yi, xi] = val
-
-                                        image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
-                                        array_shape = list(arr.shape)
-                                        array_dtype = str(arr.dtype)
-                                        logger.info(f"POP: Extracted from DataGrid shape={arr.shape}")
+                        analysis.ApplyAndWaitForCompletion()
                     finally:
-                        try:
-                            analysis.Close()
-                        except Exception:
-                            pass
-                except Exception as e:
-                    logger.warning(f"POP: Raw API fallback failed: {e}")
+                        pop_elapsed_ms = (time.perf_counter() - pop_start) * 1000
+                        log_timing(logger, "POP.raw_api.run", pop_elapsed_ms)
+
+                    results = analysis.Results
+                    if results is not None:
+                        num_grids = results.NumberOfDataGrids
+                        if num_grids > 0:
+                            grid = results.GetDataGrid(0)
+                            if grid is not None:
+                                nx = grid.Nx if hasattr(grid, 'Nx') else 0
+                                ny = grid.Ny if hasattr(grid, 'Ny') else 0
+                                if nx > 0 and ny > 0:
+                                    arr = np.zeros((ny, nx), dtype=np.float64)
+                                    for yi in range(ny):
+                                        for xi in range(nx):
+                                            val = _extract_value(grid.Z(xi, yi))
+                                            arr[yi, xi] = val
+
+                                    image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                                    array_shape = list(arr.shape)
+                                    array_dtype = str(arr.dtype)
+                                    logger.info(f"POP: Extracted from DataGrid shape={arr.shape}")
+                finally:
+                    try:
+                        analysis.Close()
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"POP: Raw API failed: {e}")
 
             if image_b64 is None:
                 return {"success": False, "error": "Physical Optics Propagation returned no beam profile data"}

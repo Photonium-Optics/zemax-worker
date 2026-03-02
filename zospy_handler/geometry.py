@@ -228,8 +228,8 @@ class GeometryMixin:
             if tool is not None:
                 try:
                     tool.Close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to close tool: {e}")
         return fallback
 
     def _get_paraxial_from_lde(self) -> dict[str, Any]:
@@ -260,7 +260,7 @@ class GeometryMixin:
 
             # IFields.GetFieldType() returns FieldType enum (always present)
             ft = fields.GetFieldType()
-            field_type_str = str(ft).split(".")[-1]
+            field_type_str = ft.name
 
             ft_type, ft_unit = FIELD_TYPE_MAP.get(
                 field_type_str, (field_type_str.lower(), "mm")
