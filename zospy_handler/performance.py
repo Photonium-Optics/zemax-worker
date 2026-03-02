@@ -600,7 +600,7 @@ class PerformanceMixin:
         wl_um = None
         if wavelength_index is not None and wavelength_index > 0:
             wl_obj = self.oss.SystemData.Wavelengths.GetWavelength(wavelength_index)
-            val = _extract_value(wl_obj.Wavelength, DEFAULT_WAVELENGTH_UM) if wl_obj else DEFAULT_WAVELENGTH_UM
+            val = _extract_value(wl_obj.Wavelength, 0.0) if wl_obj else 0.0
             if val > 0:
                 wl_um = val
 
@@ -1176,24 +1176,24 @@ class PerformanceMixin:
 
                                 desc = str(series.Description)
                                 desc_lower = desc.lower()
-                                n_points = series.XData.Length
-                                logger.debug(f"TF-MTF field {fi} series {si}: desc='{desc}', points={n_points}")
-
                                 # XData is IVectorData (1D), YData is IMatrixData (2D: rows=points, cols=series)
                                 x_raw = series.XData.Data
                                 series_x = [float(v) for v in x_raw]
-                                # For single-series DataSeries, YData has 1 column
+                                n_points = len(series_x)
+                                logger.debug(f"TF-MTF field {fi} series {si}: desc='{desc}', points={n_points}")
+
                                 if series.NumSeries > 0:
                                     series_y = [float(series.YData.GetValueAt(row, 0)) for row in range(n_points)]
                                 else:
-                                    series_y = []
+                                    logger.warning(f"TF-MTF field {fi} series {si}: NumSeries=0, skipping")
+                                    continue
 
-                                # Classify by description: TS=tangential, SS=sagittal
-                                if desc_lower.startswith(("ts ", "ts,", "tangential")):
+                                category = self._classify_mtf_series(desc_lower)
+                                if category == "tangential" and not tangential:
                                     tangential = series_y
                                     if not focus_data:
                                         focus_data = series_x
-                                elif desc_lower.startswith(("ss ", "ss,", "sagittal")):
+                                elif category == "sagittal" and not sagittal:
                                     sagittal = series_y
                                     if not focus_data:
                                         focus_data = series_x

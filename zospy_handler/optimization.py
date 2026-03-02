@@ -923,7 +923,7 @@ class OptimizationMixin:
                 try:
                     cell = getattr(surf, cell_attr)
                     solve = cell.GetSolveData()
-                    solve_type = solve.Type.name if solve else ""
+                    solve_type = solve.Type.name if solve and solve.Type is not None else ""
                     if solve_type == "Variable":
                         # Radius and thickness can be Infinity in OpticStudio
                         # (flat surfaces, afocal systems / infinite conjugates)
@@ -955,7 +955,7 @@ class OptimizationMixin:
                     if cell is None:
                         continue
                     solve = cell.GetSolveData()
-                    solve_type = solve.Type.name if solve else ""
+                    solve_type = solve.Type.name if solve and solve.Type is not None else ""
                     if solve_type == "Variable":
                         variable_states.append({
                             "surface_index": surf_idx,

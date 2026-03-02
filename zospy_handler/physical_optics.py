@@ -3,7 +3,7 @@
 import base64
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -11,6 +11,25 @@ from zospy_handler._base import _extract_value, _log_raw_output
 from utils.timing import log_timing
 
 logger = logging.getLogger(__name__)
+
+
+def _override_beam_param(
+    beam_params: dict,
+    value: float,
+    fallback_key: str,
+    match_fn: Callable[[str], bool],
+) -> None:
+    """Override a beam parameter by fuzzy-matching the key name.
+
+    Searches beam_params keys (case-insensitive) using match_fn.
+    Falls back to fallback_key if no fuzzy match is found.
+    """
+    for key in beam_params:
+        if match_fn(key.lower()):
+            beam_params[key] = value
+            return
+    if fallback_key in beam_params:
+        beam_params[fallback_key] = value
 
 
 class PhysicalOpticsMixin:
@@ -202,49 +221,16 @@ class PhysicalOpticsMixin:
 
             # Override waist sizes if provided
             if waist_x is not None:
-                matched = False
-                for key in list(beam_params.keys()):
-                    if "waist" in key.lower() and ("x" in key.lower() or "size" in key.lower()):
-                        beam_params[key] = waist_x
-                        matched = True
-                        break
-                if not matched and "Waist X" in beam_params:
-                    beam_params["Waist X"] = waist_x
-
+                _override_beam_param(beam_params, waist_x, "Waist X",
+                                     lambda k: "waist" in k and "x" in k and "y" not in k)
             if waist_y is not None:
-                matched = False
-                for key in list(beam_params.keys()):
-                    if "waist" in key.lower() and "y" in key.lower():
-                        beam_params[key] = waist_y
-                        matched = True
-                        break
-                if not matched and "Waist Y" in beam_params:
-                    beam_params["Waist Y"] = waist_y
-
-            logger.info(f"POP beam_params: {beam_params}")
-
-            # Build POP settings
-            pop_kwargs = {
-                "field": field_index,
-                "wavelength": wavelength_index,
-                "beam_type": beam_type,
-                "x_sampling": x_sampling,
-                "y_sampling": y_sampling,
-                "x_width": x_width,
-                "y_width": y_width,
-                "start_surface": start_surface,
-                "end_surface": end_surface,
-                "use_polarization": use_polarization,
-                "data_type": data_type,
-                "show_as": "FalseColor",
-            }
-
-            if beam_params:
-                pop_kwargs["beam_parameters"] = beam_params
+                _override_beam_param(beam_params, waist_y, "Waist Y",
+                                     lambda k: "waist" in k and "y" in k)
 
             logger.info(
-                f"POP settings: field={field_index}, wl={wavelength_index}, beam={beam_type}, "
-                f"sampling={x_sampling}x{y_sampling}, width={x_width}x{y_width}"
+                f"POP: field={field_index}, wl={wavelength_index}, beam={beam_type}, "
+                f"sampling={x_sampling}x{y_sampling}, width={x_width}x{y_width}, "
+                f"beam_params={beam_params}"
             )
 
             image_b64 = None
@@ -279,24 +265,15 @@ class PhysicalOpticsMixin:
                         log_timing(logger, "POP.raw_api.run", pop_elapsed_ms)
 
                     results = analysis.Results
-                    if results is not None:
-                        num_grids = results.NumberOfDataGrids
-                        if num_grids > 0:
-                            grid = results.GetDataGrid(0)
-                            if grid is not None:
-                                nx = grid.Nx if hasattr(grid, 'Nx') else 0
-                                ny = grid.Ny if hasattr(grid, 'Ny') else 0
-                                if nx > 0 and ny > 0:
-                                    arr = np.zeros((ny, nx), dtype=np.float64)
-                                    for yi in range(ny):
-                                        for xi in range(nx):
-                                            val = _extract_value(grid.Z(xi, yi))
-                                            arr[yi, xi] = val
-
-                                    image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
-                                    array_shape = list(arr.shape)
-                                    array_dtype = str(arr.dtype)
-                                    logger.info(f"POP: Extracted from DataGrid shape={arr.shape}")
+                    if results is not None and results.NumberOfDataGrids > 0:
+                        grid = results.GetDataGrid(0)
+                        if grid is not None:
+                            arr = self._extract_data_grid(grid)
+                            if arr is not None:
+                                image_b64 = base64.b64encode(arr.tobytes()).decode('utf-8')
+                                array_shape = list(arr.shape)
+                                array_dtype = str(arr.dtype)
+                                logger.info(f"POP: Extracted from DataGrid shape={arr.shape}")
                 finally:
                     try:
                         analysis.Close()

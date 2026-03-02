@@ -208,8 +208,6 @@ def is_zospy_available() -> bool:
 # When calling ZosPy/OpticStudio methods, always use 1-based indices.
 # When returning data in API responses, convert to 0-based indices.
 
-# Constants imported from config.py
-
 
 def _extract_value(obj: Any, default: float | None = 0.0, allow_inf: bool = False) -> float | None:
     """
@@ -312,28 +310,6 @@ def _read_comment_cell(op: Any, comment_column: Any) -> Optional[str]:
     except Exception as e:
         logger.debug(f"Failed to read MFE comment cell: {type(e).__name__}: {e}")
     return None
-
-
-def _safe_int(value: Any, default: int = 0) -> int:
-    """
-    Safely convert a value to int, handling None and NaN.
-
-    Args:
-        value: Value to convert
-        default: Default value if conversion fails
-
-    Returns:
-        Integer value or default
-    """
-    if value is None:
-        return default
-    try:
-        # Check for NaN (only floats can be NaN)
-        if isinstance(value, float) and np.isnan(value):
-            return default
-        return int(value)
-    except (TypeError, ValueError):
-        return default
 
 
 class ZosPyError(Exception):
@@ -790,7 +766,7 @@ class ZosPyHandlerBase:
                 arr[yi, xi] = _extract_value(grid.Z(xi, yi))
         return arr
 
-    def _extract_grid_with_metadata(self, grid) -> Optional["GridWithMetadata"]:
+    def _extract_grid_with_metadata(self, grid) -> Optional[GridWithMetadata]:
         """Extract data grid with spatial metadata from a ZOS-API IGrid object.
 
         Reads MinX/MinY/Dx/Dy properties from the IAR_DataGrid interface.
@@ -800,19 +776,18 @@ class ZosPyHandlerBase:
         if data is None:
             return None
         meta = GridWithMetadata(data=data)
-        for attr, field_name in [
-            ('MinX', 'min_x'), ('MinY', 'min_y'),
-            ('Dx', 'dx'), ('Dy', 'dy'),
-        ]:
-            try:
-                setattr(meta, field_name, float(getattr(grid, attr)))
-            except Exception as e:
-                logger.debug(f"_extract_grid_with_metadata: failed to read {attr}: {e}")
+        try:
+            # IAR_DataGrid guarantees MinX, MinY, Dx, Dy as double properties
+            meta.min_x = float(grid.MinX)
+            meta.min_y = float(grid.MinY)
+            meta.dx = float(grid.Dx)
+            meta.dy = float(grid.Dy)
+        except Exception as e:
+            logger.debug(f"_extract_grid_with_metadata: failed to read grid metadata: {e}")
+            return meta
         # Compute MaxX/MaxY from MinX + (Nx-1)*Dx (IAR_DataGrid has no MaxX/MaxY)
-        if meta.max_x is None and meta.min_x is not None and meta.dx is not None:
-            meta.max_x = meta.min_x + (data.shape[1] - 1) * meta.dx
-        if meta.max_y is None and meta.min_y is not None and meta.dy is not None:
-            meta.max_y = meta.min_y + (data.shape[0] - 1) * meta.dy
+        meta.max_x = meta.min_x + (data.shape[1] - 1) * meta.dx
+        meta.max_y = meta.min_y + (data.shape[0] - 1) * meta.dy
         return meta
 
     def _resolve_sample_size(self, sampling: str):
@@ -890,7 +865,7 @@ class ZosPyHandlerBase:
             aperture = self.oss.SystemData.Aperture
 
             # Afocal systems have no meaningful F/# (EFL is infinite)
-            if hasattr(aperture, 'AFocalImageSpace') and aperture.AFocalImageSpace:
+            if aperture.AFocalImageSpace:
                 return None
         except Exception:
             pass
@@ -907,12 +882,7 @@ class ZosPyHandlerBase:
         # Fallback: aperture settings
         try:
             aperture = self.oss.SystemData.Aperture
-            aperture_type = ""
-            if aperture.ApertureType:
-                if hasattr(aperture.ApertureType, 'name'):
-                    aperture_type = aperture.ApertureType.name
-                else:
-                    aperture_type = str(aperture.ApertureType).split(".")[-1]
+            aperture_type = aperture.ApertureType.name
 
             if aperture_type in FNO_APERTURE_TYPES:
                 val = _extract_value(aperture.ApertureValue)

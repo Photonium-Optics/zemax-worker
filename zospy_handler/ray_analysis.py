@@ -93,6 +93,7 @@ class RayAnalysisMixin:
             wavelength_info.append({
                 "index": wi - 1,  # 0-based for response
                 "wavelength_um": _extract_value(wl.Wavelength, 0.5876),
+                "is_primary": wl.IsPrimary,
             })
 
         # Compute field normalization parameters (respects Radial vs Rectangular)

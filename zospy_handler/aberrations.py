@@ -566,15 +566,8 @@ class AberrationsMixin:
                             logger.info(f"RmsField series {si}: {num_points} points, {num_curves} curves, labels={labels}")
 
                             for ci in range(num_curves):
-                                label = labels[ci] if ci < len(labels) else ""
-                                label_str = str(label)
-                                label_lower = label_str.lower()
-                                # Identify diffraction limit curve via SeriesLabels
-                                # (IAR_DataSeries.SeriesLabels is guaranteed String[])
-                                is_diffraction = (
-                                    "diffrac" in label_lower
-                                    or "limit" in label_lower
-                                )
+                                label = str(labels[ci]).lower() if ci < len(labels) else ""
+                                is_diffraction = "diffrac" in label or "limit" in label
 
                                 curve_points = []
                                 for pi in range(num_points):
@@ -671,7 +664,7 @@ class AberrationsMixin:
         if results is None:
             return []
 
-        # Try data series extraction via XData.Data/YData.Data (correct IAR_DataSeries API)
+        # Try data series extraction via XData.Data/YData.Data
         rows: list[dict] = []
         num_series = results.NumberOfDataSeries
         if num_series > 0:
