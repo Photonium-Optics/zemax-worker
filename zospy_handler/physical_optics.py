@@ -225,7 +225,7 @@ class PhysicalOpticsMixin:
                                      lambda k: "waist" in k and ("x" in k or "size" in k) and "y" not in k)
             if waist_y is not None:
                 _override_beam_param(beam_params, waist_y, "Waist Y",
-                                     lambda k: "waist" in k and "y" in k)
+                                     lambda k: "waist" in k and "y" in k and "x" not in k)
 
             logger.info(
                 f"POP: field={field_index}, wl={wavelength_index}, beam={beam_type}, "
