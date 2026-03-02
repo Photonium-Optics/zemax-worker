@@ -2,9 +2,11 @@
 
 import io
 import math
+import os
 import sys
 import time
 import traceback as _tb_mod
+from pathlib import Path
 
 import numpy as np
 from fastapi import APIRouter, Depends
@@ -68,7 +70,10 @@ async def run_script(
                 "zp": handler._zp,
                 "np": np,
                 "math": math,
+                "os": os,
+                "Path": Path,
                 "handler": handler,
+                "zmx_dir": request.working_directory,
                 "result": {},
                 "system_modified": False,
             }

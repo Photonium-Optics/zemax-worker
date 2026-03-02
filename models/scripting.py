@@ -20,6 +20,10 @@ class RunScriptRequest(SystemRequest):
         default=False,
         description="If True and script sets system_modified=True, save modified ZMX",
     )
+    working_directory: str = Field(
+        default="",
+        description="Path to a directory of ZMX files on the worker machine",
+    )
 
 
 class RunScriptResponse(BaseModel):
