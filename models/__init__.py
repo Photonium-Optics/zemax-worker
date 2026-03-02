@@ -12,3 +12,4 @@ from models.optimization import *
 from models.imaging import *
 from models.physical_optics import *
 from models.polarization import *
+from models.scripting import *

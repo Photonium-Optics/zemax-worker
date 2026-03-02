@@ -22,6 +22,7 @@ def register_routers(app: FastAPI) -> None:
         performance,
         physical_optics,
         polarization,
+        scripting,
     )
 
     for module in (
@@ -35,5 +36,6 @@ def register_routers(app: FastAPI) -> None:
         physical_optics,
         polarization,
         diagnostics,
+        scripting,
     ):
         app.include_router(module.router)
