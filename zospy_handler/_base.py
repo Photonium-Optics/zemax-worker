@@ -238,6 +238,31 @@ def _extract_value(obj: Any, default: float | None = 0.0, allow_inf: bool = Fals
         return default
 
 
+def _enum_name(enum_val: Any) -> str:
+    """Extract the bare name from a ZOSAPI enum value.
+
+    ZOSAPI enums do not expose a reliable `.name` attribute.
+    str() gives e.g. "FieldType.Angle" -- we split on '.' to get "Angle".
+    """
+    return str(enum_val).rsplit(".", 1)[-1]
+
+
+def _try_set(obj: Any, attr: str, value: Any, label: str = "") -> bool:
+    """Set an attribute on a ZOSAPI settings object, logging a warning on failure.
+
+    Returns True if the attribute was set, False if it was missing or errored.
+    Useful for optional settings that may not exist on all analysis types.
+    """
+    if not hasattr(obj, attr):
+        return False
+    try:
+        setattr(obj, attr, value)
+        return True
+    except Exception as e:
+        logger.warning(f"Could not set {label or attr}={value}: {e}")
+        return False
+
+
 def _compute_field_normalization(fields, num_fields: int) -> tuple:
     """Compute field normalization parameters respecting Fields.Normalization type.
 
@@ -250,8 +275,8 @@ def _compute_field_normalization(fields, num_fields: int) -> tuple:
     """
     # IFields.Normalization is a FieldNormalizationType enum:
     # Radial=0, Rectangular=1. Always present per ZOS-API docs.
-    norm_type = str(fields.Normalization)
-    is_radial = "Rectangular" not in norm_type
+    norm_type = _enum_name(fields.Normalization)
+    is_radial = norm_type != "Rectangular"
 
     max_field_x = 0.0
     max_field_y = 0.0
@@ -868,7 +893,7 @@ class ZosPyHandlerBase:
         # Fallback: aperture settings
         try:
             aperture = self.oss.SystemData.Aperture
-            aperture_type = aperture.ApertureType.name
+            aperture_type = _enum_name(aperture.ApertureType)
 
             if aperture_type in FNO_APERTURE_TYPES:
                 val = _extract_value(aperture.ApertureValue)

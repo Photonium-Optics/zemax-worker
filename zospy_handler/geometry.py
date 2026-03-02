@@ -14,7 +14,7 @@ from config import (
     DEFAULT_NUM_CROSS_SECTION_RAYS, CROSS_SECTION_IMAGE_SIZE,
     CROSS_SECTION_TEMP_FILENAME, MIN_IMAGE_EXPORT_VERSION, FIELD_TYPE_MAP,
 )
-from zospy_handler._base import _extract_value, _log_raw_output
+from zospy_handler._base import _enum_name, _extract_value, _log_raw_output
 from utils.timing import log_timing
 
 logger = logging.getLogger(__name__)
@@ -259,8 +259,7 @@ class GeometryMixin:
             paraxial["max_field"] = max_field
 
             # IFields.GetFieldType() returns FieldType enum (always present)
-            ft = fields.GetFieldType()
-            field_type_str = ft.name
+            field_type_str = _enum_name(fields.GetFieldType())
 
             ft_type, ft_unit = FIELD_TYPE_MAP.get(
                 field_type_str, (field_type_str.lower(), "mm")

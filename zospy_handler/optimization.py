@@ -5,7 +5,7 @@ import math
 import time
 from typing import Any
 
-from zospy_handler._base import _extract_value, _log_raw_output, _read_comment_cell
+from zospy_handler._base import _enum_name, _extract_value, _log_raw_output, _read_comment_cell
 
 logger = logging.getLogger(__name__)
 
@@ -1086,9 +1086,8 @@ class OptimizationMixin:
         paraxial_before = self._get_paraxial_from_lde()
         total_track_before = paraxial_before.get("total_track")
 
-        # Read original unit for reporting.
-        # LensUnits is a LensUnit enum; str() gives e.g. "LensUnit.Millimeters"
-        enum_name = self.oss.SystemData.Units.LensUnits.name
+        # Read original unit for reporting
+        enum_name = _enum_name(self.oss.SystemData.Units.LensUnits)
         original_unit = self._ENUM_TO_UNIT.get(enum_name)
 
         # Run Scale Lens tool

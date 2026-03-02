@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
 from config import SEIDEL_TEMP_FILENAME
-from zospy_handler._base import _extract_value, _log_raw_output, _parse_zernike_term_number
+from zospy_handler._base import _enum_name, _extract_value, _log_raw_output, _parse_zernike_term_number
 from utils.timing import log_timing
 
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ def _get_field_unit(fields) -> str:
 
     Returns 'deg' for angular field types, 'mm' for spatial field types.
     """
-    field_type_name = fields.GetFieldType().name
+    field_type_name = _enum_name(fields.GetFieldType())
     return "deg" if field_type_name in _ANGULAR_FIELD_TYPES else "mm"
 
 

@@ -7,7 +7,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
-from zospy_handler._base import _extract_value, _log_raw_output
+from zospy_handler._base import _extract_value, _log_raw_output, _try_set
 from utils.timing import log_timing
 
 logger = logging.getLogger(__name__)
@@ -185,7 +185,7 @@ class PhysicalOpticsMixin:
         x_width: float = 4.0,
         y_width: float = 4.0,
         start_surface: int = 1,
-        end_surface: str = "Image",
+        end_surface: str | int = "Image",
         use_polarization: bool = False,
         data_type: str = "Irradiance",
     ) -> dict[str, Any]:
@@ -217,7 +217,7 @@ class PhysicalOpticsMixin:
                     self.oss, beam_type=beam_type,
                 )
             except Exception as e:
-                logger.warning(f"create_beam_parameter_dict failed (beam_type={beam_type}): {e}")
+                logger.warning(f"POP: create_beam_parameter_dict failed (beam_type={beam_type}): {e}")
 
             # Override waist sizes if provided
             if waist_x is not None:
@@ -253,9 +253,73 @@ class PhysicalOpticsMixin:
                         field_index=field_index,
                         wavelength_index=wavelength_index,
                     )
-                    # POP uses XSampling/YSampling instead of the generic SampleSize
-                    settings.XSampling = x_sampling
-                    settings.YSampling = y_sampling
+
+                    # Sampling: SampleSizes enums are always square (e.g. S_64x64).
+                    # x_sampling/y_sampling are each resolved independently.
+                    try:
+                        settings.XSampling = self._resolve_sample_size(f"{x_sampling}x{x_sampling}")
+                        settings.YSampling = self._resolve_sample_size(f"{y_sampling}x{y_sampling}")
+                    except Exception as e:
+                        logger.warning(f"POP: Could not set sampling enums: {e}")
+
+                    # Beam window size
+                    _try_set(settings, "XWidth", x_width)
+                    _try_set(settings, "YWidth", y_width)
+
+                    # Surface range
+                    if hasattr(settings, "StartSurface"):
+                        try:
+                            settings.StartSurface.SetSurfaceNumber(start_surface)
+                        except Exception as e:
+                            logger.warning(f"POP: Could not set StartSurface={start_surface}: {e}")
+                    if hasattr(settings, "EndSurface"):
+                        try:
+                            if isinstance(end_surface, int):
+                                settings.EndSurface.SetSurfaceNumber(end_surface)
+                            else:
+                                # IAS_Surface.UseImageSurface() is the documented way
+                                # to set end surface to the image plane
+                                settings.EndSurface.UseImageSurface()
+                        except Exception as e:
+                            logger.warning(f"POP: Could not set EndSurface={end_surface}: {e}")
+
+                    # Beam type (resolve from enum constants)
+                    try:
+                        pop_beam_types = self._zp.constants.Analysis.PhysicalOptics.POPBeamTypes
+                        bt_val = getattr(pop_beam_types, beam_type, None)
+                        if bt_val is not None:
+                            _try_set(settings, "BeamType", bt_val)
+                        else:
+                            logger.warning(f"POP: Unknown BeamType '{beam_type}'")
+                    except Exception as e:
+                        logger.warning(f"POP: Could not set BeamType={beam_type}: {e}")
+
+                    # Beam parameters (waist sizes etc.) via indexed SetParameterValue
+                    if beam_params:
+                        try:
+                            for pi in range(settings.NumberOfParameters):
+                                param_name = settings.GetParameterName(pi)
+                                if param_name in beam_params:
+                                    try:
+                                        settings.SetParameterValue(pi, float(beam_params[param_name]))
+                                    except Exception as e:
+                                        logger.warning(f"POP: Could not set beam param '{param_name}': {e}")
+                                        continue
+                                    logger.debug(f"POP: Set beam param '{param_name}' = {beam_params[param_name]}")
+                        except Exception as e:
+                            logger.warning(f"POP: Could not apply beam parameters: {e}")
+
+                    # Data type (Irradiance / Phase)
+                    try:
+                        pop_data_types = self._zp.constants.Analysis.PhysicalOptics.POPDataTypes
+                        dt_val = getattr(pop_data_types, data_type, None)
+                        if dt_val is not None:
+                            _try_set(settings, "DataType", dt_val)
+                    except Exception as e:
+                        logger.warning(f"POP: Could not set DataType={data_type}: {e}")
+
+                    # Polarization
+                    _try_set(settings, "UsePolarization", use_polarization)
 
                     pop_start = time.perf_counter()
                     try:
@@ -265,6 +329,18 @@ class PhysicalOpticsMixin:
                         log_timing(logger, "POP.raw_api.run", pop_elapsed_ms)
 
                     results = analysis.Results
+
+                    # Log diagnostics for debugging
+                    if results is None:
+                        logger.warning("POP: Results object is None")
+                    else:
+                        logger.debug(f"POP: Results has {results.NumberOfDataGrids} DataGrids, {results.NumberOfDataSeries} DataSeries")
+                        try:
+                            for mi in range(results.NumberOfMessages):
+                                logger.info(f"POP: result message [{mi}]: {results.GetMessageAt(mi)}")
+                        except Exception:
+                            pass
+
                     if results is not None and results.NumberOfDataGrids > 0:
                         grid = results.GetDataGrid(0)
                         if grid is not None:
