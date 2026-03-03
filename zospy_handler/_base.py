@@ -30,11 +30,8 @@ from config import (
     FNO_APERTURE_TYPES,
 )
 
-# Configure module logger
 logger = logging.getLogger(__name__)
-
-# Dedicated logger for raw Zemax analysis output (filterable in dashboard)
-logger_raw = logging.getLogger("zemax.raw")
+logger_raw = logging.getLogger("zemax.raw")  # filterable in dashboard
 
 
 @dataclass
@@ -48,6 +45,17 @@ class GridWithMetadata:
     dx: Optional[float] = None
     dy: Optional[float] = None
 
+    @property
+    def extent_x(self) -> Optional[float]:
+        if self.min_x is not None and self.max_x is not None:
+            return self.max_x - self.min_x
+        return None
+
+    @property
+    def extent_y(self) -> Optional[float]:
+        if self.min_y is not None and self.max_y is not None:
+            return self.max_y - self.min_y
+        return None
 
 
 def _summarize_value(key: str, value: Any) -> Any:
@@ -99,41 +107,16 @@ def _log_raw_output(operation: str, result: dict[str, Any]) -> None:
     except Exception as e:
         logger_raw.debug(f"[RAW] {operation}: failed to serialize output: {e}")
 
-# =============================================================================
-# Lazy ZosPy Import
-# =============================================================================
-#
-# CRITICAL: ZosPy imports are LAZY to prevent blocking during module load.
-#
-# When `import zospy` runs, it:
-# 1. Imports pythonnet (.NET interop)
-# 2. Loads ZOSAPI DLLs into the CLR
-# 3. This can HANG on some systems (DLL loading issues, OpticStudio not found, etc.)
-#
-# By making imports lazy, the FastAPI server starts immediately and can respond
-# to /health checks. ZosPy is only imported when the first real request comes in.
-#
-# The doubled "ZOSAPI imported to clr" log happens because uvicorn re-imports
-# the module in its worker process. This is normal with string-based app references.
-# =============================================================================
-
-# Lazy-loaded module references
-_zp = None  # zospy module
+# ZosPy imports are LAZY because `import zospy` loads ZOSAPI DLLs via
+# pythonnet, which can hang. Deferring the import lets the FastAPI server
+# start immediately and respond to /health checks.
+_zp = None
 _ZOSPY_IMPORT_ATTEMPTED = False
 _ZOSPY_AVAILABLE = False
 
 
 def _ensure_zospy_imported() -> bool:
-    """
-    Lazily import ZosPy on first use.
-
-    This prevents blocking during module load. The import only happens
-    when ZosPyHandler is instantiated (typically in the lifespan function
-    or on first request).
-
-    Returns:
-        True if ZosPy is available, False otherwise.
-    """
+    """Lazily import ZosPy on first use. Returns True if available."""
     global _zp, _ZOSPY_IMPORT_ATTEMPTED, _ZOSPY_AVAILABLE
 
     if _ZOSPY_IMPORT_ATTEMPTED:
@@ -169,26 +152,8 @@ def is_zospy_available() -> bool:
     return _ensure_zospy_imported()
 
 
-# =============================================================================
-# Constants
-# =============================================================================
-
-# Index Convention Notes:
-# -----------------------
-# OpticStudio/ZosPy uses 1-based indexing internally for surfaces, fields, wavelengths:
-#   - LDE.GetSurfaceAt(1) returns the first optical surface (after object surface 0)
-#   - Fields.GetField(1) returns the first field
-#   - Wavelengths.GetWavelength(1) returns the first wavelength
-#   - SingleRayTrace(field=1, wavelength=1) uses 1-based indices
-#
-# API Response Convention:
-#   - Surface indices in responses are CONVERTED to 0-based for consistency with
-#     the LLM JSON schema (surfaces[0] is the first surface after object)
-#   - Field indices in responses are 0-based (field_index=0 is first field)
-#   - Wavelength indices in responses are 0-based
-#
-# When calling ZosPy/OpticStudio methods, always use 1-based indices.
-# When returning data in API responses, convert to 0-based indices.
+# Index convention: OpticStudio uses 1-based indices (surfaces, fields, wavelengths).
+# API responses convert to 0-based for consistency with the LLM JSON schema.
 
 
 def _extract_value(obj: Any, default: float | None = 0.0, allow_inf: bool = False) -> float | None:
@@ -196,7 +161,6 @@ def _extract_value(obj: Any, default: float | None = 0.0, allow_inf: bool = Fals
     if obj is None:
         return default
 
-    # Unwrap UnitField objects (have .value attribute)
     value = obj.value if hasattr(obj, 'value') else obj
 
     try:
@@ -236,17 +200,10 @@ def _try_set(obj: Any, attr: str, value: Any, label: str = "") -> bool:
 
 
 def _compute_field_normalization(fields, num_fields: int) -> tuple:
-    """Compute field normalization parameters respecting Fields.Normalization type.
+    """Compute field normalization parameters.
 
-    OpticStudio uses either Radial (default) or Rectangular field normalization.
-    Under Radial normalization, Hx^2 + Hy^2 <= 1 (normalized to max radial extent).
-    Under Rectangular, Hx and Hy are independently bounded to [-1, 1].
-
-    Returns (is_radial, max_field_x, max_field_y, max_field_r) where callers should
-    use max_field_r for Radial and max_field_x/max_field_y for Rectangular.
+    Returns (is_radial, max_field_x, max_field_y, max_field_r).
     """
-    # IFields.Normalization is a FieldNormalizationType enum:
-    # Radial=0, Rectangular=1. Always present per ZOS-API docs.
     norm_type = _enum_name(fields.Normalization)
     is_radial = norm_type != "Rectangular"
 
@@ -278,14 +235,7 @@ def _normalize_field(fx: float, fy: float, is_radial: bool,
 
 
 def _parse_zernike_term_number(col: Any) -> Optional[int]:
-    """
-    Parse a Zernike term number from a column name.
-
-    Handles pure integers ("1", "37"), Z-prefixed names ("Z1", "Z 4", "Z04"),
-    and case-insensitive variants.
-
-    Returns the term number as int, or None if the column is not a Zernike term.
-    """
+    """Parse a Zernike term number from a column name like "1", "Z4", or "Z 04"."""
     try:
         return int(col)
     except (ValueError, TypeError):
@@ -323,7 +273,6 @@ class ZosPyHandlerBase:
 
     def __init__(self):
         """Initialize ZosPy and connect to OpticStudio."""
-        # Lazily import ZosPy - this is where the actual import happens
         if not is_zospy_available():
             raise ZosPyError("ZosPy is not available. Install it with: pip install zospy")
 
@@ -332,20 +281,13 @@ class ZosPyHandlerBase:
             raise ZosPyError("ZosPy module not loaded")
 
         try:
-            # Initialize ZOS connection
             self.zos = self._zp.ZOS()
-
-            # Connect to OpticStudio (starts instance if needed)
             self.oss = self.zos.connect(mode="standalone")
-
             if self.oss is None:
                 raise ZosPyError("Failed to connect to OpticStudio")
-
             logger.info(f"Connected to OpticStudio: {self.get_version()}")
-
         except Exception as e:
-            # Clean up the OpticStudio process that ZOS() may have launched,
-            # otherwise it becomes an orphan consuming a license seat.
+            # Clean up to avoid orphaned OpticStudio process consuming a license seat
             self.close()
             raise ZosPyError(f"Failed to initialize ZosPy: {e}")
 
@@ -478,7 +420,12 @@ class ZosPyHandlerBase:
             logger.info(f"load_zmx_file: Primary wavelength = #{primary_idx}/{n_wl}")
 
     def _set_wavelengths_from_wavm(self, wavm_list: list[tuple[int, float, float]], pwav_idx: int) -> None:
-        """Programmatically set wavelengths in OpticStudio from parsed WAVM data."""
+        """Programmatically set wavelengths in OpticStudio from parsed WAVM data.
+
+        Follows the ZOS-API pattern: GetWavelength(n) to overwrite existing
+        slots, AddWavelength(um, weight) for new slots, RemoveWavelength to
+        trim excess, then MakePrimary() on the designated primary.
+        """
         wls = self.oss.SystemData.Wavelengths
         sorted_wavm = sorted(wavm_list, key=lambda x: x[0])
         target_count = len(sorted_wavm)
@@ -740,27 +687,16 @@ class ZosPyHandlerBase:
                         logger.warning(f"Failed to set {attr}={sampling} ({sample_value}): {e}")
 
     def _get_fno(self) -> Optional[float]:
-        """
-        Get the working f-number of the optical system.
+        """Get the working f-number via WFNO operand, falling back to aperture/EFL.
 
-        Uses the WFNO merit function operand (paraxial working F/#) as the
-        primary method — this is reliable regardless of aperture type.
-        Falls back to aperture settings or EFL/EPD calculation.
-
-        Returns:
-            F-number, or None if it cannot be determined.
-            Returns None for afocal systems (F/# is meaningless when EFL is infinite).
+        Returns None for afocal systems.
         """
         try:
-            aperture = self.oss.SystemData.Aperture
-
-            # Afocal systems have no meaningful F/# (EFL is infinite)
-            if aperture.AFocalImageSpace:
+            if self.oss.SystemData.Aperture.AFocalImageSpace:
                 return None
         except Exception:
             pass
 
-        # Primary: use WFNO operand (works for all aperture types)
         try:
             wfno_type = self._zp.constants.Editors.MFE.MeritOperandType.WFNO
             fno = float(self.oss.MFE.GetOperandValue(wfno_type, 0, 0, 0, 0, 0, 0, 0, 0))

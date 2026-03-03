@@ -513,11 +513,17 @@ class PerformanceMixin:
 
         try:
             for fi in field_indices_0based:
-                field = fields.GetField(fi + 1)  # 1-indexed
-                # Use _extract_value for UnitField objects
-                field_data = self._create_field_spot_data(fi, _extract_value(field.X), _extract_value(field.Y))
-
-                # Try to get spot data for this field
+                field = fields.GetField(fi + 1)
+                field_data = {
+                    "field_index": fi,
+                    "field_x": _extract_value(field.X),
+                    "field_y": _extract_value(field.Y),
+                    "rms_radius": None,
+                    "geo_radius": None,
+                    "centroid_x": None,
+                    "centroid_y": None,
+                    "num_rays": None,
+                }
                 self._populate_spot_data_from_results(results, fi, field_data, wavelength_index=wavelength_index)
                 spot_data.append(field_data)
 
@@ -526,34 +532,6 @@ class PerformanceMixin:
 
         return spot_data
 
-    def _create_field_spot_data(
-        self,
-        field_index: int,
-        field_x: float,
-        field_y: float,
-    ) -> dict[str, Any]:
-        """
-        Create an empty spot data dict for a field.
-
-        Args:
-            field_index: 0-indexed field number
-            field_x: Field X coordinate
-            field_y: Field Y coordinate
-
-        Returns:
-            Dict with field info and None values for spot metrics
-        """
-        return {
-            "field_index": field_index,
-            "field_x": field_x,
-            "field_y": field_y,
-            "rms_radius": None,
-            "geo_radius": None,
-            "centroid_x": None,
-            "centroid_y": None,
-            "num_rays": None,
-        }
-
     def _populate_spot_data_from_results(
         self,
         results: Any,
@@ -561,19 +539,7 @@ class PerformanceMixin:
         field_data: dict[str, Any],
         wavelength_index: Optional[int] = None,
     ) -> None:
-        """
-        Populate spot data dict from analysis results.
-
-        The ZOSAPI StandardSpot results expose an IAR_SpotDataResultMatrix via
-        results.SpotData with methods like GetRMSSpotSizeFor(field, wavelength).
-        Field and wavelength indices are 1-based in the ZOSAPI.
-
-        Args:
-            results: OpticStudio analysis results object
-            field_index: 0-indexed field number
-            field_data: Dict to populate with spot metrics
-            wavelength_index: 1-indexed wavelength number. None = primary wavelength (1).
-        """
+        """Populate spot data dict from SpotData result matrix (1-based indices)."""
         try:
             spot_data = results.SpotData
             if spot_data is None:
@@ -581,21 +547,15 @@ class PerformanceMixin:
                     logger.warning("[SPOT] results.SpotData is None")
                 return
 
-            # ZOSAPI SpotData methods are 1-indexed for both field and wavelength.
             fi_1 = field_index + 1
             wi = wavelength_index if wavelength_index else 1
 
-            # Log matrix dimensions for debugging (only for first field to avoid noise)
             if field_index == 0:
                 logger.debug(f"[SPOT] SpotData matrix: NumberOfFields={spot_data.NumberOfFields}, NumberOfWavelengths={spot_data.NumberOfWavelengths}")
 
-            # StandardSpot SpotData methods return values in µm (not lens units).
-            # The ZOSAPI example (PythonStandalone_22) prints these raw with no conversion.
+            # SpotData returns RMS/GEO in µm; centroid in mm (convert to µm)
             field_data["rms_radius"] = _extract_value(spot_data.GetRMSSpotSizeFor(fi_1, wi))
             field_data["geo_radius"] = _extract_value(spot_data.GetGeoSpotSizeFor(fi_1, wi))
-
-            # Centroid coordinates from SpotData are in lens units (mm);
-            # convert to µm to match batch ray trace positions (* 1000 at line ~471).
             field_data["centroid_x"] = _extract_value(spot_data.GetReferenceCoordinate_X_For(fi_1, wi)) * 1000
             field_data["centroid_y"] = _extract_value(spot_data.GetReferenceCoordinate_Y_For(fi_1, wi)) * 1000
 
@@ -618,21 +578,7 @@ class PerformanceMixin:
         sampling: str,
         maximum_frequency: float,
     ) -> dict[str, Any]:
-        """Run an MTF analysis (FFT or Huygens) and return frequency/modulation data.
-
-        Shared implementation for get_mtf() and get_huygens_mtf(). Both use the
-        same pattern: iterate fields, configure analysis settings, extract T/S data
-        series per field, and validate results.
-
-        Args:
-            analysis_idm: The AnalysisIDM enum value (FftMtf or HuygensMtf)
-            label: Human-readable name for logging (e.g., "FFT MTF", "Huygens MTF")
-            endpoint: API endpoint for _log_raw_output (e.g., "/mtf")
-            field_index: Field index (0 = all fields, 1+ = specific field, 1-indexed)
-            wavelength_index: Wavelength index (1-indexed)
-            sampling: Pupil sampling grid (e.g., '64x64', '128x128')
-            maximum_frequency: Maximum spatial frequency (cycles/mm). 0 = auto.
-        """
+        """Run an MTF analysis (FFT or Huygens) and return frequency/modulation data."""
         try:
             fields = self.oss.SystemData.Fields
             num_fields = fields.NumberOfFields
@@ -748,30 +694,7 @@ class PerformanceMixin:
         sampling: str = "64x64",
         maximum_frequency: float = 0.0,
     ) -> dict[str, Any]:
-        """
-        Get MTF (Modulation Transfer Function) data using ZosPy's FFT MTF analysis.
-
-        This is a "dumb executor" — returns raw frequency/modulation data.
-        Image rendering happens on the Mac side.
-
-        Args:
-            field_index: Field index (0 = all fields, 1+ = specific field, 1-indexed)
-            wavelength_index: Wavelength index (1-indexed)
-            sampling: Pupil sampling grid (e.g., '64x64', '128x128')
-            maximum_frequency: Maximum spatial frequency (cycles/mm). 0 = auto.
-
-        Returns:
-            On success: {
-                "success": True,
-                "frequency": [...],
-                "fields": [{"field_index": int, "field_x": float, "field_y": float,
-                            "tangential": [...], "sagittal": [...]}],
-                "diffraction_limit": [...],
-                "cutoff_frequency": float,
-                "wavelength_um": float,
-            }
-            On error: {"success": False, "error": "..."}
-        """
+        """Get FFT MTF data. Returns raw frequency/modulation data per field."""
         idm = self._zp.constants.Analysis.AnalysisIDM
         return self._run_mtf_analysis(
             analysis_idm=idm.FftMtf,
@@ -790,33 +713,7 @@ class PerformanceMixin:
         sampling: str = "64x64",
         maximum_frequency: float = 0.0,
     ) -> dict[str, Any]:
-        """
-        Get Huygens MTF data using ZosPy's Huygens MTF analysis.
-
-        More accurate than FFT MTF for systems with significant aberrations
-        or tilted/decentered elements.
-
-        This is a "dumb executor" — returns raw frequency/modulation data.
-        Image rendering happens on the Mac side.
-
-        Args:
-            field_index: Field index (0 = all fields, 1+ = specific field, 1-indexed)
-            wavelength_index: Wavelength index (1-indexed)
-            sampling: Pupil sampling grid (e.g., '64x64', '128x128')
-            maximum_frequency: Maximum spatial frequency (cycles/mm). 0 = auto (150).
-
-        Returns:
-            On success: {
-                "success": True,
-                "frequency": [...],
-                "fields": [{"field_index": int, "field_x": float, "field_y": float,
-                            "tangential": [...], "sagittal": [...]}],
-                "diffraction_limit": [...],
-                "cutoff_frequency": float,
-                "wavelength_um": float,
-            }
-            On error: {"success": False, "error": "..."}
-        """
+        """Get Huygens MTF data. More accurate than FFT for highly aberrated systems."""
         idm = self._zp.constants.Analysis.AnalysisIDM
         return self._run_mtf_analysis(
             analysis_idm=idm.HuygensMtf,
@@ -837,33 +734,7 @@ class PerformanceMixin:
         field_index: int = 0,
         wavelength_index: int = 1,
     ) -> dict[str, Any]:
-        """
-        Get Through Focus MTF data using ZosPy's FFTThroughFocusMTF analysis.
-
-        Shows how MTF varies at different focus positions. Critical for
-        understanding depth of focus and finding best focus.
-
-        Args:
-            sampling: Pupil sampling grid (e.g., '64x64', '128x128')
-            delta_focus: Focus step size in mm
-            frequency: Spatial frequency in cycles/mm (0 = use default)
-            number_of_steps: Number of steps in each direction from focus (total = 2*steps+1)
-            field_index: Field index (0 = all fields, 1+ = specific field, 1-indexed)
-            wavelength_index: Wavelength index (1-indexed)
-
-        Returns:
-            On success: {
-                "success": True,
-                "focus_positions": [...],
-                "fields": [{"field_index": int, "field_x": float, "field_y": float,
-                            "tangential": [...], "sagittal": [...]}],
-                "best_focus": {"position": float, "mtf_value": float},
-                "frequency": float,
-                "wavelength_um": float,
-                "delta_focus": float,
-            }
-            On error: {"success": False, "error": "..."}
-        """
+        """Get Through Focus MTF data showing how MTF varies across defocus positions."""
         try:
             fields = self.oss.SystemData.Fields
             num_fields = fields.NumberOfFields
@@ -1004,33 +875,9 @@ class PerformanceMixin:
         sampling: str = "64x64",
     ) -> dict[str, Any]:
         """
-        Get PSF (Point Spread Function) data using ZosPy's FFT PSF analysis.
-
-        This is a "dumb executor" — returns raw 2D intensity grid as base64 numpy.
-        Image rendering happens on the Mac side.
-
-        Args:
-            field_index: Field index (1-indexed)
-            wavelength_index: Wavelength index (1-indexed)
-            sampling: Pupil sampling grid (e.g., '64x64', '128x128')
-
-        Returns:
-            On success: {
-                "success": True,
-                "image": str (base64 numpy array),
-                "image_format": "numpy_array",
-                "array_shape": [h, w],
-                "array_dtype": str,
-                "strehl_ratio": float or None,
-                "psf_peak": float or None,
-                "wavelength_um": float,
-                "field_x": float,
-                "field_y": float,
-            }
-            On error: {"success": False, "error": "..."}
+        Get FFT PSF data. Returns raw 2D intensity grid as base64 numpy array.
         """
         try:
-            # Validate field and wavelength indices
             fields = self.oss.SystemData.Fields
             if field_index > fields.NumberOfFields:
                 return {"success": False, "error": f"Field index {field_index} out of range (max: {fields.NumberOfFields})"}
@@ -1044,7 +891,6 @@ class PerformanceMixin:
             field_y = _extract_value(field.Y)
             wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, DEFAULT_WAVELENGTH_UM)
 
-            # Run FFT PSF analysis
             idm = self._zp.constants.Analysis.AnalysisIDM
             analysis = self._zp.analyses.new_analysis(
                 self.oss,
@@ -1053,7 +899,6 @@ class PerformanceMixin:
             )
 
             try:
-                # Configure settings
                 settings = analysis.Settings
                 self._configure_analysis_settings(
                     settings,
@@ -1061,7 +906,6 @@ class PerformanceMixin:
                     wavelength_index=wavelength_index,
                     sampling=sampling,
                 )
-
                 psf_start = time.perf_counter()
                 try:
                     analysis.ApplyAndWaitForCompletion()
@@ -1134,37 +978,11 @@ class PerformanceMixin:
         wavelength_index: int = 1,
         sampling: str = "64x64",
     ) -> dict[str, Any]:
-        """
-        Get Huygens PSF data using ZOS-API's HuygensPsf analysis.
+        """Get Huygens PSF data. More accurate than FFT for highly aberrated systems.
 
-        More accurate than FFT PSF for highly aberrated systems because it uses
-        direct integration of the Huygens wavelet at each point on the image surface.
-
-        Returns the same structure as get_psf() so the Mac side can reuse
-        the same render_psf_to_png renderer.
-
-        Args:
-            field_index: Field index (1-indexed)
-            wavelength_index: Wavelength index (1-indexed)
-            sampling: Pupil sampling grid (e.g., '64x64', '128x128')
-
-        Returns:
-            On success: {
-                "success": True,
-                "image": str (base64 numpy array),
-                "image_format": "numpy_array",
-                "array_shape": [h, w],
-                "array_dtype": str,
-                "strehl_ratio": float or None,
-                "psf_peak": float or None,
-                "wavelength_um": float,
-                "field_x": float,
-                "field_y": float,
-            }
-            On error: {"success": False, "error": "..."}
+        Returns the same structure as get_psf().
         """
         try:
-            # Validate field and wavelength indices
             fields = self.oss.SystemData.Fields
             if field_index > fields.NumberOfFields:
                 return {"success": False, "error": f"Field index {field_index} out of range (max: {fields.NumberOfFields})"}
@@ -1178,7 +996,6 @@ class PerformanceMixin:
             field_y = _extract_value(field.Y)
             wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, DEFAULT_WAVELENGTH_UM)
 
-            # Run Huygens PSF analysis
             idm = self._zp.constants.Analysis.AnalysisIDM
             analysis = self._zp.analyses.new_analysis(
                 self.oss,
@@ -1187,7 +1004,6 @@ class PerformanceMixin:
             )
 
             try:
-                # Configure settings
                 settings = analysis.Settings
                 self._configure_analysis_settings(
                     settings,
