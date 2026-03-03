@@ -1271,20 +1271,15 @@ class PerformanceMixin:
                 f"surface={last_surf_idx}, orig_thickness={original_thickness}"
             )
 
-            # Build field coordinate cache
             field_coords: dict[int, tuple[float, float]] = {}
             for fi in field_indices:
                 field = fields.GetField(fi)
                 field_coords[fi] = (_extract_value(field.X), _extract_value(field.Y))
 
-            # Generate pupil coordinates (same approach as standard spot)
             num_rays = (ray_density + 1) ** 2
             pupil_coords = generate_random_coords(num_rays, seed=42)
-
-            # Compute field normalization
             is_radial, max_field_x, max_field_y, max_field_r = _compute_field_normalization(fields, num_fields)
 
-            # Initialize per-field result structure
             fields_result: dict[int, dict[str, Any]] = {}
             for fi in field_indices:
                 fx, fy = field_coords[fi]
