@@ -1301,10 +1301,8 @@ class PerformanceMixin:
                     "rays": [],
                 }
 
-            # Trace rays at each focus position (wrapped in try/finally to guarantee thickness restore)
             try:
                 for focus_pos in focus_positions:
-                    # Adjust thickness to shift focus
                     new_thickness = original_thickness + focus_pos
                     try:
                         lde.GetSurfaceAt(last_surf_idx).Thickness = new_thickness
@@ -1314,7 +1312,6 @@ class PerformanceMixin:
                             fields_result[fi]["focus_spots"].append(_empty_spot(focus_pos))
                         continue
 
-                    # Batch ray trace at this focus position
                     ray_trace = None
                     fields_done: set[int] = set()
                     try:
