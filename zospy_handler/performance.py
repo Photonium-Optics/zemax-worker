@@ -842,7 +842,6 @@ class PerformanceMixin:
                         except Exception:
                             pass
 
-            # Generate focus positions if not obtained from analysis
             if focus_positions is None or len(focus_positions) == 0:
                 focus_positions = list(np.linspace(
                     -number_of_steps * delta_focus,
@@ -1083,22 +1082,7 @@ class PerformanceMixin:
         plot_scale: float,
         number_of_rays: int,
     ) -> dict[str, Any]:
-        """Run a fan analysis (Ray Fan or OPD Fan) using raw ZOS-API.
-
-        Both fan types use the same ZOS-API pattern: configure field/wavelength
-        settings, run the analysis, then extract tangential/sagittal data series
-        per field. Each field produces 2 data series (tangential, sagittal),
-        each with XData (1D pupil coords) and YData (2D: num_rays x num_wavelengths).
-
-        Args:
-            analysis_idm: The AnalysisIDM enum value (e.g., RayFan, OpticalPathFan)
-            label: Human-readable name for logging (e.g., "RayFan", "OPDFan")
-            endpoint: API endpoint for _log_raw_output (e.g., "/ray-fan")
-            field_index: 0 = all fields, 1+ = specific field (1-indexed)
-            wavelength_index: 0 = all wavelengths, 1+ = specific (1-indexed)
-            plot_scale: Max vertical scale; 0 = auto
-            number_of_rays: Rays traced on each side of origin
-        """
+        """Run a fan analysis (Ray Fan or OPD Fan) and return T/S data per field."""
         try:
             sys_fields = self.oss.SystemData.Fields
             num_fields = sys_fields.NumberOfFields
