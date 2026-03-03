@@ -22,22 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_zernike_full_text(text: str) -> dict:
-    """Parse full ZernikeStandardCoefficients text output.
-
-    Extracts individual coefficients plus RMS and Strehl metrics.
-
-    The OpticStudio text output has coefficient lines like:
-        Z   1      0.12345678     1
-        Z   2     -0.01234567     4ρ·Cos(A)
-
-    And metric lines like:
-        RMS (to chief)     :   0.12345678
-        Strehl Ratio       :   0.90123456
-
-    Returns:
-        dict with keys: coefficients, rms_to_chief, rms_to_centroid,
-        strehl_ratio
-    """
+    """Parse ZernikeStandardCoefficients text output into coefficients and metrics."""
     result = {
         "coefficients": [],
         "rms_to_chief": None,

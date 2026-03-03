@@ -102,19 +102,14 @@ class PerformanceMixin:
 
     @staticmethod
     def _extract_mtf_series(series) -> tuple[list, list, list]:
-        """Extract x, tangential, and sagittal data from an MTF data series.
+        """Extract (x, tangential, sagittal) from an MTF data series.
 
-        IAR_DataSeries has XData (IVectorData, 1D) and YData (IMatrixData, 2D).
-        IMatrixData layout: GetLength(0)=Rows=freq points, GetLength(1)=Cols=NumSeries.
-        For standard T/S MTF, NumSeries=2 (col 0=tangential, col 1=sagittal).
-
-        Returns (x_values, tangential_values, sagittal_values).
-        sagittal_values is empty if the series is single-column.
+        sagittal is empty if the series is single-column.
         """
-        x_raw = series.XData.Data    # IVectorData.Data -> double[]
-        y_raw = series.YData.Data    # IMatrixData.Data -> double[,]
-        n_pts = y_raw.GetLength(0)   # Rows = frequency points
-        n_cols = y_raw.GetLength(1)  # Cols = NumSeries (tang/sag)
+        x_raw = series.XData.Data
+        y_raw = series.YData.Data
+        n_pts = y_raw.GetLength(0)
+        n_cols = y_raw.GetLength(1)
 
         x_vals = [float(x_raw[i]) for i in range(n_pts)]
         tang = [float(y_raw[i, 0]) for i in range(n_pts)]
