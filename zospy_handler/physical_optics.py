@@ -133,10 +133,6 @@ class PhysicalOpticsMixin:
             return {"success": False, "error": f"Geometric Image Analysis failed: {e}"}
 
 
-    # =========================================================================
-    # Physical Optics Propagation
-    # =========================================================================
-
     def get_physical_optics_propagation(
         self,
         field_index: int = 1,

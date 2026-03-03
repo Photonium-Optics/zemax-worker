@@ -591,9 +591,6 @@ class OptimizationMixin:
                 })
         return rows
 
-    # ── Optimization enum helpers ──────────────────────────────────────
-    # Enum member names are per ZOS-API docs (AZOS 25 R2.04).
-
     _ALGORITHM_MAP = {
         "DLS": "DampedLeastSquares",
         "DampedLeastSquares": "DampedLeastSquares",
@@ -673,8 +670,6 @@ class OptimizationMixin:
             solutions.append(mf_val)
         return solutions
 
-    # ── Main optimization entry point ───────────────────────────────
-
     def run_optimization(
         self,
         method: str = "local",
@@ -699,13 +694,11 @@ class OptimizationMixin:
                 "error": f"MFE setup failed: {mfe_result.get('error')}",
             }
 
-        # Step 2: Read initial merit
         try:
             merit_before = _extract_value(mfe.CalculateMeritFunction())
         except Exception as e:
             return {"success": False, "error": f"Initial merit calculation failed: {e}"}
 
-        # Step 3: Run optimization (method-specific)
         best_solutions: list[float] | None = None
         systems_evaluated: int | None = None
         merit_after: float | None = None
@@ -788,7 +781,6 @@ class OptimizationMixin:
                 merit_after = merit_before
                 merit_unknown = True
 
-        # Step 5: Read operand results from MFE
         operand_results = []
         try:
             mfe_cols = zp.constants.Editors.MFE.MeritColumn
@@ -797,7 +789,6 @@ class OptimizationMixin:
         except Exception as e:
             logger.warning(f"Error reading post-optimization MFE: {e}")
 
-        # Step 6: Extract variable states from LDE
         variable_states = self._extract_variable_states()
 
         # Save the modified system so the caller can round-trip via zmxToLlm
@@ -910,8 +901,6 @@ class OptimizationMixin:
 
         return variable_states
 
-    # ── QuickFocus (native) ──────────────────────────────────────────
-
     def run_quick_focus(
         self,
         criterion: str = "SpotSizeRadial",
@@ -983,10 +972,6 @@ class OptimizationMixin:
         _log_raw_output("/quick-focus", result)
         return result
 
-    # ── Scale Lens (native) ─────────────────────────────────────────
-
-    # Unit mappings for Scale Lens tool
-    # Short name -> ScaleToUnits enum member name
     _UNIT_TO_ENUM = {
         "mm": "Millimeters", "cm": "Centimeters",
         "inches": "Inches", "meters": "Meters",

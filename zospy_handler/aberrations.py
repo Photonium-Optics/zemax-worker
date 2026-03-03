@@ -270,7 +270,6 @@ class AberrationsMixin:
                 if error_msg:
                     logger.warning(f"ZernikeStandardCoefficients error: {error_msg}")
                 else:
-                    # Extract metrics from text output
                     zernike_analysis.Results.GetTextFile(zernike_temp_path)
                     if os.path.exists(zernike_temp_path):
                         file_size = os.path.getsize(zernike_temp_path)
@@ -684,7 +683,6 @@ class AberrationsMixin:
             On error: {"success": False, "error": "..."}
         """
         try:
-            # Validate wavelength index
             wavelengths = self.oss.SystemData.Wavelengths
             if wavelength_index > wavelengths.NumberOfWavelengths:
                 return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
@@ -693,7 +691,6 @@ class AberrationsMixin:
             fields = self.oss.SystemData.Fields
             field_unit = _get_field_unit(fields)
 
-            # Run ZernikeCoefficientsVsField using raw ZOS-API (no ZosPy temp files)
             df = self._run_zernike_vs_field(
                 maximum_term, wavelength_index, field_density, sampling,
             )
@@ -705,15 +702,11 @@ class AberrationsMixin:
             if len(df) == 0:
                 return {"success": False, "error": f"No Zernike vs field data extracted (cols={list(df.columns)[:10]})"}
 
-            # Extract field positions from the DataFrame index
             try:
                 field_positions = [float(v) for v in df.index.tolist()]
             except (ValueError, TypeError):
                 field_positions = list(range(len(df)))
 
-            # Extract coefficient columns - handle various naming formats:
-            # Pure numbers: "1", "4", "37"
-            # Z-prefixed: "Z1", "Z4", "Z 4", "Z04"
             coefficients_dict = {}
             for col in df.columns:
                 term_num = _parse_zernike_term_number(col)
@@ -778,7 +771,6 @@ class AberrationsMixin:
         temp_path = os.path.join(tempfile.gettempdir(), "zospy_zernike_standard.txt")
 
         try:
-            # Validate field index
             fields = self.oss.SystemData.Fields
             if field_index > fields.NumberOfFields:
                 return {"success": False, "error": f"Field index {field_index} out of range (max: {fields.NumberOfFields})"}
@@ -787,7 +779,6 @@ class AberrationsMixin:
             field_x = _extract_value(field.X)
             field_y = _extract_value(field.Y)
 
-            # Validate wavelength index
             wavelengths = self.oss.SystemData.Wavelengths
             if wavelength_index > wavelengths.NumberOfWavelengths:
                 return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {wavelengths.NumberOfWavelengths})"}
@@ -837,7 +828,6 @@ class AberrationsMixin:
             if error_msg:
                 return {"success": False, "error": f"ZernikeStandardCoefficients error: {error_msg}"}
 
-            # Extract text output and parse coefficients + metrics
             analysis.Results.GetTextFile(temp_path)
             if not os.path.exists(temp_path):
                 return {"success": False, "error": "ZernikeStandardCoefficients: GetTextFile produced no output"}
