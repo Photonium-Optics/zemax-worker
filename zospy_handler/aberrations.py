@@ -88,16 +88,7 @@ def _parse_zernike_full_text(text: str) -> dict:
 
 
 def _parse_zernike_vs_field_text(text: str) -> list[dict]:
-    """Parse ZernikeCoefficientsVsField tab-delimited text output.
-
-    The OpticStudio text format has a header row followed by data rows:
-        Field: \t  1\t  2\t  3\t ...
-        0.0000E+00\t -7.1044E-01\t  0.0000E+00\t ...
-        2.8000E+00\t -6.6992E-01\t  0.0000E+00\t ...
-
-    Returns a list of dicts, each with "field" key and Zernike term keys
-    (e.g., "Z1", "Z2", ...).
-    """
+    """Parse ZernikeCoefficientsVsField tab-delimited text into rows of {field, Z1, Z2, ...}."""
     rows: list[dict] = []
     lines = text.splitlines()
     term_numbers: list[int] = []
@@ -155,10 +146,7 @@ _ANGULAR_FIELD_TYPES = {"Angle", "TheodoliteAngle"}
 
 
 def _get_field_unit(fields) -> str:
-    """Determine the field coordinate unit from the system's field type.
-
-    Returns 'deg' for angular field types, 'mm' for spatial field types.
-    """
+    """Return 'deg' for angular field types, 'mm' for spatial."""
     field_type_name = _enum_name(fields.GetFieldType())
     return "deg" if field_type_name in _ANGULAR_FIELD_TYPES else "mm"
 
@@ -166,30 +154,12 @@ def _get_field_unit(fields) -> str:
 class AberrationsMixin:
 
     def get_seidel_native(self) -> dict[str, Any]:
-        """
-        Get native Seidel text output using OpticStudio's SeidelCoefficients analysis.
-
-        This is a "dumb executor" — runs the analysis, exports the text file,
-        and returns the raw UTF-16 text content. All parsing happens on the
-        Mac side (seidel_text_parser.py).
-
-        Note: System must be pre-loaded via load_zmx_file().
-
-        Returns:
-            On success: {
-                "success": True,
-                "seidel_text": str (raw text from GetTextFile),
-                "num_surfaces": int,
-            }
-            On error: {"success": False, "error": "..."}
-        """
+        """Run SeidelCoefficients analysis and return raw text output for Mac-side parsing."""
         analysis = None
         temp_path = os.path.join(tempfile.gettempdir(), SEIDEL_TEMP_FILENAME)
 
         try:
             idm = self._zp.constants.Analysis.AnalysisIDM
-
-            # Create and run SeidelCoefficients analysis
             analysis = self._zp.analyses.new_analysis(
                 self.oss,
                 idm.SeidelCoefficients,
@@ -202,12 +172,10 @@ class AberrationsMixin:
                 seidel_elapsed_ms = (time.perf_counter() - seidel_start) * 1000
                 log_timing(logger, "SeidelCoefficients.ApplyAndWaitForCompletion", seidel_elapsed_ms)
 
-            # Check for error messages in analysis results
             error_msg = self._check_analysis_errors(analysis)
             if error_msg:
                 return {"success": False, "error": error_msg}
 
-            # Export to text file
             analysis.Results.GetTextFile(temp_path)
 
             if not os.path.exists(temp_path):
@@ -239,42 +207,12 @@ class AberrationsMixin:
         sampling: str = "64x64",
         remove_tilt: bool = False,
     ) -> dict[str, Any]:
-        """
-        Get wavefront error map and metrics using raw ZOS-API calls.
-
-        Uses ZernikeStandardCoefficients (text output) for RMS/P-V/Strehl,
-        and WavefrontMap (data grid) for the 2D wavefront array. Both use
-        the raw new_analysis() pattern to avoid ZosPy temp-file issues.
-
-        Note: System must be pre-loaded via load_zmx_file().
-
-        Args:
-            field_index: Field index (1-indexed)
-            wavelength_index: Wavelength index (1-indexed)
-            sampling: Pupil sampling grid (e.g., '32x32', '64x64', '128x128')
-            remove_tilt: Whether to remove tilt from wavefront map
-
-        Returns:
-            On success: {
-                "success": True,
-                "rms_waves": float,
-                "strehl_ratio": float or None,
-                "wavelength_um": float,
-                "field_x": float,
-                "field_y": float,
-                "image": str (base64 numpy array),
-                "image_format": "numpy_array",
-                "array_shape": [h, w],
-                "array_dtype": str,
-            }
-            On error: {"success": False, "error": "..."}
-        """
+        """Get wavefront error map and metrics (RMS, Strehl, 2D array) via ZOS-API."""
         zernike_analysis = None
         wfm_analysis = None
         zernike_temp_path = os.path.join(tempfile.gettempdir(), "zospy_zernike_wavefront.txt")
 
         try:
-            # Get field coordinates for response
             fields = self.oss.SystemData.Fields
             if field_index > fields.NumberOfFields:
                 return {"success": False, "error": f"Field index {field_index} out of range (max: {fields.NumberOfFields})"}
@@ -510,23 +448,13 @@ class AberrationsMixin:
                 rms_consts = self._zp.constants.Analysis.Settings.RMS
 
                 def _set_setting(attr: str, value: Any, label: str = "") -> None:
-                    """Set a setting attribute, logging warnings on failure."""
                     if not hasattr(settings, attr):
-                        logger.debug(f"RmsField: settings has no attribute '{attr}'")
                         return
                     try:
                         setattr(settings, attr, value)
-                        readback = getattr(settings, attr, "?")
-                        logger.debug(f"RmsField: Set {label or attr} = {value}, readback = {readback}")
                     except Exception as e:
                         logger.warning(f"RmsField: Could not set {label or attr}: {e}")
 
-                logger.debug(f"RmsField: Available settings: {[a for a in dir(settings) if not a.startswith('_')]}")
-
-                # Set RMS analysis settings — enum names verified against ZOS-API docs
-                # FieldDensities: FieldDens_5 through FieldDens_100 (multiples of 5)
-                # RayDensities: RayDens_1 through RayDens_20
-                # ReferTo: ChiefRay, Centroid
                 _set_setting('Data', rms_consts.RMSField.DataType.SpotRadius, 'Data type')
 
                 field_dens_name = f"FieldDens_{snapped}"

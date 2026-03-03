@@ -33,19 +33,9 @@ def _cutoff_frequency(wavelength_um: float, fno: Optional[float]) -> Optional[fl
 
 
 def _parse_strehl_from_header(header_lines) -> Optional[float]:
-    """Parse Strehl ratio from analysis header lines using regex.
-
-    IAR_HeaderData.Lines returns String[] (always iterable).
-    Returns None if no Strehl value is found.
-
-    Handles formats like:
-      "Strehl Ratio : 0.8532"
-      "Strehl Ratio : 0.8532 (0.550 um)"
-      "Strehl = 8.532e-01"
-    """
+    """Parse Strehl ratio from analysis header lines. Returns None if not found."""
     if not header_lines:
         return None
-    # IAR_HeaderData.Lines is String[] — materialize .NET IList once
     lines_iter = list(header_lines)
     for line in lines_iter:
         m = _STREHL_RE.search(str(line))

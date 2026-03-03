@@ -13,23 +13,7 @@ logger = logging.getLogger(__name__)
 class OptimizationMixin:
 
     def evaluate_merit_function(self, operand_rows: list[dict]) -> dict[str, Any]:
-        """
-        Evaluate a merit function by constructing operands in the MFE and computing.
-
-        Args:
-            operand_rows: List of dicts with keys:
-                - operand_code: str (e.g. "EFFL")
-                - params: list of up to 8 values (None for unused slots)
-                - target: float
-                - weight: float
-
-        Returns:
-            Dict with:
-                - success: bool
-                - total_merit: float or None
-                - evaluated_rows: list of per-row results
-                - row_errors: list of per-row error messages
-        """
+        """Construct operands in the MFE, compute, and return per-row results."""
         zp = self._zp
         mfe = self.oss.MFE
 
@@ -238,15 +222,7 @@ class OptimizationMixin:
         add_favorite_operands: bool = False,
         delete_vignetted: bool = True,
     ) -> dict[str, Any]:
-        """
-        Apply the SEQ Optimization Wizard to auto-generate merit function operands.
-
-        Uses OpticStudio's ISEQOptimizationWizard2 to populate the MFE based on
-        image quality criteria (Spot, Wavefront, Contrast, or Angular).
-
-        Returns:
-            Dict with success, total_merit, generated_rows, num_rows_generated
-        """
+        """Apply the SEQ Optimization Wizard to auto-generate MFE operands."""
         def _wizard_error(error: str, total_merit=None) -> dict[str, Any]:
             return {
                 "success": False, "error": error,
@@ -453,8 +429,6 @@ class OptimizationMixin:
                 "total_count": 0,
             }
 
-        # Enumerate all operand type names from the namedtuple.
-        # Use _fields (not dir()) to avoid namedtuple methods like count/index.
         if hasattr(MeritOperandType, '_fields'):
             type_names = list(MeritOperandType._fields)
         else:
@@ -470,7 +444,6 @@ class OptimizationMixin:
                 enum_val = getattr(MeritOperandType, code)
                 op.ChangeType(enum_val)
 
-                # Read the human-readable type name from OpticStudio
                 type_name = ""
                 try:
                     type_name = str(op.TypeName)
@@ -565,8 +538,6 @@ class OptimizationMixin:
             }
 
 
-    # ── MFE row reading helper ─────────────────────────────────────────
-
     @staticmethod
     def _get_param_columns(mfe_cols) -> list:
         """Return the list of Param1..Param8 MeritColumn enum values."""
@@ -623,15 +594,12 @@ class OptimizationMixin:
     # ── Optimization enum helpers ──────────────────────────────────────
     # Enum member names are per ZOS-API docs (AZOS 25 R2.04).
 
-    # OptimizationAlgorithm: DampedLeastSquares=0, OrthogonalDescent=1
     _ALGORITHM_MAP = {
         "DLS": "DampedLeastSquares",
         "DampedLeastSquares": "DampedLeastSquares",
         "OrthogonalDescent": "OrthogonalDescent",
     }
 
-    # OptimizationCycles: Automatic=0, Fixed_1_Cycle=1, Fixed_5_Cycles=2,
-    # Fixed_10_Cycles=3, Fixed_50_Cycles=4, Infinite=5
     _CYCLES_MAP = {
         None: "Automatic",
         1: "Fixed_1_Cycle",
@@ -676,10 +644,7 @@ class OptimizationMixin:
 
     @staticmethod
     def _resolve_save_count(zp_module, num_to_save: int | None):
-        """Map save count to OptimizationSaveCount enum value.
-
-        OptimizationSaveCount: Save_10=0 through Save_100=9.
-        """
+        """Map save count to OptimizationSaveCount enum value."""
         save_enum = zp_module.constants.Tools.Optimization.OptimizationSaveCount
         rounded = OptimizationMixin._round_to_save_count(num_to_save)
         result = getattr(save_enum, f"Save_{rounded}", None)
@@ -689,19 +654,11 @@ class OptimizationMixin:
 
     @staticmethod
     def _read_systems_evaluated(opt_tool) -> int:
-        """Read systems evaluated count from a global optimization tool.
-
-        IGlobalOptimization.Systems is a documented long property.
-        """
+        """Read systems evaluated count from a global optimization tool."""
         return int(opt_tool.Systems)
 
     def _read_best_solutions(self, opt_tool, num_to_save: int = 10) -> list[float]:
-        """Read the best N merit values from a global optimizer.
-
-        IGlobalOptimization.CurrentMeritFunction(int N) is a 1-indexed method
-        returning double. Slots beyond what was saved raise an exception.
-        Must be called before opt_tool.Close().
-        """
+        """Read the best N merit values from a global optimizer (must call before Close)."""
         count = self._round_to_save_count(num_to_save)
         solutions: list[float] = []
         for j in range(1, count + 1):
@@ -727,28 +684,11 @@ class OptimizationMixin:
         num_to_save: int | None = 10,
         operand_rows: list[dict] | None = None,
     ) -> dict[str, Any]:
-        """
-        Run OpticStudio optimization using Local, Global, or Hammer method.
-
-        Args:
-            method: "local" | "global" | "hammer"
-            algorithm: "DLS" | "OrthogonalDescent"
-            cycles: Cycle count for local optimization (1, 5, 10, 50, or None=auto)
-            timeout_seconds: Time limit for global/hammer (they run indefinitely)
-            num_to_save: Number of best solutions to retain (global only)
-            operand_rows: Explicit MFE operand rows
-
-        Returns:
-            Dict with merit_before, merit_after, cycles_requested,
-            operand_results, variable_states, and (for global) best_solutions
-        """
+        """Run optimization (local, global, or hammer) on the current MFE."""
         zp = self._zp
         mfe = self.oss.MFE
-
-        # Normalize method
         method = (method or "local").lower()
 
-        # Step 1: Populate MFE
         if not operand_rows:
             return {"success": False, "error": "Must provide operand_rows"}
 

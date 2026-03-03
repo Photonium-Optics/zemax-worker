@@ -39,7 +39,6 @@ class GeometryMixin:
             paraxial["fno"] = fno
             paraxial["na"] = 1.0 / (2.0 * fno) if fno > 0 else None
 
-        # Compute image height from EFL and max field angle
         max_field = paraxial.get("max_field")
         if (
             efl is not None
@@ -102,7 +101,6 @@ class GeometryMixin:
         color_rays_by: Literal["Fields", "Wavelengths", "None"] = "Fields",
     ) -> dict[str, Any]:
         """Generate cross-section diagram via ZosPy's CrossSection analysis."""
-        # Validate system state
         num_fields = self.oss.SystemData.Fields.NumberOfFields
         if num_fields == 0:
             return {"success": False, "error": "System has no fields defined"}
@@ -113,8 +111,6 @@ class GeometryMixin:
 
         temp_path = os.path.join(tempfile.gettempdir(), CROSS_SECTION_TEMP_FILENAME)
 
-        # Always collect paraxial data and surface geometry — these don't depend
-        # on the image export succeeding.
         paraxial = self.get_paraxial_data()
         surfaces_data = self._get_surface_geometry()
         rays_total = number_of_rays * max(1, num_fields)
@@ -214,7 +210,6 @@ class GeometryMixin:
                     max_field = max(max_field, abs(_extract_value(f.Y)), abs(_extract_value(f.X)))
             paraxial["max_field"] = max_field
 
-            # IFields.GetFieldType() returns FieldType enum (always present)
             field_type_str = _enum_name(fields.GetFieldType())
 
             ft_type, ft_unit = FIELD_TYPE_MAP.get(
@@ -223,7 +218,6 @@ class GeometryMixin:
             paraxial["field_type"] = ft_type
             paraxial["field_unit"] = ft_unit
 
-            # Calculate total track (algebraic sum of thicknesses, not abs)
             lde = self.oss.LDE
             total_track = 0.0
             for i in range(1, lde.NumberOfSurfaces):
@@ -245,8 +239,6 @@ class GeometryMixin:
         for i in range(1, lde.NumberOfSurfaces):
             surface = lde.GetSurfaceAt(i)
 
-            # Radius of 0 in Zemax means infinity (flat surface);
-            # convert to None for client-side rendering.
             radius = _extract_value(surface.Radius)
             thickness = _extract_value(surface.Thickness)
             semi_diameter = _extract_value(surface.SemiDiameter)
@@ -354,7 +346,6 @@ class GeometryMixin:
 
                 surfaces.append(entry)
 
-            # Get paraxial data
             paraxial = self.get_paraxial_data()
 
             result = {
@@ -379,7 +370,6 @@ class GeometryMixin:
     ) -> dict[str, Any]:
         """Get surface curvature map as a raw numpy array via ZosPy's Curvature analysis."""
         try:
-            # Validate surface number
             num_surfaces = self.oss.LDE.NumberOfSurfaces
             if surface < 1 or surface >= num_surfaces:
                 return {

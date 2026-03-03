@@ -43,13 +43,7 @@ class RayTraceDiagnosticRequest(BaseModel):
 
 
 class RayTraceDiagnosticResponse(BaseModel):
-    """
-    Raw ray trace diagnostic response.
-
-    This is a "dumb executor" response - returns raw per-ray data only.
-    All aggregation, hotspot detection, and threshold calculations
-    happen on the Mac side (zemax-analysis-service).
-    """
+    """Raw ray trace diagnostic response (per-ray data only)."""
     success: bool = Field(description="Whether the operation succeeded")
     paraxial: Optional[dict[str, Any]] = Field(default=None, description="Basic paraxial data (efl, bfl, fno, total_track)")
     num_surfaces: Optional[int] = Field(default=None, description="Number of surfaces in system")

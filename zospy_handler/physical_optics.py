@@ -43,42 +43,7 @@ class PhysicalOpticsMixin:
         field: int = 1,
         wavelength: str | int = "All",
     ) -> dict[str, Any]:
-        """
-        Run Geometric Image Analysis to simulate how an extended scene looks
-        through the optical system.
-
-        Uses ZosPy's GeometricImageAnalysis from the extendedscene module.
-        Returns the simulated image as a base64-encoded numpy array, plus
-        paraxial metadata.
-
-        This is a "dumb executor" -- returns raw 2D intensity grid as base64 numpy.
-        Image rendering happens on the Mac side.
-
-        Note: System must be pre-loaded via load_zmx_file().
-
-        Args:
-            field_size: Image width in field coordinates (0 = auto)
-            image_size: Detector size in lens units
-            rays_x_1000: Approximate ray count in thousands (1-100)
-            number_of_pixels: Pixels across image width (10-1000)
-            field: Field number (1-indexed)
-            wavelength: Wavelength selection ('All' or wavelength number)
-
-        Returns:
-            On success: {
-                "success": True,
-                "image": str (base64 numpy array),
-                "image_format": "numpy_array",
-                "array_shape": [h, w],
-                "array_dtype": str,
-                "field_size": float,
-                "image_size": float,
-                "rays_x_1000": int,
-                "number_of_pixels": int,
-                "paraxial": dict,
-            }
-            On error: {"success": False, "error": "..."}
-        """
+        """Run Geometric Image Analysis and return the simulated image as base64 numpy array."""
         try:
             from zospy.analyses.extendedscene.geometric_image_analysis import GeometricImageAnalysis
 
@@ -88,7 +53,6 @@ class PhysicalOpticsMixin:
                 f"field={field}, wavelength={wavelength}"
             )
 
-            # Create and run the analysis
             analysis = GeometricImageAnalysis(
                 field_size=field_size,
                 image_size=image_size,
@@ -189,14 +153,8 @@ class PhysicalOpticsMixin:
         use_polarization: bool = False,
         data_type: str = "Irradiance",
     ) -> dict[str, Any]:
-        """
-        Run Physical Optics Propagation (POP) analysis.
-
-        This is a "dumb executor" -- returns raw 2D beam profile grid as base64 numpy
-        plus beam parameters. Image rendering happens on the Mac side.
-        """
+        """Run POP analysis and return raw 2D beam profile as base64 numpy array."""
         try:
-            # Validate field and wavelength indices
             fields = self.oss.SystemData.Fields
             if field_index > fields.NumberOfFields:
                 return {"success": False, "error": f"Field index {field_index} out of range (max: {fields.NumberOfFields})"}
@@ -210,7 +168,6 @@ class PhysicalOpticsMixin:
             field_y = _extract_value(field.Y)
             wavelength_um = _extract_value(wavelengths.GetWavelength(wavelength_index).Wavelength, 0.5876)
 
-            # Build beam parameter dict via ZosPy helper
             beam_params = {}
             try:
                 beam_params = self._zp.analyses.physicaloptics.physical_optics_propagation.create_beam_parameter_dict(
@@ -219,7 +176,6 @@ class PhysicalOpticsMixin:
             except Exception as e:
                 logger.warning(f"POP: create_beam_parameter_dict failed (beam_type={beam_type}): {e}")
 
-            # Override waist sizes if provided
             if waist_x is not None:
                 _override_beam_param(beam_params, waist_x, "Waist X",
                                      lambda k: "waist" in k and ("x" in k or "size" in k) and "y" not in k)
