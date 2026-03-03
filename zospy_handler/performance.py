@@ -1377,7 +1377,6 @@ class PerformanceMixin:
 
                     except Exception as e:
                         logger.warning(f"[TF-SPOT] Ray trace failed at focus={focus_pos}: {e}")
-                        # Only fill empty spots for fields not already processed
                         for fi in field_indices:
                             if fi not in fields_done:
                                 fields_result[fi]["focus_spots"].append(_empty_spot(focus_pos))
@@ -1388,13 +1387,11 @@ class PerformanceMixin:
                             except Exception:
                                 pass
             finally:
-                # Always restore original thickness, even on unexpected exceptions
                 try:
                     lde.GetSurfaceAt(last_surf_idx).Thickness = original_thickness
                 except Exception as e:
                     logger.error(f"[TF-SPOT] CRITICAL: Could not restore original thickness: {e}")
 
-            # Find best focus (minimum average RMS across all fields)
             best_focus_pos = 0.0
             best_focus_rms = float('inf')
             for i, fp in enumerate(focus_positions):
