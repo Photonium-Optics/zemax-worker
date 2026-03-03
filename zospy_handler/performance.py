@@ -1340,7 +1340,6 @@ class PerformanceMixin:
                         ray_trace.RunAndWaitForCompletion()
                         norm_unpol.StartReadingResults()
 
-                        # Read results per field, per wavelength
                         for fi in field_indices:
                             rays_x: list[float] = []
                             rays_y: list[float] = []
@@ -1353,7 +1352,6 @@ class PerformanceMixin:
                                         rays_x.append(float(result[4]) * 1000)  # mm to µm
                                         rays_y.append(float(result[5]) * 1000)
 
-                            # Compute centroid and RMS/GEO using numpy
                             if rays_x:
                                 ax = np.array(rays_x)
                                 ay = np.array(rays_y)
