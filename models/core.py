@@ -39,7 +39,7 @@ class RayTraceDiagnosticRequest(BaseModel):
     """Ray trace diagnostic request."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
     num_rays: int = Field(default=21, description="Number of rays per field (determines grid density). Higher values = more accuracy but slower. 21 gives ~13 rays in circular pupil.")
-    distribution: str = Field(default="hexapolar", description="Ray distribution (currently uses square grid)")
+    distribution: str = Field(default="hexapolar", description="Ray distribution: hexapolar, grid, or random")
 
 
 class RayTraceDiagnosticResponse(BaseModel):

@@ -25,6 +25,7 @@ class WavelengthInfo(BaseModel):
     """Wavelength metadata."""
     index: int = Field(description="0-indexed wavelength number")
     wavelength_um: float = Field(description="Wavelength in micrometers")
+    is_primary: bool = Field(default=False, description="Whether this is the primary wavelength")
 
 
 class RayAnalysisRequest(BaseModel):

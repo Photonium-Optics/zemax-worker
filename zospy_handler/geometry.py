@@ -23,16 +23,7 @@ logger = logging.getLogger(__name__)
 class GeometryMixin:
 
     def get_paraxial_data(self) -> dict[str, Any]:
-        """
-        Get first-order (paraxial) optical properties.
-
-        Delegates to _get_paraxial_from_lde() for raw LDE data, then adds
-        EFL, F/#, NA, and image height.
-
-        Returns:
-            Dict with paraxial properties (epd, max_field, total_track,
-            efl, fno, na, image_height, etc.)
-        """
+        """Get first-order (paraxial) optical properties including EFL, F/#, NA, and image height."""
         paraxial = self._get_paraxial_from_lde()
 
         efl = self._get_efl()
@@ -61,25 +52,13 @@ class GeometryMixin:
         return paraxial
 
     def get_cardinal_points(self) -> dict[str, Any]:
-        """
-        Get cardinal points of the optical system.
-
-        Reports principal planes, nodal points, focal points, anti-principal
-        planes, and anti-nodal planes for both object and image space.
-
-        Returns:
-            Dict with success flag and cardinal points data.
-        """
+        """Get cardinal points (principal, nodal, focal planes) for object and image space."""
         try:
             result_obj = self._zp.analyses.reports.CardinalPoints().run(self.oss)
             data = result_obj.data
 
-            # Build a flat list of cardinal point entries
             cardinal_points = []
             spec = data.cardinal_points
-
-            # Each attribute of CardinalPointSpecification is a CardinalPoint
-            # with .object (Object Space) and .image (Image Space) values.
             point_names = [
                 ("Focal Length", spec.focal_length),
                 ("Focal Planes", spec.focal_planes),
@@ -122,14 +101,7 @@ class GeometryMixin:
         number_of_rays: int = DEFAULT_NUM_CROSS_SECTION_RAYS,
         color_rays_by: Literal["Fields", "Wavelengths", "None"] = "Fields",
     ) -> dict[str, Any]:
-        """
-        Generate cross-section diagram using ZosPy's CrossSection analysis.
-
-        Requires ZosPy >= 1.3.0 and OpticStudio >= 24.1.0 for image export.
-        Returns error on failure — no fallbacks.
-
-        Note: System must be pre-loaded via load_zmx_file().
-        """
+        """Generate cross-section diagram via ZosPy's CrossSection analysis."""
         # Validate system state
         num_fields = self.oss.SystemData.Fields.NumberOfFields
         if num_fields == 0:
@@ -206,16 +178,10 @@ class GeometryMixin:
         return result
 
     def _get_cross_section_error(self, fallback: str) -> str:
-        """
-        Try to extract the actual OpticStudio error message after a cross-section failure.
-
-        Opens the cross-section export tool briefly to read ErrorMessage,
-        which contains actionable messages like "Cannot determine object
-        coordinates for field 3".
-        """
+        """Extract the OpticStudio error message via the cross-section export tool, or return fallback."""
         tool = None
         try:
-            tool = self.oss.Tools.OpenCrossSectionExport()
+            tool = self.oss.Tools.Layouts.OpenCrossSectionExport()
             tool.RunAndWaitForCompletion()
             error_msg = tool.ErrorMessage  # ISystemTool.ErrorMessage (string property)
             if error_msg:
@@ -233,23 +199,13 @@ class GeometryMixin:
         return fallback
 
     def _get_paraxial_from_lde(self) -> dict[str, Any]:
-        """
-        Get paraxial data directly from LDE and SystemData.
-
-        This method is more reliable than using analysis functions as it
-        reads directly from the system data structures.
-
-        Returns:
-            Dict with keys: epd, max_field, field_type, field_unit, total_track
-        """
+        """Get paraxial data directly from LDE and SystemData."""
         try:
             paraxial = {}
 
-            # Get aperture info - use _extract_value for UnitField objects
             aperture = self.oss.SystemData.Aperture
             paraxial["epd"] = _extract_value(aperture.ApertureValue)
 
-            # Get field info - use _extract_value for UnitField objects
             fields = self.oss.SystemData.Fields
             max_field = 0.0
             if fields.NumberOfFields > 0:
@@ -281,16 +237,7 @@ class GeometryMixin:
             return {}
 
     def _get_surface_geometry(self) -> list[dict[str, Any]]:
-        """
-        Extract surface geometry for client-side cross-section rendering.
-
-        This method reads the Lens Data Editor (LDE) to extract geometric
-        properties of each surface. Used as fallback data when image export fails.
-
-        Returns:
-            List of surface dicts with keys: index, z, radius, thickness,
-            semi_diameter, conic, material, is_stop
-        """
+        """Extract surface geometry from the LDE for client-side rendering."""
         surfaces = []
         lde = self.oss.LDE
         z_position = 0.0
@@ -298,9 +245,6 @@ class GeometryMixin:
         for i in range(1, lde.NumberOfSurfaces):
             surface = lde.GetSurfaceAt(i)
 
-            # Radius of 0 in Zemax means infinity (flat surface)
-            # We convert to None for client-side rendering
-            # Use _extract_value for all UnitField properties
             radius = _extract_value(surface.Radius)
             thickness = _extract_value(surface.Thickness)
             semi_diameter = _extract_value(surface.SemiDiameter)
@@ -321,23 +265,10 @@ class GeometryMixin:
         return surfaces
 
     def calc_semi_diameters(self) -> dict[str, Any]:
-        """
-        Calculate semi-diameters by reading from surfaces after ray trace.
-
-        Reads the SemiDiameter property from each surface in the LDE,
-        which OpticStudio computes based on ray extent during tracing.
-
-        Note: System must be pre-loaded via load_zmx_file().
-
-        Returns:
-            Dict with "semi_diameters" key containing list of
-            {"index": int, "value": float} entries.
-        """
+        """Read computed semi-diameters from all surfaces in the LDE."""
         semi_diameters = []
         lde = self.oss.LDE
 
-        # For each surface, get the computed semi-diameter
-        # Use _extract_value for UnitField objects
         for i in range(1, lde.NumberOfSurfaces):
             surface = lde.GetSurfaceAt(i)
             sd = _extract_value(surface.SemiDiameter)
@@ -350,23 +281,7 @@ class GeometryMixin:
         return {"semi_diameters": semi_diameters}
 
     def get_surface_data_report(self) -> dict[str, Any]:
-        """
-        Get Surface Data Report from OpticStudio.
-
-        Iterates over every surface in the system and runs the ZosPy SurfaceData
-        analysis to collect edge thickness, center thickness, material name,
-        refractive index, and surface power for each surface.
-
-        Note: System must be pre-loaded via load_zmx_file().
-
-        Returns:
-            On success: {
-                "success": True,
-                "surfaces": [...],
-                "paraxial": {...},
-            }
-            On error: {"success": False, "error": "..."}
-        """
+        """Get per-surface data (thickness, material, refractive index, power) via ZosPy SurfaceData."""
         try:
             zp = self._zp
             num_surfaces = self.oss.LDE.NumberOfSurfaces
@@ -384,16 +299,11 @@ class GeometryMixin:
                     "surface_power": 0.0,
                 }
 
-                # Read basic LDE data for this surface
                 try:
                     lde_surf = self.oss.LDE.GetSurfaceAt(surf_idx)
                     entry["radius"] = _extract_value(lde_surf.Radius, 0.0)
                     entry["thickness"] = _extract_value(lde_surf.Thickness, 0.0)
-
-                    # ILDERow.TypeName is a string property (always present)
                     entry["surface_type"] = str(lde_surf.TypeName)
-
-                    # ILDERow.MaterialCell returns IEditorCell; .Value is string property
                     mat_value = lde_surf.MaterialCell.Value
                     if mat_value:
                         entry["material"] = str(mat_value)
@@ -414,37 +324,17 @@ class GeometryMixin:
                     if sd_result and sd_result.data is not None:
                         data = sd_result.data
 
-                        # SurfaceDataResult fields are always present per ZOSPy dataclass:
-                        # edge_thickness: EdgeThickness (.y, .x)
-                        # thickness: float
-                        # material: MaterialData (.glass: str|ModelGlass|None, .indices: list[RefractiveIndex])
-                        # surface_powers: SurfacePowers (.in_air, .as_situated — each SurfacePower)
-
-                        # Edge thickness — .y = tangential (Y Edge Thick)
                         entry["edge_thickness"] = _extract_value(data.edge_thickness.y, 0.0)
-
-                        # Thickness from analysis
                         entry["thickness"] = _extract_value(data.thickness, entry["thickness"])
 
-                        # Material and refractive index
                         mat_data = data.material
-                        # glass is str | ModelGlass | None
                         glass = mat_data.glass
                         if glass is not None and not entry["material"]:
-                            if isinstance(glass, str):
-                                entry["material"] = glass
-                            else:
-                                # ModelGlass has .nd, .abbe, .dpgf — not a name, so stringify
-                                entry["material"] = str(glass)
+                            entry["material"] = glass if isinstance(glass, str) else str(glass)
 
-                        # Refractive index — take first wavelength's index
-                        # indices: list[RefractiveIndex], each has .index (float)
                         if mat_data.indices:
                             entry["refractive_index"] = _extract_value(mat_data.indices[0].index, 0.0)
 
-                        # Surface power (in air preferred)
-                        # SurfacePowers always has .in_air and .as_situated
-                        # SurfacePower.power is dict[TupleKey, float] | None
                         power_src = data.surface_powers.in_air
                         if power_src.power is not None:
                             for v in power_src.power.values():
@@ -485,37 +375,7 @@ class GeometryMixin:
         data: str = "TangentialCurvature",
         remove: str = "None_",
     ) -> dict[str, Any]:
-        """
-        Get surface curvature map using ZosPy's Curvature analysis.
-
-        This is a "dumb executor" - returns raw numpy array data only.
-        Curvature map image rendering happens on Mac side.
-
-        Note: System must be pre-loaded via load_zmx_file().
-
-        Args:
-            surface: Surface number to analyze (1-indexed)
-            sampling: Grid sampling resolution (e.g., '65x65', '129x129')
-            show_as: Display format ('Surface', 'Contour', 'GreyScale', etc.)
-            data: Curvature data type ('TangentialCurvature', 'SagittalCurvature',
-                  'X_Curvature', 'Y_Curvature')
-            remove: Removal option ('None_', 'BaseROC', 'BestFitSphere')
-
-        Returns:
-            On success: {
-                "success": True,
-                "image": str (base64 numpy array),
-                "image_format": "numpy_array",
-                "array_shape": [h, w],
-                "array_dtype": str,
-                "min_curvature": float,
-                "max_curvature": float,
-                "mean_curvature": float,
-                "surface_number": int,
-                "data_type": str,
-            }
-            On error: {"success": False, "error": "..."}
-        """
+        """Get surface curvature map as a raw numpy array via ZosPy's Curvature analysis."""
         try:
             # Validate surface number
             num_surfaces = self.oss.LDE.NumberOfSurfaces

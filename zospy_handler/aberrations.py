@@ -102,6 +102,70 @@ def _parse_zernike_full_text(text: str) -> dict:
     return result
 
 
+def _parse_zernike_vs_field_text(text: str) -> list[dict]:
+    """Parse ZernikeCoefficientsVsField tab-delimited text output.
+
+    The OpticStudio text format has a header row followed by data rows:
+        Field: \t  1\t  2\t  3\t ...
+        0.0000E+00\t -7.1044E-01\t  0.0000E+00\t ...
+        2.8000E+00\t -6.6992E-01\t  0.0000E+00\t ...
+
+    Returns a list of dicts, each with "field" key and Zernike term keys
+    (e.g., "Z1", "Z2", ...).
+    """
+    rows: list[dict] = []
+    lines = text.splitlines()
+    term_numbers: list[int] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Header line: "Field: \t 1\t 2\t ..."
+        if stripped.lower().startswith("field:") or stripped.lower().startswith("field\t"):
+            parts = stripped.split("\t")
+            for p in parts[1:]:
+                p = p.strip()
+                if p:
+                    try:
+                        term_numbers.append(int(p))
+                    except ValueError:
+                        pass
+            if term_numbers:
+                logger.debug(f"_parse_zernike_vs_field_text: found {len(term_numbers)} terms in header")
+            continue
+
+        # Data rows: first column is field value, rest are Zernike coefficients
+        if not term_numbers:
+            continue
+
+        parts = stripped.split("\t")
+        if len(parts) < 2:
+            continue
+
+        try:
+            field_val = float(parts[0].strip())
+        except (ValueError, TypeError):
+            continue
+
+        row: dict = {"field": field_val}
+        for i, p in enumerate(parts[1:]):
+            p = p.strip()
+            if not p or i >= len(term_numbers):
+                continue
+            try:
+                row[f"Z{term_numbers[i]}"] = float(p)
+            except (ValueError, TypeError):
+                pass
+
+        if len(row) > 1:  # Must have at least field + one coefficient
+            rows.append(row)
+
+    logger.debug(f"_parse_zernike_vs_field_text: parsed {len(rows)} data rows")
+    return rows
+
+
 _ANGULAR_FIELD_TYPES = {"Angle", "TheodoliteAngle"}
 
 
@@ -566,8 +630,17 @@ class AberrationsMixin:
                             logger.info(f"RmsField series {si}: {num_points} points, {num_curves} curves, labels={labels}")
 
                             for ci in range(num_curves):
-                                label = str(labels[ci]).lower() if ci < len(labels) else ""
-                                is_diffraction = "diffrac" in label or "limit" in label
+                                raw_label = labels[ci] if ci < len(labels) else None
+                                label = str(raw_label).lower() if raw_label is not None else ""
+                                # Diffraction limit curve is identified by label text OR by
+                                # being the last curve with a None/empty label when
+                                # ShowDiffractionLimit is True (ZOS-API returns null label
+                                # for the diffraction limit series).
+                                is_diffraction = (
+                                    "diffrac" in label
+                                    or "limit" in label
+                                    or (raw_label is None and ci == num_curves - 1)
+                                )
 
                                 curve_points = []
                                 for pi in range(num_points):
@@ -576,7 +649,7 @@ class AberrationsMixin:
                                     y_val = float(y_raw[pi, ci])
                                     curve_points.append({
                                         "field_value": x_val,
-                                        "rms_radius_um": y_val * 1000,  # mm → µm
+                                        "rms_radius_um": y_val,  # API already returns µm
                                     })
 
                                 logger.info(f"RmsField series {si} curve {ci}: label='{label}', {len(curve_points)} points, is_diffraction={is_diffraction}")
@@ -619,11 +692,12 @@ class AberrationsMixin:
         """
         Run ZernikeCoefficientsVsField via the ZOS-API.
 
-        Extracts data from either data series (graph-type) or data grids,
-        and returns a DataFrame with field positions as the index and
-        Zernike terms as columns.
+        ZernikeCoefficientsVsField returns text-only output (no data series
+        or data grids). This method exports the text via GetTextFile and
+        parses the tab-delimited table.
 
-        Returns None if no data could be extracted.
+        Returns a DataFrame with field positions as the index and
+        Zernike term columns, or None if no data could be extracted.
         """
         import pandas as pd
 
@@ -631,6 +705,7 @@ class AberrationsMixin:
         analysis = self._zp.analyses.new_analysis(
             self.oss, idm.ZernikeCoefficientsVsField, settings_first=True,
         )
+        temp_path = os.path.join(tempfile.gettempdir(), "zospy_zernike_vs_field.txt")
         try:
             settings = analysis.Settings
             # IAS_ZernikeCoefficientsVsField uses Coefficients (comma-separated string),
@@ -646,71 +721,26 @@ class AberrationsMixin:
                 elapsed_ms = (time.perf_counter() - zernike_start) * 1000
                 log_timing(logger, "ZernikeCoefficientsVsField.run", elapsed_ms)
 
-            results = analysis.Results
-            rows = self._extract_zernike_vs_field_rows(results)
-            if not rows:
+            # ZernikeCoefficientsVsField produces text-only output (NumberOfDataSeries
+            # and NumberOfDataGrids are both 0). Parse the tab-delimited text output.
+            analysis.Results.GetTextFile(temp_path)
+            if not os.path.exists(temp_path):
+                logger.warning("ZernikeCoefficientsVsField: GetTextFile produced no output")
                 return None
+
+            text = self._read_opticstudio_text_file(temp_path)
+            if not text:
+                logger.warning("ZernikeCoefficientsVsField: text output is empty")
+                return None
+
+            rows = _parse_zernike_vs_field_text(text)
+            if not rows:
+                logger.warning("ZernikeCoefficientsVsField: no data rows parsed from text")
+                return None
+
             return pd.DataFrame(rows).set_index("field")
         finally:
-            self._cleanup_analysis(analysis)
-
-    def _extract_zernike_vs_field_rows(self, results: Any) -> list[dict]:
-        """
-        Extract row dicts from ZOS-API analysis results for ZernikeVsField.
-
-        Tries data series first (graph-type result), then data grids.
-        Each row dict has a "field" key plus Zernike term keys.
-        """
-        if results is None:
-            return []
-
-        # Try data series extraction via XData.Data/YData.Data
-        rows: list[dict] = []
-        num_series = results.NumberOfDataSeries
-        if num_series > 0:
-            logger.info(f"ZernikeVsField: {num_series} data series")
-            for si in range(num_series):
-                series = results.GetDataSeries(si)
-                if series is None:
-                    continue
-                desc = str(series.Description) or f"Z{si+1}"
-                try:
-                    x_raw = series.XData.Data
-                    y_raw = series.YData.Data
-                    n_pts = x_raw.GetLength(0)
-                    n_y_rows = y_raw.GetLength(0)  # Rows = data points
-                    n_pts = min(n_pts, n_y_rows)
-                    for pi in range(n_pts):
-                        x = float(x_raw[pi])
-                        y = float(y_raw[pi, 0])
-                        if pi >= len(rows):
-                            rows.append({"field": x})
-                        rows[pi][desc] = y
-                except Exception as e:
-                    logger.debug(f"ZernikeVsField: series {si} extraction failed: {e}")
-
-        # If no data series, try data grids
-        if not rows and hasattr(results, 'NumberOfDataGrids'):
-            num_grids = results.NumberOfDataGrids
-            logger.info(f"ZernikeVsField: {num_grids} data grids (no series)")
-            for gi in range(num_grids):
-                grid = results.GetDataGrid(gi)
-                if grid is None:
-                    continue
-                n_rows = getattr(grid, 'Ny', 0)
-                n_cols = getattr(grid, 'Nx', 0)
-                for ri in range(n_rows):
-                    row_data = {}
-                    for ci in range(n_cols):
-                        val = _extract_value(grid.Z(ri, ci))
-                        if ci == 0:
-                            row_data["field"] = val
-                        else:
-                            row_data[f"Z{ci}"] = val
-                    if row_data:
-                        rows.append(row_data)
-
-        return rows
+            self._cleanup_analysis(analysis, temp_path)
 
     def get_zernike_vs_field(
         self,

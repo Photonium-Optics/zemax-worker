@@ -27,9 +27,7 @@ from utils.timing import log_timing
 from config import (
     _RAW_LOG_MAX_CHARS, _ARRAY_SUMMARY_FIELDS, _ARRAY_SUMMARY_MAX,
     _BINARY_FIELDS, _TEXT_TRUNCATE_FIELDS,
-    DEFAULT_NUM_CROSS_SECTION_RAYS,
-    CROSS_SECTION_IMAGE_SIZE, CROSS_SECTION_TEMP_FILENAME, SEIDEL_TEMP_FILENAME,
-    MIN_IMAGE_EXPORT_VERSION, FNO_APERTURE_TYPES,
+    FNO_APERTURE_TYPES,
 )
 
 # Configure module logger
@@ -207,20 +205,7 @@ def is_zospy_available() -> bool:
 
 
 def _extract_value(obj: Any, default: float | None = 0.0, allow_inf: bool = False) -> float | None:
-    """
-    Extract a numeric value from various ZosPy types.
-
-    ZosPy 2.x returns UnitField objects for many values instead of plain floats.
-    This helper handles both UnitField and plain numeric types.
-
-    Args:
-        obj: Value to extract (UnitField, float, int, etc.)
-        default: Default value if extraction fails (None allowed for "no value" semantics)
-        allow_inf: If True, allow Infinity through (e.g. flat surface radius)
-
-    Returns:
-        Float value extracted from the object, or default if extraction fails
-    """
+    """Extract a numeric value from a ZosPy UnitField or plain numeric type."""
     if obj is None:
         return default
 
@@ -378,12 +363,7 @@ class ZosPyHandlerBase:
             raise ZosPyError(f"Failed to initialize ZosPy: {e}")
 
     def close(self) -> None:
-        """
-        Close the connection to OpticStudio.
-
-        This should be called during application shutdown to cleanly
-        disconnect from the OpticStudio COM server.
-        """
+        """Close the connection to OpticStudio."""
         try:
             if hasattr(self, 'zos') and self.zos:
                 self.zos.disconnect()
@@ -391,28 +371,14 @@ class ZosPyHandlerBase:
             logger.warning(f"Error closing ZosPy connection: {e}")
 
     def get_version(self) -> str:
-        """
-        Get OpticStudio version string.
-
-        Returns:
-            Version string (e.g., "25.1.0") or "Unknown" if unavailable.
-        """
+        """Get OpticStudio version string, or 'Unknown' if unavailable."""
         try:
-            # ZosPy exposes version through the application object
-            return str(self.oss.Application.ZemaxVersion) if self.oss else "Unknown"
+            return str(self.oss.TheApplication.OpticStudioVersion) if self.oss else "Unknown"
         except Exception:
             return "Unknown"
 
     def get_status(self) -> dict[str, Any]:
-        """
-        Get current connection status.
-
-        Returns:
-            Dict with keys:
-                - connected: bool - Whether OpticStudio is connected
-                - opticstudio_version: str - OpticStudio version
-                - zospy_version: str - ZosPy library version
-        """
+        """Get current connection status (connected, versions)."""
         try:
             zospy_version = self._zp.__version__
         except Exception:
@@ -454,20 +420,7 @@ class ZosPyHandlerBase:
         return wavelengths, primary_idx
 
     def load_zmx_file(self, file_path: str) -> dict[str, Any]:
-        """
-        Load an optical system from a .zmx file directly into OpticStudio.
-
-        After loading, validates that OpticStudio parsed all wavelengths from
-        the ZMX file. If wavelengths are missing (common with generated ZMX
-        files due to keyword ordering sensitivity), programmatically sets them
-        via the API.
-
-        Args:
-            file_path: Absolute path to the .zmx file
-
-        Returns:
-            Dict with load status and system info
-        """
+        """Load an optical system from a .zmx file, recovering wavelengths if needed."""
         if not os.path.exists(file_path):
             raise ZosPyError(f"ZMX file not found: {file_path}")
 
@@ -506,11 +459,7 @@ class ZosPyHandlerBase:
         expected: list[tuple[int, float, float]],
         expected_pwav: int,
     ) -> None:
-        """
-        Check loaded wavelengths against expected WAVM data and fix if needed.
-
-        Logs the final wavelength state for diagnostics.
-        """
+        """Check loaded wavelengths against expected WAVM data and fix if needed."""
         wls = self.oss.SystemData.Wavelengths
         n_wl = int(wls.NumberOfWavelengths)
         logger.info(f"load_zmx_file: OpticStudio loaded {n_wl} wavelength(s)")
@@ -542,19 +491,7 @@ class ZosPyHandlerBase:
             logger.info(f"load_zmx_file: Primary wavelength = #{primary_idx}/{n_wl}")
 
     def _set_wavelengths_from_wavm(self, wavm_list: list[tuple[int, float, float]], pwav_idx: int) -> None:
-        """
-        Programmatically set wavelengths in OpticStudio from parsed WAVM data.
-
-        Follows the ZOS-API pattern:
-          - GetWavelength(n) to overwrite existing slots
-          - AddWavelength(um, weight) for slots beyond current count
-          - RemoveWavelength to trim excess slots
-          - MakePrimary() on the designated primary
-
-        Args:
-            wavm_list: List of (slot, wavelength_um, weight) tuples
-            pwav_idx: 1-based index of the primary wavelength
-        """
+        """Programmatically set wavelengths in OpticStudio from parsed WAVM data."""
         wls = self.oss.SystemData.Wavelengths
         sorted_wavm = sorted(wavm_list, key=lambda x: x[0])
         target_count = len(sorted_wavm)
@@ -597,12 +534,7 @@ class ZosPyHandlerBase:
             logger.info(f"_set_wavelengths: Primary = #{pwav_idx}")
 
     def _get_efl(self) -> Optional[float]:
-        """
-        Get effective focal length via ZOS-API GetOperandValue (read-only, no MFE modification).
-
-        Returns:
-            Effective focal length in mm, or None if calculation fails.
-        """
+        """Get effective focal length via the EFFL merit operand."""
         try:
             effl_type = self._zp.constants.Editors.MFE.MeritOperandType.EFFL
             efl = float(self.oss.MFE.GetOperandValue(effl_type, 0, 0, 0, 0, 0, 0, 0, 0))
@@ -614,13 +546,7 @@ class ZosPyHandlerBase:
             return None
 
     def _get_bfl(self) -> Optional[float]:
-        """
-        Get back focal length using TTHI operand (total thickness from last
-        optical surface to image plane).
-
-        Returns:
-            Back focal length in lens units, or None if calculation fails.
-        """
+        """Get back focal length via the TTHI operand (last surface to image plane)."""
         try:
             num_surfaces = self.oss.LDE.NumberOfSurfaces
             image_surf = num_surfaces - 1
@@ -639,12 +565,7 @@ class ZosPyHandlerBase:
             return None
 
     def _save_modified_system(self) -> str:
-        """Save the current OpticStudio system to a temp ZMX file and return base64 content.
-
-        Used after any operation that modifies the LDE (optimization, scale, quick-focus)
-        so the caller can round-trip back to canonical LLM JSON via zmxToLlm.
-        """
-        # Log which wavelength OpticStudio considers primary before saving
+        """Save the current system to a temp ZMX file and return base64-encoded content."""
         try:
             wls = self.oss.SystemData.Wavelengths
             n_wl = int(wls.NumberOfWavelengths)
@@ -688,15 +609,7 @@ class ZosPyHandlerBase:
             return None
 
     def _check_analysis_errors(self, analysis: Any) -> Optional[str]:
-        """
-        Check if an OpticStudio analysis has error messages.
-
-        Args:
-            analysis: OpticStudio analysis object
-
-        Returns:
-            Error message string if errors found, None otherwise
-        """
+        """Return the first error message from an analysis, or None."""
         if hasattr(analysis, 'messages') and analysis.messages:
             for msg in analysis.messages:
                 if hasattr(msg, 'Message') and 'cannot' in str(msg.Message).lower():
@@ -704,17 +617,7 @@ class ZosPyHandlerBase:
         return None
 
     def _read_opticstudio_text_file(self, file_path: str) -> str:
-        """
-        Read a text file exported by OpticStudio.
-
-        OpticStudio exports text files in UTF-16 encoding.
-
-        Args:
-            file_path: Path to the text file
-
-        Returns:
-            File content as string, or empty string if read fails
-        """
+        """Read a UTF-16 text file exported by OpticStudio."""
         try:
             with open(file_path, 'r', encoding='utf-16') as f:
                 return f.read().strip()
@@ -723,13 +626,7 @@ class ZosPyHandlerBase:
             return ""
 
     def _cleanup_analysis(self, analysis: Any, temp_path: Optional[str] = None) -> None:
-        """
-        Clean up an OpticStudio analysis and its temporary files.
-
-        Args:
-            analysis: OpticStudio analysis object to close
-            temp_path: Optional temp file path to delete
-        """
+        """Close an analysis and remove its temporary file."""
         if analysis is not None:
             try:
                 analysis.Close()
@@ -744,13 +641,7 @@ class ZosPyHandlerBase:
 
     @staticmethod
     def _extract_data_grid(grid) -> Optional[np.ndarray]:
-        """Extract a 2D data grid from an OpticStudio analysis result.
-
-        IAR_DataGrid.Values is the documented primary access method (double[,]).
-        Two tiers:
-          1. np.asarray — zero-copy if pythonnet supports buffer protocol
-          2. List comprehension from Values — handles pythonnet compat issues
-        """
+        """Extract a 2D numpy array from an IAR_DataGrid.Values double[,] grid."""
         try:
             raw_values = grid.Values
             ny = raw_values.GetLength(0)
@@ -759,7 +650,6 @@ class ZosPyHandlerBase:
                 logger.warning(f"_extract_data_grid: empty grid ({nx}x{ny})")
                 return None
 
-            # Tier 1: direct numpy conversion (zero-copy if supported)
             try:
                 arr = np.asarray(raw_values, dtype=np.float64)
                 if arr.shape == (ny, nx):
@@ -767,7 +657,6 @@ class ZosPyHandlerBase:
             except Exception as e:
                 logger.debug(f"_extract_data_grid: np.asarray failed, using list comprehension: {e}")
 
-            # Tier 2: list comprehension → single numpy call
             arr = np.array(
                 [[raw_values[yi, xi] for xi in range(nx)] for yi in range(ny)],
                 dtype=np.float64,
@@ -778,17 +667,12 @@ class ZosPyHandlerBase:
             return None
 
     def _extract_grid_with_metadata(self, grid) -> Optional[GridWithMetadata]:
-        """Extract data grid with spatial metadata from a ZOS-API IGrid object.
-
-        Reads MinX/MinY/Dx/Dy properties from the IAR_DataGrid interface.
-        MaxX/MaxY are NOT on IAR_DataGrid, so we compute them from Min + (N-1)*D.
-        """
+        """Extract data grid with spatial extent metadata from an IAR_DataGrid."""
         data = self._extract_data_grid(grid)
         if data is None:
             return None
         meta = GridWithMetadata(data=data)
         try:
-            # IAR_DataGrid guarantees MinX, MinY, Dx, Dy as double properties
             meta.min_x = float(grid.MinX)
             meta.min_y = float(grid.MinY)
             meta.dx = float(grid.Dx)
@@ -904,7 +788,7 @@ class ZosPyHandlerBase:
             epd = _extract_value(aperture.ApertureValue)
             efl = self._get_efl()
             if epd and efl and epd > 0:
-                return efl / epd
+                return abs(efl) / epd
 
         except Exception as e:
             logger.debug(f"Could not get f-number from aperture: {e}")

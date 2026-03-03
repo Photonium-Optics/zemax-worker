@@ -140,14 +140,7 @@ class PerformanceMixin:
         results,
         fi: int,
     ) -> tuple[list[float], list[float], list[float]]:
-        """Extract tangential, sagittal, and focus data from Through Focus MTF results.
-
-        Through Focus MTF series use single-column YData accessed via GetValueAt,
-        unlike standard MTF which uses 2D bulk extraction. Each series has a
-        description classifiable as tangential or sagittal.
-
-        Returns (tangential, sagittal, focus_data).
-        """
+        """Extract tangential, sagittal, and focus data from Through Focus MTF results."""
         tangential: list[float] = []
         sagittal: list[float] = []
         focus_data: list[float] = []
@@ -161,19 +154,20 @@ class PerformanceMixin:
                 if series is None:
                     continue
 
-                desc = str(series.Description)
-                desc_lower = desc.lower()
-                x_raw = series.XData.Data
-                series_x = [float(v) for v in x_raw]
-                n_points = len(series_x)
-                logger.debug(f"TF-MTF field {fi} series {si}: desc='{desc}', points={n_points}")
+                desc_lower = str(series.Description).lower()
+                series_x, series_y, series_sag = self._extract_mtf_series(series)
 
-                if series.NumSeries <= 0:
-                    logger.warning(f"TF-MTF field {fi} series {si}: NumSeries=0, skipping")
+                # Multi-column: _extract_mtf_series returns both tang and sag
+                if series_sag:
+                    if not tangential:
+                        tangential = series_y
+                    if not sagittal:
+                        sagittal = series_sag
+                    if not focus_data:
+                        focus_data = series_x
                     continue
 
-                series_y = [float(series.YData.GetValueAt(row, 0)) for row in range(n_points)]
-
+                # Single-column: classify by description
                 category = self._classify_mtf_series(desc_lower)
                 if category == "tangential" and not tangential:
                     tangential = series_y

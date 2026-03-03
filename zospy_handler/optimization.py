@@ -787,7 +787,7 @@ class OptimizationMixin:
                 timeout = max(10, min(timeout_seconds or 60, 600))
 
                 try:
-                    opt_tool.RunAndWaitWithTimeout(timeout)
+                    opt_tool.RunAndWaitWithTimeout(int(timeout))
                     opt_tool.Cancel()
                     opt_tool.WaitForCompletion()
                 finally:

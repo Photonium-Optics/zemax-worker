@@ -267,21 +267,17 @@ class PhysicalOpticsMixin:
                     _try_set(settings, "YWidth", y_width)
 
                     # Surface range
-                    if hasattr(settings, "StartSurface"):
-                        try:
-                            settings.StartSurface.SetSurfaceNumber(start_surface)
-                        except Exception as e:
-                            logger.warning(f"POP: Could not set StartSurface={start_surface}: {e}")
-                    if hasattr(settings, "EndSurface"):
-                        try:
-                            if isinstance(end_surface, int):
-                                settings.EndSurface.SetSurfaceNumber(end_surface)
-                            else:
-                                # IAS_Surface.UseImageSurface() is the documented way
-                                # to set end surface to the image plane
-                                settings.EndSurface.UseImageSurface()
-                        except Exception as e:
-                            logger.warning(f"POP: Could not set EndSurface={end_surface}: {e}")
+                    try:
+                        settings.StartSurface.SetSurfaceNumber(start_surface)
+                    except Exception as e:
+                        logger.warning(f"POP: Could not set StartSurface={start_surface}: {e}")
+                    try:
+                        if isinstance(end_surface, int):
+                            settings.EndSurface.SetSurfaceNumber(end_surface)
+                        else:
+                            settings.EndSurface.UseImageSurface()
+                    except Exception as e:
+                        logger.warning(f"POP: Could not set EndSurface={end_surface}: {e}")
 
                     # Beam type (resolve from enum constants)
                     try:

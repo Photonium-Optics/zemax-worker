@@ -7,7 +7,7 @@ class GeometricImageRequest(BaseModel):
     zmx_content: str = Field(description="Base64-encoded .zmx file content")
     field_size: float = Field(default=0.0, ge=0, description="Image width in field coordinates (0 = auto)")
     image_size: float = Field(default=50.0, gt=0, description="Detector size in lens units")
-    rays_x_1000: int = Field(default=10, ge=1, le=100, description="Approximate ray count in thousands")
+    rays_x_1000: int = Field(default=10, ge=2, le=100, description="Approximate ray count in thousands")
     number_of_pixels: int = Field(default=100, ge=10, le=1000, description="Pixels across image width")
     field: int = Field(default=1, ge=1, description="Field number (1-indexed)")
     wavelength: str | int = Field(default="All", description="Wavelength: 'All' or wavelength number")
