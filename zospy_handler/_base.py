@@ -48,19 +48,6 @@ class GridWithMetadata:
     dx: Optional[float] = None
     dy: Optional[float] = None
 
-    @property
-    def extent_x(self) -> Optional[float]:
-        """Total grid extent in X (MaxX - MinX), or None if bounds are unavailable."""
-        if self.min_x is not None and self.max_x is not None:
-            return self.max_x - self.min_x
-        return None
-
-    @property
-    def extent_y(self) -> Optional[float]:
-        """Total grid extent in Y (MaxY - MinY), or None if bounds are unavailable."""
-        if self.min_y is not None and self.max_y is not None:
-            return self.max_y - self.min_y
-        return None
 
 
 def _summarize_value(key: str, value: Any) -> Any:
@@ -641,7 +628,12 @@ class ZosPyHandlerBase:
 
     @staticmethod
     def _extract_data_grid(grid) -> Optional[np.ndarray]:
-        """Extract a 2D numpy array from an IAR_DataGrid.Values double[,] grid."""
+        """Extract a 2D numpy array from an IAR_DataGrid.Values double[,] grid.
+
+        Two tiers:
+          1. np.asarray -- zero-copy if pythonnet supports buffer protocol
+          2. List comprehension from Values -- handles pythonnet compat issues
+        """
         try:
             raw_values = grid.Values
             ny = raw_values.GetLength(0)
@@ -650,6 +642,7 @@ class ZosPyHandlerBase:
                 logger.warning(f"_extract_data_grid: empty grid ({nx}x{ny})")
                 return None
 
+            # Tier 1: direct numpy conversion (zero-copy if supported)
             try:
                 arr = np.asarray(raw_values, dtype=np.float64)
                 if arr.shape == (ny, nx):
@@ -657,6 +650,7 @@ class ZosPyHandlerBase:
             except Exception as e:
                 logger.debug(f"_extract_data_grid: np.asarray failed, using list comprehension: {e}")
 
+            # Tier 2: list comprehension fallback
             arr = np.array(
                 [[raw_values[yi, xi] for xi in range(nx)] for yi in range(ny)],
                 dtype=np.float64,
@@ -673,6 +667,7 @@ class ZosPyHandlerBase:
             return None
         meta = GridWithMetadata(data=data)
         try:
+            # IAR_DataGrid guarantees MinX, MinY, Dx, Dy as double properties
             meta.min_x = float(grid.MinX)
             meta.min_y = float(grid.MinY)
             meta.dx = float(grid.Dx)

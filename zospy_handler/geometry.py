@@ -245,6 +245,8 @@ class GeometryMixin:
         for i in range(1, lde.NumberOfSurfaces):
             surface = lde.GetSurfaceAt(i)
 
+            # Radius of 0 in Zemax means infinity (flat surface);
+            # convert to None for client-side rendering.
             radius = _extract_value(surface.Radius)
             thickness = _extract_value(surface.Thickness)
             semi_diameter = _extract_value(surface.SemiDiameter)

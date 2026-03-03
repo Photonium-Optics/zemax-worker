@@ -151,7 +151,7 @@ class RayTracingMixin:
 
         except Exception as e:
             logger.error(f"BatchRayTrace FAILED: {type(e).__name__}: {e}", exc_info=True)
-            raw_rays = []  # discard partial results on failure
+            raise
         finally:
             if batch_trace is not None:
                 try:

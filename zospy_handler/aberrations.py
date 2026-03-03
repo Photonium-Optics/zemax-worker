@@ -360,7 +360,7 @@ class AberrationsMixin:
                             for dbg_line in text.splitlines():
                                 ls = dbg_line.strip()
                                 if ls and not ls.startswith('Z '):
-                                    logger.info(f"ZernikeText line: {ls!r}")
+                                    logger.debug(f"ZernikeText line: {ls!r}")
                             metrics = _parse_zernike_full_text(text)
                             rms_waves = metrics["rms_to_chief"]
                             strehl_ratio = metrics["strehl_ratio"]
