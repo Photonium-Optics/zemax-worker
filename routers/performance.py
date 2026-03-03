@@ -1,4 +1,4 @@
-"""Performance router – spot diagram, MTF, PSF, ray fan."""
+"""Performance router – MTF, PSF, ray fan, standard spot metrics."""
 
 import logging
 
@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends
 import main
 from models import (
     StandardSpotMetricsRequest, StandardSpotMetricsResponse,
-    SpotDiagramRequest, SpotFieldData, SpotRayPoint, SpotRayData, SpotDiagramResponse,
+    SpotFieldData,
     MTFRequest, MTFResponse,
     HuygensMTFRequest,
     ThroughFocusMTFRequest, ThroughFocusMTFResponse,
@@ -22,82 +22,6 @@ from models import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-@router.post("/spot-diagram", response_model=SpotDiagramResponse)
-async def get_spot_diagram(
-    request: SpotDiagramRequest,
-    _: None = Depends(main.verify_api_key),
-) -> SpotDiagramResponse:
-    """
-    Generate spot diagram using ZosPy's StandardSpot analysis for metrics
-    and batch ray tracing for raw ray positions.
-
-    ZOSAPI's StandardSpot does NOT support image export. The response includes:
-    - spot_data: Per-field metrics (RMS, GEO radius, centroid) from StandardSpot
-    - spot_rays: Raw ray X,Y positions from batch ray tracing for Mac-side rendering
-
-    This is a "dumb executor" endpoint - Mac side renders the spot diagram from spot_rays.
-    """
-    def _build_spot_response(result: dict) -> SpotDiagramResponse:
-        if not result.get("success", False):
-            logger.warning(f"[SPOT] Handler failure: {result.get('error')}")
-            return SpotDiagramResponse(
-                success=False,
-                error=result.get("error", "Spot diagram analysis failed"),
-            )
-
-        spot_data = None
-        if result.get("spot_data"):
-            spot_data = [SpotFieldData(**sd) for sd in result["spot_data"]]
-
-        # Convert spot_rays dicts to SpotRayData models
-        spot_rays = None
-        total_rays = 0
-        if result.get("spot_rays"):
-            spot_rays = []
-            for ray_data in result["spot_rays"]:
-                rays = [SpotRayPoint(x=r["x"], y=r["y"]) for r in ray_data.get("rays", [])]
-                spot_rays.append(SpotRayData(
-                    field_index=ray_data["field_index"],
-                    field_x=ray_data["field_x"],
-                    field_y=ray_data["field_y"],
-                    wavelength_index=ray_data["wavelength_index"],
-                    wavelength_um=ray_data.get("wavelength_um", 0.0),
-                    rays=rays,
-                ))
-            total_rays = sum(len(sr.rays) for sr in spot_rays)
-
-        logger.info(
-            f"[SPOT] Response: spot_data={len(spot_data) if spot_data else 0}, "
-            f"spot_rays={len(spot_rays) if spot_rays else 0}, "
-            f"total_rays={total_rays}, airy_radius={result.get('airy_radius')}"
-        )
-
-        return SpotDiagramResponse(
-            success=True,
-            image=result.get("image"),
-            image_format=result.get("image_format"),
-            array_shape=result.get("array_shape"),
-            array_dtype=result.get("array_dtype"),
-            spot_data=spot_data,
-            spot_rays=spot_rays,
-            airy_radius=result.get("airy_radius"),
-            wavelength_info=result.get("wavelength_info"),
-            num_fields=result.get("num_fields"),
-            num_wavelengths=result.get("num_wavelengths"),
-        )
-
-    return await main._run_endpoint(
-        "/spot-diagram", SpotDiagramResponse, request,
-        lambda: main.zospy_handler.get_spot_diagram(
-            ray_density=request.ray_density,
-            reference=request.reference,
-            field_index=request.field_index,
-            wavelength_index=request.wavelength_index,
-        ),
-        build_response=_build_spot_response,
-    )
 
 
 @router.post("/standard-spot-metrics", response_model=StandardSpotMetricsResponse)

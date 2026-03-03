@@ -1,14 +1,5 @@
-from typing import Any, Optional
+from typing import Optional
 from pydantic import BaseModel, Field
-
-
-class SpotDiagramRequest(BaseModel):
-    """Spot diagram analysis request."""
-    zmx_content: str = Field(description="Base64-encoded .zmx file content")
-    ray_density: int = Field(default=20, ge=5, le=200, description="Ray density for pupil sampling")
-    reference: str = Field(default="centroid", description="Reference point: 'chief_ray' or 'centroid'")
-    field_index: Optional[int] = Field(default=None, ge=1, description="Field index (1-indexed). None = all fields.")
-    wavelength_index: Optional[int] = Field(default=None, ge=1, description="Wavelength index (1-indexed). None = all wavelengths.")
 
 
 class SpotFieldData(BaseModel):
@@ -21,43 +12,6 @@ class SpotFieldData(BaseModel):
     centroid_x: Optional[float] = Field(default=None, description="Centroid X coordinate on image plane")
     centroid_y: Optional[float] = Field(default=None, description="Centroid Y coordinate on image plane")
     num_rays: Optional[int] = Field(default=None, description="Number of rays traced for this field")
-
-
-class SpotRayPoint(BaseModel):
-    """A single ray hit point on the image plane."""
-    x: float = Field(description="X coordinate on image plane")
-    y: float = Field(description="Y coordinate on image plane")
-
-
-class SpotRayData(BaseModel):
-    """Raw ray data for a single field/wavelength combination."""
-    field_index: int = Field(description="0-based field index")
-    field_x: float = Field(description="Field X coordinate")
-    field_y: float = Field(description="Field Y coordinate")
-    wavelength_index: int = Field(description="0-based wavelength index")
-    wavelength_um: float = Field(default=0.0, description="Wavelength in micrometers")
-    rays: list[SpotRayPoint] = Field(default_factory=list, description="Ray hit points on image plane")
-
-
-class SpotDiagramResponse(BaseModel):
-    """
-    Spot diagram analysis response.
-
-    Returns spot metrics (RMS, GEO radius) and raw ray data for Mac-side rendering.
-    ZOSAPI's StandardSpot does NOT support image export - use spot_rays for rendering.
-    """
-    success: bool = Field(description="Whether the operation succeeded")
-    image: Optional[str] = Field(default=None, description="Always None - ZOSAPI StandardSpot doesn't support image export")
-    image_format: Optional[str] = Field(default=None, description="Always None")
-    array_shape: Optional[list[int]] = Field(default=None, description="Always None")
-    array_dtype: Optional[str] = Field(default=None, description="Always None")
-    spot_data: Optional[list[SpotFieldData]] = Field(default=None, description="Per-field spot metrics (RMS, GEO radius, centroid)")
-    spot_rays: Optional[list[SpotRayData]] = Field(default=None, description="Raw ray X,Y positions for Mac-side rendering")
-    airy_radius: Optional[float] = Field(default=None, description="Airy disk radius in lens units")
-    wavelength_info: Optional[list[dict]] = Field(default=None, description="Wavelength info [{index, um}, ...]")
-    num_fields: Optional[int] = Field(default=None, description="Number of fields in the system")
-    num_wavelengths: Optional[int] = Field(default=None, description="Number of wavelengths in the system")
-    error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 
 class StandardSpotMetricsRequest(BaseModel):
