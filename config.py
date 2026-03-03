@@ -50,7 +50,7 @@ FIELD_TYPE_MAP = {
 }
 
 # Image export settings
-CROSS_SECTION_IMAGE_SIZE = (1200, 800)
+CROSS_SECTION_IMAGE_SIZE = (960, 640)
 CROSS_SECTION_TEMP_FILENAME = "zemax_cross_section.png"
 SEIDEL_TEMP_FILENAME = "seidel_native.txt"
 
