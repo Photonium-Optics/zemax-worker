@@ -60,6 +60,22 @@ class SpotDiagramResponse(BaseModel):
     error: Optional[str] = Field(default=None, description="Error message if operation failed")
 
 
+class StandardSpotMetricsRequest(BaseModel):
+    """StandardSpot metrics-only request (no batch ray trace)."""
+    zmx_content: str = Field(description="Base64-encoded .zmx file content")
+    ray_density: int = Field(default=20, ge=5, le=200, description="Ray density for StandardSpot analysis")
+    reference: str = Field(default="centroid", description="Reference point: 'chief_ray' or 'centroid'")
+    field_index: Optional[int] = Field(default=None, ge=1, description="Field index (1-indexed). None = all fields.")
+    wavelength_index: Optional[int] = Field(default=None, ge=1, description="Wavelength index (1-indexed). None = all wavelengths.")
+
+
+class StandardSpotMetricsResponse(BaseModel):
+    """StandardSpot metrics-only response."""
+    success: bool = Field(description="Whether the operation succeeded")
+    spot_data: Optional[list[SpotFieldData]] = Field(default=None, description="Per-field spot metrics (RMS, GEO radius, centroid)")
+    error: Optional[str] = Field(default=None, description="Error message if operation failed")
+
+
 class MTFRequest(BaseModel):
     """MTF analysis request."""
     zmx_content: str = Field(description="Base64-encoded .zmx file content")

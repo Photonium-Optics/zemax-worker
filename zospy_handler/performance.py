@@ -384,14 +384,10 @@ class PerformanceMixin:
                 "weight": _extract_value(wl.Weight, 1.0),
             })
 
-        # Map reference parameter to OpticStudio Spot.Reference enum
-        refer_name = "ChiefRay" if reference == "chief_ray" else "Centroid"
         try:
-            reference_value = getattr(
-                self._zp.constants.Analysis.Settings.Spot.Reference, refer_name
-            )
-        except Exception as e:
-            return {"success": False, "error": f"Could not resolve Spot.Reference.{refer_name} (input: {reference!r}): {type(e).__name__}: {e}"}
+            reference_value = self._resolve_spot_reference(reference)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
 
         try:
             logger.info(f"[SPOT] Starting: ray_density={ray_density}, reference={reference}, num_fields={num_fields}, field_index={field_index}, wavelength_index={wavelength_index}")
@@ -467,6 +463,87 @@ class PerformanceMixin:
             return {"success": False, "error": f"StandardSpot analysis failed: {e}"}
         finally:
             self._cleanup_analysis(analysis, None)
+
+    def get_standard_spot_metrics(
+        self,
+        ray_density: int = 20,
+        reference: str = "centroid",
+        field_index: Optional[int] = None,
+        wavelength_index: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """
+        Run StandardSpot analysis for official ZOS-API RMS/GEO metrics only.
+
+        Unlike get_spot_diagram(), this does NOT run a batch ray trace for ray
+        positions. It only runs the StandardSpot analysis to extract official
+        RMS radius, GEO radius, and centroid per field.
+
+        Args:
+            ray_density: Controls StandardSpot ray density (default 20).
+            reference: Reference point: 'chief_ray' or 'centroid'
+            field_index: Field index (1-indexed). None = all fields.
+            wavelength_index: Wavelength index (1-indexed). None = all wavelengths.
+
+        Returns:
+            On success: {"success": True, "spot_data": [...]}
+            On error: {"success": False, "error": "..."}
+        """
+        analysis = None
+
+        fields = self.oss.SystemData.Fields
+        num_fields = fields.NumberOfFields
+
+        if num_fields == 0:
+            return {"success": False, "error": "System has no fields defined"}
+
+        try:
+            reference_value = self._resolve_spot_reference(reference)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+
+        try:
+            logger.info(f"[STDSPOT] Starting: ray_density={ray_density}, reference={reference}, field_index={field_index}, wavelength_index={wavelength_index}")
+
+            analysis = self._zp.analyses.new_analysis(
+                self.oss,
+                self._zp.constants.Analysis.AnalysisIDM.StandardSpot,
+                settings_first=True,
+            )
+
+            self._configure_spot_analysis(analysis.Settings, ray_density, reference_value, field_index, wavelength_index)
+            analysis.ApplyAndWaitForCompletion()
+
+            spot_data: list[dict[str, Any]] = []
+            if analysis.Results is not None:
+                spot_data = self._extract_spot_data_from_results(
+                    analysis.Results, fields, num_fields,
+                    field_index=field_index, wavelength_index=wavelength_index,
+                )
+                logger.info(f"[STDSPOT] Extracted {len(spot_data)} field entries")
+            else:
+                logger.warning("[STDSPOT] analysis.Results is None")
+
+            return {"success": True, "spot_data": spot_data}
+
+        except Exception as e:
+            logger.error(f"[STDSPOT] StandardSpot metrics FAILED: {type(e).__name__}: {e}", exc_info=True)
+            return {"success": False, "error": f"StandardSpot metrics failed: {e}"}
+        finally:
+            self._cleanup_analysis(analysis, None)
+
+    def _resolve_spot_reference(self, reference: str) -> Any:
+        """Resolve a reference string ('chief_ray' or 'centroid') to the ZOS-API enum value.
+
+        Raises:
+            ValueError: If the reference string cannot be resolved.
+        """
+        refer_name = "ChiefRay" if reference == "chief_ray" else "Centroid"
+        try:
+            return getattr(
+                self._zp.constants.Analysis.Settings.Spot.Reference, refer_name
+            )
+        except Exception as e:
+            raise ValueError(f"Could not resolve Spot.Reference.{refer_name}: {e}") from e
 
     def _configure_spot_analysis(
         self,

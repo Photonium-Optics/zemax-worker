@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 
 import main
 from models import (
+    StandardSpotMetricsRequest, StandardSpotMetricsResponse,
     SpotDiagramRequest, SpotFieldData, SpotRayPoint, SpotRayData, SpotDiagramResponse,
     MTFRequest, MTFResponse,
     HuygensMTFRequest,
@@ -96,6 +97,41 @@ async def get_spot_diagram(
             wavelength_index=request.wavelength_index,
         ),
         build_response=_build_spot_response,
+    )
+
+
+@router.post("/standard-spot-metrics", response_model=StandardSpotMetricsResponse)
+async def get_standard_spot_metrics(
+    request: StandardSpotMetricsRequest,
+    _: None = Depends(main.verify_api_key),
+) -> StandardSpotMetricsResponse:
+    """
+    Run StandardSpot analysis for official ZOS-API RMS/GEO metrics only.
+    No batch ray trace — metrics only.
+    """
+    def _build_response(result: dict) -> StandardSpotMetricsResponse:
+        if not result.get("success", False):
+            return StandardSpotMetricsResponse(
+                success=False,
+                error=result.get("error", "StandardSpot metrics failed"),
+            )
+        spot_data = None
+        if result.get("spot_data"):
+            spot_data = [SpotFieldData(**sd) for sd in result["spot_data"]]
+        return StandardSpotMetricsResponse(
+            success=True,
+            spot_data=spot_data,
+        )
+
+    return await main._run_endpoint(
+        "/standard-spot-metrics", StandardSpotMetricsResponse, request,
+        lambda: main.zospy_handler.get_standard_spot_metrics(
+            ray_density=request.ray_density,
+            reference=request.reference,
+            field_index=request.field_index,
+            wavelength_index=request.wavelength_index,
+        ),
+        build_response=_build_response,
     )
 
 
