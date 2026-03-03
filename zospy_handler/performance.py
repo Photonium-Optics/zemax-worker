@@ -1228,37 +1228,13 @@ class PerformanceMixin:
         field_index: int = 0,
         wavelength_index: int = 0,
     ) -> dict[str, Any]:
-        """
-        Get Through Focus Spot Diagram data by tracing spot rays at multiple
-        defocus positions.
-
-        Loops through focus positions by temporarily adjusting the image surface
-        thickness, then uses batch ray tracing at each position to collect raw
-        ray (x,y) data — the same approach the standard spot diagram uses.
-
-        Args:
-            delta_focus: Focus step size in mm.
-            number_of_steps: Steps in each direction from nominal (total = 2*steps+1).
-            ray_density: Rays per axis ((ray_density+1)^2 total per field/wavelength).
-            field_index: Field index (0 = all fields, 1+ = specific field, 1-indexed).
-            wavelength_index: Wavelength index (0 = all wavelengths, 1+ = specific, 1-indexed).
-
-        Returns:
-            {
-                "success": True,
-                "focus_positions": [...],
-                "fields": [{field_index, field_x, field_y, focus_spots: [{...}]}],
-                "airy_radius_um": float,
-                "wavelength_um": float,
-            }
-        """
+        """Get Through Focus Spot Diagram by batch ray tracing at multiple defocus positions."""
         try:
             fields = self.oss.SystemData.Fields
             num_fields = fields.NumberOfFields
             wavelengths = self.oss.SystemData.Wavelengths
             num_wavelengths = wavelengths.NumberOfWavelengths
 
-            # Determine which fields to trace
             if field_index == 0:
                 field_indices = list(range(1, num_fields + 1))
             else:
@@ -1266,7 +1242,6 @@ class PerformanceMixin:
                     return {"success": False, "error": f"Field index {field_index} out of range (max: {num_fields})"}
                 field_indices = [field_index]
 
-            # Determine which wavelengths to trace
             if wavelength_index == 0:
                 wl_indices = list(range(1, num_wavelengths + 1))
             else:
@@ -1274,21 +1249,17 @@ class PerformanceMixin:
                     return {"success": False, "error": f"Wavelength index {wavelength_index} out of range (max: {num_wavelengths})"}
                 wl_indices = [wavelength_index]
 
-            # Compute focus positions
             focus_positions = list(np.linspace(
                 -number_of_steps * delta_focus,
                 number_of_steps * delta_focus,
                 2 * number_of_steps + 1,
             ))
 
-            # Reuse shared primary wavelength + Airy radius helpers
             primary_wl_um = self._get_primary_wavelength_um() or DEFAULT_WAVELENGTH_UM
             airy_radius_um = self._extract_airy_radius(wavelength_index=wavelength_index)
 
-            # Get the image surface index and its current thickness
             lde = self.oss.LDE
             image_surf_idx = lde.NumberOfSurfaces - 1
-            # The surface before image is the last one with thickness to image
             last_surf_idx = image_surf_idx - 1
             original_thickness = _extract_value(lde.GetSurfaceAt(last_surf_idx).Thickness, 0.0)
             if original_thickness == 0.0:
